@@ -28,7 +28,7 @@ jobs:
         fi
         echo "PROMPTER_VERSION=$VERSION" >> $GITHUB_ENV
         echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
-        echo "Final filename: FRZZ-reaper-web-prompter-$VERSION-$OS_NAME"
+        echo "Version extracted: $VERSION"
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -36,35 +36,81 @@ jobs:
         python-version: '3.11'
 
     - name: Install PyInstaller
-      run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
+      run: python -m pip install --upgrade pip && pip install pyinstaller
 
-    - name: Build for Windows
+    # --- СБОРКА ДЛЯ WINDOWS (без изменений) ---
+    - name: Build Windows Executable
       if: matrix.os == 'windows-latest'
       run: |
         pyinstaller `
           --name "FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" `
-          --onefile `
-          --clean `
+          --onefile --clean `
           --add-data "Scripts;Scripts" `
           --add-data "reaper_www_root;reaper_www_root" `
           installer.py
 
-    - name: Build for macOS
+    # --- 👇 ОБНОВЛЕННЫЙ ПРОЦЕСС СБОРКИ ДЛЯ MACOS 👇 ---
+    - name: Build macOS Core Executable
       if: matrix.os == 'macos-latest'
       run: |
+        # Шаг 1: Собираем основной скрипт как КОНСОЛЬНОЕ приложение с временным именем
         pyinstaller \
-          --name "FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" \
-          --onefile \
-          --clean \
+          --name "installer_logic" \
+          --onefile --console \
           --add-data "Scripts:Scripts" \
           --add-data "reaper_www_root:reaper_www_root" \
           installer.py
 
+    - name: Create macOS .app Bundle
+      if: matrix.os == 'macos-latest'
+      run: |
+        # Шаг 2: Создаем структуру .app и упаковываем в нее наш исполняемый файл
+        APP_NAME="FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}.app"
+        
+        echo "Creating .app structure for $APP_NAME"
+        mkdir -p "$APP_NAME/Contents/MacOS"
+        mkdir -p "$APP_NAME/Contents/Resources"
+        
+        echo "Moving Python executable into the bundle"
+        mv "dist/installer_logic" "$APP_NAME/Contents/MacOS/"
+        
+        echo "Creating launcher script"
+        cat << EOF > "$APP_NAME/Contents/MacOS/launcher"
+        #!/bin/bash
+        DIR=\$(dirname "\$0")
+        open -a Terminal "\$DIR/installer_logic"
+        EOF
+        chmod +x "$APP_NAME/Contents/MacOS/launcher"
+        
+        echo "Creating Info.plist"
+        cat << EOF > "$APP_NAME/Contents/Info.plist"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleExecutable</key>
+            <string>launcher</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.frzz.reaperwebprompter.installer</string>
+            <key>CFBundleName</key>
+            <string>FRZZ Reaper Web Prompter Installer</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ env.PROMPTER_VERSION }}</string>
+        </dict>
+        </plist>
+        EOF
+        
+        echo "Compressing .app into a .zip for upload"
+        zip -r "${APP_NAME}.zip" "$APP_NAME"
+
+    # --- 👇 ОБНОВЛЕННЫЙ ШАГ ЗАГРУЗКИ АРТЕФАКТОВ 👇 ---
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        # Имя артефакта теперь уникально для каждой ОС
-        name: installer-build-${{ matrix.os }}
-        path: dist/
+        name: installer-${{ matrix.os }}
+        # Для Windows загружаем .exe, для macOS - .zip архив с .app внутри
+        path: |
+          dist/*.exe
+          *.app.zip
