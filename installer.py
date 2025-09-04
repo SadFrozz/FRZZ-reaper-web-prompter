@@ -16,15 +16,13 @@ ACTION_LINE_TEMPLATE = 'SCR 4 0 {id} "Custom: Web Prompter Backend" {script}'
 # --- ОСНОВНЫЕ ФУНКЦИИ ---
 
 def get_base_path():
-    """ Возвращает правильный базовый путь, как для скрипта, так и для скомпилированного файла. """
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
     else:
         return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 def get_prompter_title():
-    """ Считывает название и версию из <title> тега в prompter.html. """
-    default_title = "ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ МОНИТОР для REAPER" # <-- Исправлено
+    default_title = "ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ МОНИТОР для REAPER" #
     try:
         html_path = os.path.join(get_base_path(), 'reaper_www_root', 'prompter.html')
         if not os.path.exists(html_path): return default_title
@@ -35,7 +33,6 @@ def get_prompter_title():
         return default_title
 
 def copy_script_files(resource_path):
-    """ Копирует содержимое папок Scripts и reaper_www_root в папку ресурсов REAPER. """
     print("\n---\n🔎 Шаг 0: Копирование файлов...")
     try:
         base_dir = get_base_path()
@@ -56,7 +53,6 @@ def copy_script_files(resource_path):
         print(f"⛔️ Произошла критическая ошибка при копировании файлов: {e}"); return False
 
 def get_reaper_resource_path():
-    """ Определяет путь к ресурсам REAPER, предлагая пользователю выбор. """
     system = platform.system()
     default_path = ""
     if system == "Windows": default_path = os.path.join(os.environ['APPDATA'], 'REAPER')
@@ -79,7 +75,6 @@ def get_reaper_resource_path():
             print("⛔️ Указанный путь некорректен или в нем отсутствует файл 'reaper.ini'. Попробуйте снова.")
 
 def process_keymap_file(resource_path):
-    """ Проверяет и исправляет/добавляет строку действия в reaper-kb.ini. """
     keymap_path = os.path.join(resource_path, 'reaper-kb.ini')
     action_line = ACTION_LINE_TEMPLATE.format(id=ACTION_ID, script=SCRIPT_NAME)
     print("\n---\n🔎 Шаг 1: Проверка файла горячих клавиш (reaper-kb.ini)...")
@@ -108,7 +103,6 @@ def process_keymap_file(resource_path):
         print(f"⛔️ Произошла ошибка при работе с файлом reaper-kb.ini: {e}")
 
 def get_local_ip():
-    """ Возвращает локальный IP-адрес компьютера. """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try: s.connect(('10.255.255.255', 1)); IP = s.getsockname()[0]
     except Exception: IP = '127.0.0.1'
@@ -116,7 +110,6 @@ def get_local_ip():
     return IP
 
 def process_web_interface_settings(resource_path):
-    """ Проверяет и настраивает reaper.ini: csurfrate и веб-интерфейс. """
     reaper_ini_path = os.path.join(resource_path, 'reaper.ini')
     print("\n---\n🔎 Шаг 2: Проверка настроек REAPER (reaper.ini)...")
     if not os.path.exists(reaper_ini_path):
@@ -183,7 +176,6 @@ def process_web_interface_settings(resource_path):
     except Exception as e: print(f"⛔️ Произошла ошибка при работе с файлом reaper.ini: {e}")
 
 def prompt_to_close(timeout=30):
-    """ Отображает сообщение о завершении и ждет ввода пользователя с тайм-аутом. """
     def wait_for_input():
         input(); os._exit(0)
     input_thread = threading.Thread(target=wait_for_input, daemon=True)
