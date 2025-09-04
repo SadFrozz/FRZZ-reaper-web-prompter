@@ -4,8 +4,8 @@ import re
 import sys
 import socket
 import shutil
-import time       # <-- Добавлен импорт
-import threading  # <-- Добавлен импорт
+import time
+import threading
 
 # --- КОНФИГУРАЦИЯ ---
 ACTION_ID = "FRZZ_WEB_NOTES_READER"
@@ -24,7 +24,7 @@ def get_base_path():
 
 def get_prompter_title():
     """ Считывает название и версию из <title> тега в prompter.html. """
-    default_title = "Телесуфлер для REAPER"
+    default_title = "ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ МОНИТОР для REAPER" # <-- Исправлено
     try:
         html_path = os.path.join(get_base_path(), 'reaper_www_root', 'prompter.html')
         if not os.path.exists(html_path): return default_title
@@ -43,12 +43,15 @@ def copy_script_files(resource_path):
         source_www_dir = os.path.join(base_dir, 'reaper_www_root')
         if not os.path.isdir(source_scripts_dir) or not os.path.isdir(source_www_dir):
             print(f"⛔️ Ошибка: Не найдены папки Scripts или reaper_www_root рядом с установщиком!"); return False
-        dest_scripts_dir = os.path.join(resource_path, 'Scripts'); dest_www_dir = os.path.join(resource_path, 'wwwroot')
+        
+        dest_scripts_dir = os.path.join(resource_path, 'Scripts')
+        dest_www_dir = os.path.join(resource_path, 'reaper_www_root') # <-- ИСПРАВЛЕН ПУТЬ
+
         print(f"Копирую содержимое из '{source_scripts_dir}' в '{dest_scripts_dir}'...")
         shutil.copytree(source_scripts_dir, dest_scripts_dir, dirs_exist_ok=True)
         print(f"Копирую содержимое из '{source_www_dir}' в '{dest_www_dir}'...")
         shutil.copytree(source_www_dir, dest_www_dir, dirs_exist_ok=True)
-        print("✅ Файлы телесуфлера успешно скопированы."); return True
+        print("✅ Файлы успешно скопированы."); return True
     except Exception as e:
         print(f"⛔️ Произошла критическая ошибка при копировании файлов: {e}"); return False
 
@@ -93,11 +96,11 @@ def process_keymap_file(resource_path):
         if found_by_filename_idx != -1:
             if ACTION_ID not in lines[found_by_filename_idx]:
                 print(f"Найден скрипт '{SCRIPT_NAME}', но у него некорректный ID. Исправляю..."); lines[found_by_filename_idx] = action_line + '\n'; modified = True
-            else: print("✅ Действие для телесуфлера уже корректно прописано.")
+            else: print("✅ Действие для текстового монитора уже корректно прописано.") # <-- Исправлено
         elif found_by_id_idx != -1:
             print(f"Найден ID '{ACTION_ID}' со старым именем скрипта. Обновляю..."); lines[found_by_id_idx] = action_line + '\n'; modified = True
         else:
-            print(f"Действие для телесуфлера не найдено. Добавляю новую запись..."); lines.append(action_line + '\n'); modified = True
+            print(f"Действие для текстового монитора не найдено. Добавляю новую запись..."); lines.append(action_line + '\n'); modified = True # <-- Исправлено
         if modified:
             with open(keymap_path, 'w', encoding='utf-8') as f: f.writelines(lines)
             print("✅ Файл reaper-kb.ini успешно обновлен.")
@@ -140,7 +143,7 @@ def process_web_interface_settings(resource_path):
         search_pattern = f"'{WEB_INTERFACE_FILENAME}'"
         for line in lines:
             if line.strip().startswith('csurf_') and search_pattern in line:
-                print("✅ Веб-интерфейс для телесуфлера уже настроен."); prompter_interface_exists = True; break
+                print("✅ Веб-интерфейс для текстового монитора уже настроен."); prompter_interface_exists = True; break # <-- Исправлено
         if not prompter_interface_exists:
             print(f"Веб-сервер, использующий '{WEB_INTERFACE_FILENAME}', не найден.")
             choice = input("Хотите создать его сейчас? (да/нет): ").lower()
@@ -171,7 +174,7 @@ def process_web_interface_settings(resource_path):
                         print("⚠️ Секция [REAPER] не найдена. Добавляю настройки в конец файла.")
                         if not count_found: lines.append(f"csurf_cnt={new_count}\n"); lines.append(new_csurf_line)
                 local_ip = get_local_ip()
-                print("\n" + "="*60); print("✅ Веб-сервер успешно настроен!"); print("Интерактивный текстовый монитор будет доступен по адресу:"); print(f"  -> http://localhost:{port}"); print(f"  -> http://{local_ip}:{port} (с любого устройства в вашей локальной сети)"); print("Эта функция будет работать, пока запущен REAPER."); print("="*60)
+                print("\n" + "="*60); print("✅ Веб-сервер успешно настроен!"); print("ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ МОНИТОР будет доступен по адресу:"); print(f"  -> http://localhost:{port}"); print(f"  -> http://{local_ip}:{port} (с любого устройства в вашей локальной сети)"); print("Эта функция будет работать, пока запущен REAPER."); print("="*60)
             else: print("Отменено. Настройка веб-сервера пропущена.")
         if lines != original_lines:
             print("\nСохраняю изменения в reaper.ini...")
@@ -179,32 +182,18 @@ def process_web_interface_settings(resource_path):
             print("✅ Файл reaper.ini успешно обновлен.")
     except Exception as e: print(f"⛔️ Произошла ошибка при работе с файлом reaper.ini: {e}")
 
-# --- 👇 НОВАЯ ФУНКЦИЯ 👇 ---
 def prompt_to_close(timeout=30):
-    """
-    Отображает сообщение о завершении и ждет ввода пользователя с тайм-аутом.
-    """
+    """ Отображает сообщение о завершении и ждет ввода пользователя с тайм-аутом. """
     def wait_for_input():
-        # Эта функция будет работать в отдельном потоке и ждать, пока пользователь нажмет Enter
-        input() 
-        # _exit(0) немедленно и "жестко" завершает программу, что здесь допустимо
-        os._exit(0)
-
-    # Создаем и запускаем "демон-поток". Он автоматически закроется вместе с основной программой
+        input(); os._exit(0)
     input_thread = threading.Thread(target=wait_for_input, daemon=True)
     input_thread.start()
-
     print("\n🎉 Настройка завершена! Перезапустите REAPER, чтобы все изменения вступили в силу.")
     print("   Для закрытия окна нажмите Enter...")
-
-    # В основном потоке запускаем обратный отсчет
     for i in range(timeout, 0, -1):
-        # \r - каретка в начало строки, end='' - не переходить на новую строку
         sys.stdout.write(f"\r   ...или окно закроется автоматически через {i:02d} секунд. ")
-        sys.stdout.flush() # Принудительно выводим буфер в консоль
-        time.sleep(1)
-    
-    print("\r   ...время вышло.                                              ") # Очищаем строку
+        sys.stdout.flush(); time.sleep(1)
+    print("\r   ...время вышло.                                              ")
 
 # --- ТОЧКА ВХОДА В СКРИПТ ---
 if __name__ == "__main__":
@@ -216,14 +205,9 @@ if __name__ == "__main__":
     if resource_folder:
         if not copy_script_files(resource_folder):
              sys.exit("Установка прервана из-за ошибки копирования файлов.")
-
         process_keymap_file(resource_folder)
         process_web_interface_settings(resource_folder)
-        
-        # --- 👇 ИЗМЕНЕННЫЙ БЛОК 👇 ---
-        # Старое сообщение о завершении теперь находится внутри новой функции
         prompt_to_close(30)
     else:
         print("Не удалось определить папку ресурсов REAPER. Установка прервана.")
-        # Добавляем паузу и здесь, на случай если папка не найдена
         input("\nНажмите Enter для выхода.")
