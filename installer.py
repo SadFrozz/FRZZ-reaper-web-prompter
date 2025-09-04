@@ -59,7 +59,7 @@ def get_reaper_resource_path():
     elif system == "Darwin": default_path = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'REAPER')
     if os.path.isdir(default_path) and os.path.exists(os.path.join(default_path, 'reaper.ini')):
         print(f"✅ Папка конфигурации REAPER найдена: {default_path}")
-        print("\n   => Нажмите любую клавишу для продолжения с этой папкой.")
+        print("\n   => Нажмите Enter для продолжения с этой папкой.")
         choice = input("   => Или нажмите '1', чтобы указать другой путь: ")
         if choice != '1':
             print("Стандартный путь подтвержден."); return default_path
