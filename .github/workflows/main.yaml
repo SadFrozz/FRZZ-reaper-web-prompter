@@ -1,0 +1,93 @@
+# Название всего процесса (Workflow)
+name: Build Python Installer
+
+# Триггер для запуска: срабатывать при любой отправке (push) кода в репозиторий
+on: [push]
+
+jobs:
+  build:
+    # Запускаем сборку параллельно на двух операционных системах
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    # Указываем, какую виртуальную машину использовать для текущей задачи
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    # Шаг 1: Скачиваем код из вашего репозитория на виртуальную машину
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # --- 👇 НОВЫЙ ШАГ 👇 ---
+    # Шаг 2: Извлекаем версию из HTML и задаем переменные
+    - name: Extract Version and Set Env Vars
+      id: extract_version
+      shell: bash
+      run: |
+        # Извлекаем содержимое тега <title>, например "My Prompter v1.2.3"
+        TITLE=$(sed -n 's|.*<title>\(.*\)</title>.*|\1|p' reaper_www_root/prompter.html | xargs)
+        
+        # Извлекаем из заголовка только версию, например "v1.2.3"
+        # Если версия не найдена, используем "unknown"
+        VERSION=$(echo "$TITLE" | grep -o 'v[0-9.]*' || echo "unknown")
+        
+        # Определяем короткое имя ОС
+        OS_NAME=""
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          OS_NAME="win"
+        elif [ "${{ runner.os }}" == "macOS" ]; then
+          OS_NAME="mac"
+        fi
+        
+        # Сохраняем переменные для использования в последующих шагах
+        echo "PROMPTER_VERSION=$VERSION" >> $GITHUB_ENV
+        echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
+        echo "Final filename: FRZZ-reaper-web-prompter-$VERSION-$OS_NAME"
+
+
+    # Шаг 3: Устанавливаем нужную версию Python
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # Шаг 4: Устанавливаем PyInstaller
+    - name: Install PyInstaller
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+
+    # --- 👇 ИЗМЕНЕННЫЙ ШАГ 👇 ---
+    # Шаг 5: Собираем .exe для Windows с новым именем
+    - name: Build for Windows
+      if: matrix.os == 'windows-latest'
+      run: |
+        pyinstaller `
+          --name "FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" `
+          --onefile `
+          --clean `
+          --add-data "Scripts;Scripts" `
+          --add-data "reaper_www_root;reaper_www_root" `
+          installer.py
+
+    # --- 👇 ИЗМЕНЕННЫЙ ШАГ 👇 ---
+    # Шаг 6: Собираем исполняемый файл для macOS с новым именем
+    - name: Build for macOS
+      if: matrix.os == 'macos-latest'
+      run: |
+        pyinstaller \
+          --name "FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" \
+          --onefile \
+          --clean \
+          --add-data "Scripts:Scripts" \
+          --add-data "reaper_www_root:reaper_www_root" \
+          installer.py
+
+    # Шаг 7: Загружаем результат как "артефакт" сборки
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        # Артефакты будут названы, например, "installer-builds"
+        name: installer-builds
+        path: dist/
