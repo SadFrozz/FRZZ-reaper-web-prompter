@@ -46,6 +46,7 @@ jobs:
           --onefile --clean `
           --add-data "Scripts;Scripts" `
           --add-data "reaper_www_root;reaper_www_root" `
+          --add-data "UserPlugins;UserPlugins" `
           installer.py
 
     - name: Build macOS .command Executable
@@ -57,6 +58,7 @@ jobs:
           --console \
           --add-data "Scripts:Scripts" \
           --add-data "reaper_www_root:reaper_www_root" \
+          --add-data "UserPlugins:UserPlugins" \
           installer.py
         echo "Renaming executable to .command"
         mv "dist/FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" "dist/FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}.command"

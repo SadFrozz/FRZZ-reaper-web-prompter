@@ -146,7 +146,8 @@ $(document).ready(function() {
         colorInputs.spectrum({
             type: "component", showPaletteOnly: true, togglePaletteOnly: true, hideAfterPaletteSelect: true,
             showInput: true, showInitial: true, allowEmpty: false, showAlpha: true, preferredFormat: "rgba",
-            change: function(color) { if (color) { $(this).val(color.toRgbString()); applySettings(); } }
+            // Defer applying changes until user presses Save; only update input value.
+            change: function(color) { if (color) { $(this).val(color.toRgbString()); } }
         });
     }
 
@@ -164,12 +165,64 @@ $(document).ready(function() {
                 } else { tempSettings[key] = settings[key] || defaultSettings[key]; }
             });
 
+            // Preserve last non-empty keywords while user toggles other options (live preview phase)
+            if (!tempSettings.autoFindKeywords || !tempSettings.autoFindKeywords.trim()) {
+                tempSettings.autoFindKeywords = settings.autoFindKeywords || defaultSettings.autoFindKeywords;
+            }
+
+            // Normalize navigation panel position from checkbox (backward compatibility)
+            const navPosCheckbox = $('#navigation-panel-position');
+            if (navPosCheckbox.length) {
+                tempSettings.navigationPanelPosition = navPosCheckbox.is(':checked') ? 'top' : 'bottom';
+            }
+
+            // Map theme-toggle checkbox to theme (light/dark)
+            const themeToggle = $('#theme-toggle');
+            if (themeToggle.length) {
+                tempSettings.theme = themeToggle.is(':checked') ? 'light' : 'dark';
+            } else if (!tempSettings.theme) { tempSettings.theme = 'dark'; }
+
+            // Live preview for title mode (previously only applied when project name arrived)
+            (function previewTitleMode(ts) {
+                $('body').removeClass('title-hidden');
+                if (ts.titleMode === 'none') { $('body').addClass('title-hidden'); }
+                else if (ts.titleMode === 'custom_text') { mainTitle.text(ts.customTitleText || ''); }
+                else if (ts.titleMode === 'project_name') { const displayName = currentProjectName ? `Текущий проект: ${currentProjectName}` : 'Загрузка имени проекта...'; mainTitle.text(displayName); }
+                else if (ts.titleMode === 'placeholder') { mainTitle.text('Интерактивный текстовый монитор'); }
+            })(tempSettings);
+
             $('body').toggleClass('light-theme', tempSettings.theme === 'light');
             navigationPanel.toggleClass('top-panel', tempSettings.navigationPanelPosition === 'top');
             $('body').toggleClass('columns-swapped', tempSettings.swapColumns);
             $('body').toggleClass('hide-empty-role-column', tempSettings.autoHideEmptyColumn);
             textDisplay.css({'font-family': tempSettings.fontFamily});
-            $('html').css('font-size', tempSettings.uiScale + '%');
+
+            // --- UI SCALE CLAMP (mobile / narrow screens) ---
+            // Мы хотим избежать ситуации, когда увеличение масштаба приводит к горизонтальному выходу панели за экран.
+            // Алгоритм: применяем желаемый масштаб, если возникает overflow по ширине - понижаем шагами (5%) пока не войдём или не достигнем MIN.
+            (function applyClampedScale(desired){
+                const MIN = 50; // минимально допустимый
+                const STEP = 5; // шаг уменьшения при переполнении
+                let applied = Math.max(MIN, desired);
+                const isNarrow = window.innerWidth < 900; // условное мобильное / узкое устройство
+                if (!isNarrow) { $('html').css('font-size', applied + '%'); $('body').removeClass('ui-scale-clamped'); return; }
+                $('html').css('font-size', applied + '%');
+                let guard = 0;
+                while (document.documentElement.scrollWidth > window.innerWidth && applied > MIN && guard < 100) {
+                    applied -= STEP;
+                    $('html').css('font-size', applied + '%');
+                    guard++;
+                }
+                if (applied !== desired) {
+                    $('body').addClass('ui-scale-clamped');
+                    // Отображаем фактическое значение если UI уже инициализирован
+                    if ($('#ui-scale-value').length) {
+                        $('#ui-scale-value').text(applied + '% (огр.)');
+                    }
+                } else {
+                    $('body').removeClass('ui-scale-clamped');
+                }
+            })(tempSettings.uiScale);
             
             let settingsStyle = $('#dynamic-settings-styles');
             if (settingsStyle.length === 0) { settingsStyle = $('<style id="dynamic-settings-styles"></style>').appendTo('head'); }
@@ -231,8 +284,26 @@ $(document).ready(function() {
             }
         });
 
+        // Reflect navigation panel position into checkbox
+        const navPosCheckbox = $('#navigation-panel-position');
+        if (navPosCheckbox.length) {
+            navPosCheckbox.prop('checked', s.navigationPanelPosition === 'top');
+        }
+
+        // Reflect theme into theme-toggle checkbox
+        const themeToggle = $('#theme-toggle');
+        if (themeToggle.length) {
+            themeToggle.prop('checked', s.theme === 'light');
+        }
+
         customTitleWrapper.toggle(s.titleMode === 'custom_text');
         autoFindKeywordsWrapper.toggle(s.autoFindTrack);
+        $('#scroll-speed-wrapper').toggle(s.autoScroll);
+        // Explicitly set value for auto-find keywords input (was missing, causing empty overwrite on save)
+        const autoFindKeywordsInput = $('#auto-find-keywords');
+        if (autoFindKeywordsInput.length) {
+            autoFindKeywordsInput.val(s.autoFindKeywords || defaultSettings.autoFindKeywords);
+        }
         roleOptionsWrapper.toggle(s.processRoles);
         checkerboardOptionsWrapper.toggle(s.checkerboardEnabled);
         highlightClickOptionsWrapper.toggle(s.highlightClickEnabled);
@@ -252,12 +323,15 @@ $(document).ready(function() {
         try {
             const savedSettings = localStorage.getItem('teleprompterSettings');
             settings = savedSettings ? { ...defaultSettings, ...JSON.parse(savedSettings) } : { ...defaultSettings };
+            console.debug('[Prompter][loadSettings] Loaded settings:', JSON.parse(JSON.stringify(settings)));
         } catch(e) {
             settings = { ...defaultSettings };
+            console.warn('[Prompter][loadSettings] Fallback to defaults due to error:', e);
         } finally {
             initializeColorPickers();
             updateUIFromSettings();
             applySettings();
+            console.debug('[Prompter][loadSettings] After applySettings snapshot:', JSON.parse(JSON.stringify(settings)));
         }
     }
 
@@ -274,9 +348,27 @@ $(document).ready(function() {
                     else { const color = el.spectrum("get"); if (color && color.toRgbString) { settingsToSave[key] = color.toRgbString(); } else { settingsToSave[key] = el.val(); } }
                 } else { settingsToSave[key] = settings[key]; }
             });
+
+            // Guard: do not allow empty autoFindKeywords to wipe previous value
+            if (!settingsToSave.autoFindKeywords || !settingsToSave.autoFindKeywords.trim()) {
+                settingsToSave.autoFindKeywords = settings.autoFindKeywords || defaultSettings.autoFindKeywords;
+            }
+
+            // Persist navigation panel position from checkbox
+            const navPosCheckbox = $('#navigation-panel-position');
+            if (navPosCheckbox.length) {
+                settingsToSave.navigationPanelPosition = navPosCheckbox.is(':checked') ? 'top' : 'bottom';
+            }
+
+            // Persist theme from theme-toggle
+            const themeToggle = $('#theme-toggle');
+            if (themeToggle.length) {
+                settingsToSave.theme = themeToggle.is(':checked') ? 'light' : 'dark';
+            }
             
             settings = settingsToSave;
             localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
+            console.debug('[Prompter][saveSettings] Saved settings:', JSON.parse(JSON.stringify(settings)));
             applySettings();
             if (subtitleData.length > 0) handleTextResponse(subtitleData); // Перерисовываем текст
             
@@ -299,6 +391,7 @@ $(document).ready(function() {
             if (confirm("Вы уверены, что хотите сбросить все настройки к значениям по умолчанию? Это действие нельзя будет отменить.")) {
                 settings = { ...defaultSettings };
                 localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
+                console.debug('[Prompter][resetSettings] Reset to defaults');
                 
                 updateUIFromSettings();
                 applySettings();
@@ -430,6 +523,7 @@ $(document).ready(function() {
                     if (settings.roleDisplayStyle !== 'inline') { text = text.substring(roleMatch[0].length); }
                 }
 
+                // Progress container is always present (space reserved) to avoid layout shift when highlighting current line
                 const lineHtml = `<div class="subtitle-container" data-index="${index}"><div class="role-area"><div class="subtitle-color-swatch"></div><div class="subtitle-role">${role}</div><div class="subtitle-separator"></div></div><div class="subtitle-time">${formatTimecode(line.start_time)}</div><div class="subtitle-content"><div class="subtitle-text"></div><div class="subtitle-progress-container"><div class="subtitle-progress-bar"></div></div></div></div>`;
                 const lineElement = $(lineHtml);
                 const roleElement = lineElement.find('.subtitle-role');
@@ -527,13 +621,14 @@ $(document).ready(function() {
     saveSettingsButton.on('click', saveSettings);
     resetSettingsButton.on('click', resetSettings);
 
-    // ++ ИСПРАВЛЕНО: Возвращены все необходимые обработчики ++
-    // Общий обработчик для применения стилей при любом изменении
-    $('.settings-body').find('input, select').on('change input', applySettings);
+    // Live preview отключён: изменения применяются только по кнопке Сохранить / Сбросить.
+    // Если нужно вернуть мгновенное применение, раскомментировать строку ниже.
+    // $('.settings-body').find('input, select').on('change input', applySettings);
 
     // Обработчики для обновления UI (появление/скрытие блоков)
     titleModeSelect.on('change', function() { customTitleWrapper.toggle($(this).val() === 'custom_text'); });
     autoFindTrackCheckbox.on('change', function() { autoFindKeywordsWrapper.toggle($(this).is(':checked')); });
+    autoScrollCheckbox.on('change', function() { $('#scroll-speed-wrapper').toggle($(this).is(':checked')); });
     processRolesCheckbox.on('change', function() { roleOptionsWrapper.toggle($(this).is(':checked')); updateScaleWrapperVisibility(); });
     checkerboardEnabledCheckbox.on('change', function() { checkerboardOptionsWrapper.toggle($(this).is(':checked')); });
     highlightCurrentRoleEnabledCheckbox.on('change', function() { highlightRoleColorWrapper.toggle($(this).is(':checked')); });
@@ -548,15 +643,23 @@ $(document).ready(function() {
     // Обработчики для более сложных действий
     enableColorSwatchesCheckbox.on('change', updateScaleWrapperVisibility);
     roleDisplayStyleSelect.on('change', updateScaleWrapperVisibility);
-    roleFontColorEnabledCheckbox.on('change', () => { if (subtitleData.length > 0) handleTextResponse(subtitleData); });
+    // Отложенное применение: перестраивать разметку ролей будем только после сохранения.
+    // roleFontColorEnabledCheckbox.on('change', () => { if (subtitleData.length > 0) handleTextResponse(subtitleData); });
     
     transportTimecode.on('click', function() {
-        if (currentLineIndex !== -1 && subtitleElements[currentLineIndex]) {
-            const currentElement = subtitleElements[currentLineIndex];
-            currentElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Always allow manual centering regardless of autoScroll flag
+        let targetIndex = currentLineIndex;
+        if (targetIndex === -1 && subtitleData.length > 0) {
+            // Find first line whose start_time is >= latestTimecode, fallback to last
+            targetIndex = subtitleData.findIndex(l => l.start_time >= latestTimecode);
+            if (targetIndex === -1) targetIndex = subtitleData.length - 1;
+        }
+        if (targetIndex !== -1 && subtitleElements[targetIndex]) {
+            const targetElement = subtitleElements[targetIndex];
+            targetElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
             if (settings.highlightClickEnabled) {
-                currentElement.addClass('click-highlight');
-                setTimeout(() => currentElement.removeClass('click-highlight'), settings.highlightClickDuration);
+                targetElement.addClass('click-highlight');
+                setTimeout(() => targetElement.removeClass('click-highlight'), settings.highlightClickDuration);
             }
         }
     });
