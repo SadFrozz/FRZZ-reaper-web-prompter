@@ -141,8 +141,14 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
     #transport-status { font-size: 1.9em; }
 }
 
+/* Pre-wrap tightening: slightly reduce bases before full wrap to prevent overflow jitter */
+@media (max-width: 1350px) and (min-width: 1251px) {
+    .controls-left, .controls-right { flex-basis: 16rem; }
+    #transport-status { font-size: 2em; }
+}
+
 /* Tablet-ish width: wrap into multiple rows */
-@media (max-width: 1150px) {
+@media (max-width: 1250px) {
     .panel-controls { flex-wrap: wrap; row-gap: 0.75rem; }
     .controls-left, .controls-right, #transport-status { flex-basis: 100%; }
     .controls-left { order: 1; }
