@@ -5,25 +5,39 @@ body {
     color: #eee;
     margin: 0;
     padding: 1rem;
+    /* Reserve space for mobile safe areas (iOS notch / Android gesture bar). JS may augment via inline style. */
+    padding-top: calc(1rem + env(safe-area-inset-top, 0px) + var(--rvw-safe-top-extra, 0px));
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
     overflow: hidden;
 }
 body.title-hidden h1 { display: none; }
-.container { display: flex; flex-direction: column; height: calc(100vh - 2rem); gap: 1rem; }
+.container { font-size: 0.75em; }
+.modal-content { font-size: 1.333333em; }
+.container { display: flex; flex-direction: column; height: calc(var(--rvw-vh, 100vh) - 2rem); gap: 1rem; }
 #navigation-panel { flex-shrink: 0; background-color: #2e2e2e; padding: 1rem; border-radius: 0.5rem; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.3); order: 100; display: flex; flex-direction: column; gap: 0.8rem; }
 #navigation-panel.top-panel { order: -1; }
 .panel-header { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 0.5rem; border-bottom: 1px solid #444; }
 h1 { margin: 0; flex-grow: 1; font-size: 2em; } 
 #status-indicator { color: #888; text-align: right; font-size: 1.5em; }
-.panel-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: nowrap; }
-.controls-left { display: flex; align-items: center; gap: 0.5rem; flex-basis: 18.75rem; }
-.controls-right { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; flex-basis: 18.75rem; }
+.panel-controls { display: flex; align-items: center; gap: 1rem; flex-wrap: nowrap; }
+/* Dynamic wrap mode: JS toggles .transport-wrapped when total width overflows.
+    Only the transport block moves to the next line; left/right groups stay on first line. */
+.panel-controls.transport-wrapped { flex-wrap: wrap; row-gap: 0.5rem; }
+/* When wrapped: left/right tighten, transport full width second line */
+.panel-controls.transport-wrapped .controls-left,
+.panel-controls.transport-wrapped .controls-right { flex-basis: auto; min-width: 0; flex-shrink: 1; }
+.panel-controls.transport-wrapped #transport-status { flex-basis: 100%; order: 3; justify-content: center; padding: 0; margin-top: 0.25rem; }
+.panel-controls.transport-wrapped .controls-left { order: 1; }
+.panel-controls.transport-wrapped .controls-right { order: 2; }
+.controls-left { display: flex; align-items: center; gap: 0.5rem; flex: 0 1 auto; min-width: 0; }
+.controls-right { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; flex: 0 1 auto; min-width: 0; margin-inline-start: auto; }
 #navigation-panel label, #navigation-panel select { font-size: 1.5em; }
 #track-selector { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 0.25rem; }
 #refresh-button, #settings-button, #save-settings-button { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
 #refresh-button:hover, #settings-button:hover, #save-settings-button:hover { background-color: #5a5a5a; }
 .icon-svg { width: 1.2em; height: 1.2em; fill: currentColor; }
-#transport-status { flex-grow: 1; display: flex; align-items: center; justify-content: center; gap: 0.5em; font-family: monospace; font-weight: bold; padding: 0 1em; transition: color 0.3s; font-size: 2.2em; }
+#transport-status { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 0.5em; font-family: monospace; font-weight: bold; padding: 0 1em; transition: color 0.3s; font-size: 2.2em; margin: auto; }
 #transport-icon-container { display: inline-block; width: 1.2em; height: 1.2em; }
 #transport-icon-container .icon-svg { display: none; }
 #transport-timecode { letter-spacing: 0.1rem; cursor: pointer; transition: color 0.2s; }
@@ -131,49 +145,23 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .light-theme .button-danger:hover { background-color: #dc3545; color: white; }
 
 /* ===================== Responsive Layout ===================== */
+/* NOTE: Removed all responsive font-size reductions. Font sizing is now solely controlled by user uiScale and base styles.
+         Below media queries retain ONLY structural adjustments (layout flow & scrolling) without touching font-size. */
 /* Basic safety: allow children to shrink properly */
 .panel-controls > * { min-width: 0; }
 
-/* Medium screens: start wrapping controls, shrink fonts a bit */
-@media (max-width: 1400px) {
-    #navigation-panel h1 { font-size: 1.7em; }
-    #navigation-panel #status-indicator { font-size: 1.2em; }
-    #transport-status { font-size: 1.9em; }
-}
-
-/* Pre-wrap tightening: slightly reduce bases before full wrap to prevent overflow jitter */
-@media (max-width: 1350px) and (min-width: 1251px) {
-    .controls-left, .controls-right { flex-basis: 16rem; }
-    #transport-status { font-size: 2em; }
-}
-
-/* Tablet-ish width: wrap into multiple rows */
-@media (max-width: 1250px) {
-    .panel-controls { flex-wrap: wrap; row-gap: 0.75rem; }
-    .controls-left, .controls-right, #transport-status { flex-basis: 100%; }
-    .controls-left { order: 1; }
-    #transport-status { order: 2; justify-content: flex-start; padding: 0; font-size: 1.8em; }
-    .controls-right { order: 3; justify-content: flex-start; }
-}
-
-/* Narrow: reduce font sizes further and compress paddings */
+/* Structural only: (former 900px breakpoint) retain padding tweak WITHOUT font-size changes */
 @media (max-width: 900px) {
     #navigation-panel { padding: 0.75rem 0.75rem 0.9rem; }
-    #navigation-panel h1 { font-size: 1.5em; }
-    #navigation-panel #status-indicator { font-size: 1.05em; }
-    #transport-status { font-size: 1.5em; }
-    #track-selector, #refresh-button, #settings-button { font-size: 1.2em; }
     #transport-timecode { letter-spacing: 0.05rem; }
 }
 
-/* Very narrow / compact mode: collapse header layout */
+/* Very narrow / compact mode: collapse header layout (no font-size adjustments) */
 @media (max-width: 680px) {
     .panel-header { flex-direction: column; align-items: flex-start; gap: 0.4rem; }
     #status-indicator { text-align: left; }
     .controls-left label { display: none; }
     #track-selector { max-width: 100%; }
-    #navigation-panel h1 { font-size: 1.3em; }
-    #transport-status { font-size: 1.35em; }
 }
 
 /* Extreme narrow: allow panel horizontal scrolling instead of overflow clipping */
@@ -192,5 +180,4 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
     .light-theme .panel-controls::-webkit-scrollbar-thumb { background: #bbb; }
     .light-theme .panel-controls::-webkit-scrollbar-thumb:hover { background: #999; }
 }
-
 /* ============================================================= */

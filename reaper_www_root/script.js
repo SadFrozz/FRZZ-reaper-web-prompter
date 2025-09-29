@@ -3,12 +3,14 @@ const defaultSettings = {
     fontSize: 2,
     lineHeight: 1.4,
     navigationPanelPosition: 'bottom',
-    frameRate: 30,
+    frameRate: 24,
     autoScroll: true,
     scrollSpeed: 60,
     theme: 'dark',
     lineSpacing: 50,
     fontFamily: "'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    // New base = 200 (represents 100% actual). Slider range 50..300 => 25%..150% relative to old base 100.
+    // Baseline logic remains: 200 == 100% visual. Default now 100 (i.e. 50% of previous default visual size).
     uiScale: 100,
     titleMode: 'placeholder',
     customTitleText: 'Мой суфлер',
@@ -164,6 +166,10 @@ $(document).ready(function() {
                     else { const color = el.spectrum("get"); if (color && color.toRgbString) { tempSettings[key] = color.toRgbString(); } else { tempSettings[key] = el.val(); } }
                 } else { tempSettings[key] = settings[key] || defaultSettings[key]; }
             });
+            // Sanitize highlightClickDuration
+            if (isNaN(tempSettings.highlightClickDuration) || tempSettings.highlightClickDuration <= 0 || tempSettings.highlightClickDuration > 60000) {
+                tempSettings.highlightClickDuration = settings.highlightClickDuration || defaultSettings.highlightClickDuration;
+            }
 
             // Preserve last non-empty keywords while user toggles other options (live preview phase)
             if (!tempSettings.autoFindKeywords || !tempSettings.autoFindKeywords.trim()) {
@@ -197,32 +203,12 @@ $(document).ready(function() {
             $('body').toggleClass('hide-empty-role-column', tempSettings.autoHideEmptyColumn);
             textDisplay.css({'font-family': tempSettings.fontFamily});
 
-            // --- UI SCALE CLAMP (mobile / narrow screens) ---
-            // Мы хотим избежать ситуации, когда увеличение масштаба приводит к горизонтальному выходу панели за экран.
-            // Алгоритм: применяем желаемый масштаб, если возникает overflow по ширине - понижаем шагами (5%) пока не войдём или не достигнем MIN.
-            (function applyClampedScale(desired){
-                const MIN = 50; // минимально допустимый
-                const STEP = 5; // шаг уменьшения при переполнении
-                let applied = Math.max(MIN, desired);
-                const isNarrow = window.innerWidth < 900; // условное мобильное / узкое устройство
-                if (!isNarrow) { $('html').css('font-size', applied + '%'); $('body').removeClass('ui-scale-clamped'); return; }
-                $('html').css('font-size', applied + '%');
-                let guard = 0;
-                while (document.documentElement.scrollWidth > window.innerWidth && applied > MIN && guard < 100) {
-                    applied -= STEP;
-                    $('html').css('font-size', applied + '%');
-                    guard++;
-                }
-                if (applied !== desired) {
-                    $('body').addClass('ui-scale-clamped');
-                    // Отображаем фактическое значение если UI уже инициализирован
-                    if ($('#ui-scale-value').length) {
-                        $('#ui-scale-value').text(applied + '% (огр.)');
-                    }
-                } else {
-                    $('body').removeClass('ui-scale-clamped');
-                }
-            })(tempSettings.uiScale);
+            // Apply UI scale: baseline 100 => 100% root. Additional 0.75 scaling will be applied via CSS on main container.
+            let rawScale = tempSettings.uiScale || 100;
+            rawScale = Math.min(300, Math.max(50, rawScale));
+            rawScale = Math.round((rawScale - 50)/25)*25 + 50; if(rawScale>300) rawScale=300;
+            const percent = rawScale; // direct mapping
+            $('html').css('font-size', percent + '%').removeClass('ui-scale-clamped');
             
             let settingsStyle = $('#dynamic-settings-styles');
             if (settingsStyle.length === 0) { settingsStyle = $('<style id="dynamic-settings-styles"></style>').appendTo('head'); }
@@ -244,6 +230,12 @@ $(document).ready(function() {
             }
             
             function generateHighlightRules(className, bgColor, highlightRoleEnabled, roleBgColor) {
+                if(!bgColor){
+                    // Fallback to defaultSettings mapping by class
+                    if(className==='current-line') bgColor = defaultSettings.highlightCurrentBg;
+                    else if(className==='pause-highlight') bgColor = defaultSettings.highlightPauseBg;
+                    else if(className==='click-highlight') bgColor = defaultSettings.highlightClickBg;
+                }
                 const mainTextColor = isColorLight(bgColor) ? '#000' : '#fff';
                 let rules = `
                     .${className} { background-color: ${bgColor} !important; }
@@ -262,6 +254,8 @@ $(document).ready(function() {
             styleText += `.subtitle-progress-bar { background-color: ${tempSettings.progressBarColor}; }`;
             
             settingsStyle.text(styleText);
+            // After applying font/UI scale, re-evaluate navigation panel wrapping
+            scheduleTransportWrapEvaluation();
         } catch (e) { console.error("Error in applySettings:", e); }
     }
 
@@ -279,6 +273,8 @@ $(document).ready(function() {
                             (Math.abs(curr - s[key]) < Math.abs(speedSteps[prev] - s[key]) ? index : prev), 0);
                         el.val(closestIndex);
                     } else { el.val(s[key]); }
+                } else if (el.is('input[type="number"]')) {
+                    el.val(s[key]);
                 } else if (el.spectrum) { el.spectrum("set", s[key]); }
                 else { el.val(s[key]); }
             }
@@ -313,26 +309,58 @@ $(document).ready(function() {
         const scrollValue = speedSteps[scrollIndex] || 60;
         scrollSpeedValue.text(scrollValue + '%');
         scrollSpeedCaption.text(getScrollSpeedCaption(scrollValue));
-        uiScaleValue.text(s.uiScale + '%');
+    // Display value as entered (no conversion) for user clarity
+    uiScaleValue.text(s.uiScale);
         lineSpacingValue.text(s.lineSpacing + '%');
         roleColumnScaleValue.text(s.roleColumnScale + '%');
         updateScaleWrapperVisibility();
     }
 
-    function loadSettings() {
+    async function loadSettings() {
+        // Attempt to read settings.json from REAPER resource web root.
+        // Rule: if file exists -> use it (ignore localStorage). If not -> defaults (optionally merge any localStorage overrides later if desired).
+        let fileSettings = null;
         try {
-            const savedSettings = localStorage.getItem('teleprompterSettings');
-            settings = savedSettings ? { ...defaultSettings, ...JSON.parse(savedSettings) } : { ...defaultSettings };
-            console.debug('[Prompter][loadSettings] Loaded settings:', JSON.parse(JSON.stringify(settings)));
-        } catch(e) {
-            settings = { ...defaultSettings };
-            console.warn('[Prompter][loadSettings] Fallback to defaults due to error:', e);
-        } finally {
-            initializeColorPickers();
-            updateUIFromSettings();
-            applySettings();
-            console.debug('[Prompter][loadSettings] After applySettings snapshot:', JSON.parse(JSON.stringify(settings)));
+            const resp = await fetch('settings.json?_ts=' + Date.now(), { cache: 'no-store' });
+            if (resp.ok) {
+                fileSettings = await resp.json();
+                console.debug('[Prompter][loadSettings] Loaded settings.json');
+            } else {
+                console.debug('[Prompter][loadSettings] settings.json not found (status', resp.status, ') using defaults');
+            }
+        } catch(fetchErr) {
+            console.debug('[Prompter][loadSettings] settings.json fetch error, using defaults:', fetchErr);
         }
+        try {
+            if (fileSettings) {
+                settings = { ...defaultSettings, ...fileSettings };
+            } else {
+                // fallback purely to defaults (do NOT pull stale localStorage if file missing per current spec)
+                settings = { ...defaultSettings };
+            }
+            // Migration: previous stored values may have baseline misunderstanding.
+            // If value still reflects legacy domain (<=150 interpreted as old 100-base wanting doubling) AND > default.
+                if (settings.uiScale > 150) {
+                    settings.uiScale = Math.round(settings.uiScale / 2);
+            }
+                // Sanitize click highlight duration
+                if (typeof settings.highlightClickDuration !== 'number' || settings.highlightClickDuration <= 0 || settings.highlightClickDuration > 60000) {
+                    settings.highlightClickDuration = defaultSettings.highlightClickDuration;
+                }
+            // Enforce new bounds & snap
+            settings.uiScale = Math.min(300, Math.max(50, settings.uiScale));
+            settings.uiScale = Math.round((settings.uiScale - 50)/25)*25 + 50;
+            if (settings.uiScale > 300) settings.uiScale = 300;
+        } catch(e) {
+            console.warn('[Prompter][loadSettings] Error during parse/migration, reverting to defaults:', e);
+            settings = { ...defaultSettings };
+        }
+        // Reflect slider attributes
+    $('#ui-scale').attr({ min:50, max:300, step:25 });
+    initializeColorPickers();
+        updateUIFromSettings();
+        applySettings();
+        console.debug('[Prompter][loadSettings] Effective settings:', JSON.parse(JSON.stringify(settings)));
     }
 
     function saveSettings() {
@@ -348,6 +376,9 @@ $(document).ready(function() {
                     else { const color = el.spectrum("get"); if (color && color.toRgbString) { settingsToSave[key] = color.toRgbString(); } else { settingsToSave[key] = el.val(); } }
                 } else { settingsToSave[key] = settings[key]; }
             });
+            if (isNaN(settingsToSave.highlightClickDuration) || settingsToSave.highlightClickDuration <= 0 || settingsToSave.highlightClickDuration > 60000) {
+                settingsToSave.highlightClickDuration = defaultSettings.highlightClickDuration;
+            }
 
             // Guard: do not allow empty autoFindKeywords to wipe previous value
             if (!settingsToSave.autoFindKeywords || !settingsToSave.autoFindKeywords.trim()) {
@@ -419,6 +450,7 @@ $(document).ready(function() {
             getProjectName();
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
+            evaluateTransportWrap();
         } catch(e) { console.error("Error in initialize:", e); }
     }
 
@@ -659,7 +691,10 @@ $(document).ready(function() {
             targetElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
             if (settings.highlightClickEnabled) {
                 targetElement.addClass('click-highlight');
-                setTimeout(() => targetElement.removeClass('click-highlight'), settings.highlightClickDuration);
+                const dur = (typeof settings.highlightClickDuration === 'number' && settings.highlightClickDuration > 0 && settings.highlightClickDuration <= 60000)
+                    ? settings.highlightClickDuration
+                    : defaultSettings.highlightClickDuration;
+                setTimeout(() => targetElement.removeClass('click-highlight'), dur);
             }
         }
     });
@@ -678,6 +713,94 @@ $(document).ready(function() {
     });
     
     // --- ЗАПУСК ---
-    loadSettings();
-    initialize();
+    // Async init chain: load settings first, then initialize engine.
+    loadSettings().then(() => {
+        initialize();
+    });
+    // Dynamic viewport & safe-area handling (Android/iOS address bar, gesture insets)
+    (function setupViewportMetrics(){
+        const root = document.documentElement;
+        function updateViewportMetrics(){
+            try {
+                const vv = window.visualViewport;
+                const visibleHeight = vv ? vv.height : window.innerHeight; // actual visible portion
+                // Store full visible height as custom var (consumed by .container height calc)
+                root.style.setProperty('--rvw-vh', visibleHeight + 'px');
+                // Extra bottom overlay (browser UI). If layout viewport (innerHeight) bigger than visible, diff is overlay.
+                let extraBottom = 0;
+                let extraTop = 0;
+                if (vv) {
+                    const diff = window.innerHeight - vv.height;
+                    if (diff > 0) extraBottom = Math.min(180, Math.round(diff));
+                    // Some mobile browsers (esp. Chrome Android) shift visual viewport downward when URL bar visible.
+                    if (vv.offsetTop > 0) {
+                        extraTop = Math.min(160, Math.round(vv.offsetTop));
+                    }
+                }
+                root.style.setProperty('--rvw-safe-bottom-extra', extraBottom + 'px');
+                root.style.setProperty('--rvw-safe-top-extra', extraTop + 'px');
+                // Apply dynamic inline padding merging static safe-area with extra overlay estimate
+                document.body.style.paddingBottom = `calc(1rem + env(safe-area-inset-bottom, 0px) + var(--rvw-safe-bottom-extra))`;
+                document.body.style.paddingTop = `calc(1rem + env(safe-area-inset-top, 0px) + var(--rvw-safe-top-extra))`;
+                // Top padding already includes env(safe-area-inset-top); if needed could add extra top logic here.
+            } catch(e) { /* silent */ }
+        }
+        // Initial + delayed passes to catch address bar hide/show transitions
+        updateViewportMetrics();
+        [150,300,600].forEach(t => setTimeout(updateViewportMetrics, t));
+        window.addEventListener('resize', updateViewportMetrics, { passive: true });
+        if (window.visualViewport){
+            window.visualViewport.addEventListener('resize', updateViewportMetrics, { passive: true });
+            window.visualViewport.addEventListener('scroll', updateViewportMetrics, { passive: true });
+        }
+    })();
+    // Attach resize observer / listener for dynamic transport wrap
+    let transportWrapRaf = null;
+    function scheduleTransportWrapEvaluation(){
+        if(transportWrapRaf) cancelAnimationFrame(transportWrapRaf);
+        transportWrapRaf = requestAnimationFrame(evaluateTransportWrap);
+    }
+    function evaluateTransportWrap(){
+        try {
+            const panel = $('.panel-controls');
+            if(!panel.length) return;
+            panel.removeClass('transport-wrapped');
+            const panelEl = panel[0];
+            const available = panelEl.clientWidth; if(!available) return;
+
+            // Capture original inline styles to restore later
+            const originals = [];
+            const kids = panel.children();
+            kids.each(function(){ originals.push({ el: this, style: this.getAttribute('style') }); });
+
+            // Force minimal intrinsic widths (disable flex-grow shrink influence)
+            kids.each(function(){ this.style.flex = '0 0 auto'; this.style.width = 'auto'; });
+            // Specifically ensure transport has no extra expansion
+            const transport = document.getElementById('transport-status');
+            if(transport){ transport.style.flex = '0 0 auto'; transport.style.width = 'auto'; }
+
+            // Measure required width in this minimal state
+            const needed = panelEl.scrollWidth;
+
+            // Restore original styles
+            originals.forEach(o => { if(o.style===null) o.el.removeAttribute('style'); else o.el.setAttribute('style', o.style); });
+
+            // Add small tolerance (2px) for sub-pixel rounding
+            if(needed > available + 2){ panel.addClass('transport-wrapped'); }
+        } catch(err){ console.error('Error evaluating transport wrap:', err); }
+    }
+    window.addEventListener('resize', scheduleTransportWrapEvaluation);
+    // Additional observers (ResizeObserver if available) to catch font/icon late layout shifts
+    try {
+        if(window.ResizeObserver){
+            const ro = new ResizeObserver(()=> scheduleTransportWrapEvaluation());
+            const pc = document.querySelector('.panel-controls');
+            if(pc) ro.observe(pc);
+        }
+    } catch(_){}
+    // Initial eval after short & longer delays (fonts/icons/layout stabilization)
+    [150, 300, 600, 900, 1200].forEach(t => setTimeout(scheduleTransportWrapEvaluation, t));
+    // Preview wrap reaction while двигаем ползунок масштаба (без сохранения)
+    $('#ui-scale').on('input', scheduleTransportWrapEvaluation);
+    
 });
