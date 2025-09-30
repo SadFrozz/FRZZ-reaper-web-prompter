@@ -37,12 +37,29 @@ const defaultSettings = {
     highlightClickEnabled: true,
     highlightClickBg: 'rgba(120, 0, 120, 0.4)',
     highlightClickDuration: 800,
-    progressBarColor: 'rgba(255, 193, 7, 1)'
+    progressBarColor: 'rgba(255, 193, 7, 1)',
+    // Actors coloring
+    actorRoleMappingText: '', // Raw multiline text user enters
+    actorColors: {} // { actorName: colorString }
 };
 let settings = {};
 let currentProjectName = '';
 let animationFrameId = null;
 let wwr_is_enabled = false;
+// High-contrast actor color palette (distinct hues for quick recognition)
+const ACTOR_BASE_COLORS = [
+    'rgba(255, 0, 0, 0.9)',       // Red
+    'rgba(0, 140, 255, 0.9)',     // Bright Azure
+    'rgba(0, 200, 70, 0.9)',      // Vivid Green
+    'rgba(255, 200, 0, 0.9)',     // Strong Yellow
+    'rgba(180, 0, 255, 0.9)',     // Vivid Purple
+    'rgba(255, 90, 0, 0.9)',      // Deep Orange
+    'rgba(0, 230, 220, 0.9)',     // Cyan/Teal
+    'rgba(255, 0, 160, 0.9)'      // Magenta
+];
+// Conservative chunk size for Web Remote extstate path (shorter to avoid transport truncation)
+const SETTINGS_CHUNK_SIZE = 250; // was 700
+const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
 $(document).ready(function() {
     // --- ПЕРЕМЕННЫЕ ---
@@ -92,6 +109,9 @@ $(document).ready(function() {
     let subtitleElements = [];
     let currentLineIndex = -1;
     let latestTimecode = 0;
+    // Actor coloring runtime caches
+    let roleToActor = {}; // role -> actor
+    let actorToRoles = {}; // actor -> Set(roles)
     const speedSteps = [1];
     for (let i = 10; i <= 200; i += 10) { speedSteps.push(i); }
     speedSteps.push(500);
@@ -363,6 +383,7 @@ $(document).ready(function() {
         console.debug('[Prompter][loadSettings] Effective settings:', JSON.parse(JSON.stringify(settings)));
     }
 
+    // Save visual/settings (actors excluded, stored separately)
     function saveSettings() {
         try {
             const settingsToSave = {};
@@ -403,14 +424,28 @@ $(document).ready(function() {
             applySettings();
             if (subtitleData.length > 0) handleTextResponse(subtitleData); // Перерисовываем текст
             
-            const settingsString = JSON.stringify(settings, null, 2);
-            const encodedSettings = encodeURIComponent(settingsString);
-            const chunkSize = 500;
-            const numChunks = Math.ceil(encodedSettings.length / chunkSize);
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${numChunks}`);
-            for (let i = 0; i < numChunks; i++) {
-                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${i}/${encodedSettings.substr(i * chunkSize, chunkSize)}`);
+            const settingsForFile = { ...settings };
+            delete settingsForFile.actorRoleMappingText;
+            delete settingsForFile.actorColors;
+            const settingsString = JSON.stringify(settingsForFile, null, 2);
+            // Pretty JSON for human readability in settings.json (indent=2)
+            function toBase64Url(str){
+                try {
+                    const bytes = new TextEncoder().encode(str);
+                    let bin = '';
+                    for (let b of bytes) bin += String.fromCharCode(b);
+                    const b64 = btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+                    return b64;
+                } catch(err){ console.error('toBase64Url failed', err); return ''; }
             }
+            function chunk(str, size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
+            const b64url = '__B64__'+toBase64Url(settingsString);
+            const encodedChunks = chunk(b64url, SETTINGS_CHUNK_SIZE);
+            // Диагностические метаданные для backend
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_decoded_len/${settingsString.length}`);
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${encodedChunks.length}`);
+            encodedChunks.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${idx}/${ch}`));
             wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_SETTINGS');
             setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 150);
         } catch (e) { console.error("Error in saveSettings:", e); }
@@ -428,18 +463,108 @@ $(document).ready(function() {
                 applySettings();
                 if (subtitleData.length > 0) handleTextResponse(subtitleData);
 
-                const settingsString = JSON.stringify(settings, null, 2);
-                const encodedSettings = encodeURIComponent(settingsString);
-                const chunkSize = 500;
-                const numChunks = Math.ceil(encodedSettings.length / chunkSize);
-                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${numChunks}`);
-                for (let i = 0; i < numChunks; i++) {
-                    wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${i}/${encodedSettings.substr(i * chunkSize, chunkSize)}`);
+                const settingsForFile = { ...settings };
+                delete settingsForFile.actorRoleMappingText;
+                delete settingsForFile.actorColors;
+                // Pretty JSON for human readability in settings.json (indent=2)
+                const settingsString = JSON.stringify(settingsForFile, null, 2);
+                function toBase64Url(str){
+                    try {
+                        const bytes = new TextEncoder().encode(str);
+                        let bin='';
+                        for (let b of bytes) bin += String.fromCharCode(b);
+                        const b64 = btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+                        return b64;
+                    } catch(err){ console.error('toBase64Url reset failed', err); return ''; }
                 }
+                function chunk(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
+                const b64url='__B64__'+toBase64Url(settingsString);
+                const encodedChunks = chunk(b64url, SETTINGS_CHUNK_SIZE);
+                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
+                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_decoded_len/${settingsString.length}`);
+                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${encodedChunks.length}`);
+                encodedChunks.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${idx}/${ch}`));
                 wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_SETTINGS');
                 setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 150);
             }
         } catch(e) { console.error("Error resetting settings:", e); }
+    }
+
+    // =====================
+    // ROLES (actors) PERSISTENCE
+    // =====================
+    // NOTE: Actor/role data теперь хранится в отдельном файле $project-roles.json (пер-проектно).
+    // JS отправляет закодированные chunk-и через EXTSTATE (base64url с префиксом __B64__),
+    // backend (Lua) собирает, декодирует и пишет файл. Обратная загрузка: backend кодирует весь
+    // файл в один ключ roles_json_b64 (дополнительно может менять в будущем на chunk-и — тогда адаптируем).
+
+    function rolesToBase64Url(str){
+        try {
+            const bytes = new TextEncoder().encode(str);
+            let bin='';
+            for (let b of bytes) bin += String.fromCharCode(b);
+            return btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+        } catch(err){ console.error('[Prompter][roles] rolesToBase64Url failed', err); return ''; }
+    }
+    function rolesFromBase64Url(b64){
+        try {
+            if(!b64) return '';
+            // remove prefix if present
+            if (b64.startsWith('__B64__')) b64 = b64.substring(7);
+            let pad = b64.length % 4; if (pad) b64 += '='.repeat(4-pad);
+            b64 = b64.replace(/-/g,'+').replace(/_/g,'/');
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+            return new TextDecoder().decode(bytes);
+        } catch(err){ console.error('[Prompter][roles] rolesFromBase64Url failed', err); return ''; }
+    }
+    function chunkString(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
+
+    function saveRoles(){
+        try {
+            const rolesPayload = {
+                actorRoleMappingText: settings.actorRoleMappingText || '',
+                actorColors: settings.actorColors || {}
+            };
+            const jsonPretty = JSON.stringify(rolesPayload, null, 2);
+            const b64url = '__B64__' + rolesToBase64Url(jsonPretty);
+            const parts = chunkString(b64url, ROLES_CHUNK_SIZE);
+            console.debug('[Prompter][roles][saveRoles] encoded', { encoded_len: b64url.length, decoded_len: jsonPretty.length, chunks: parts.length });
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_encoded_len/${b64url.length}`);
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_decoded_len/${jsonPretty.length}`);
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_chunks/${parts.length}`);
+            parts.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_data_${idx}/${ch}`));
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_ROLES');
+            setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 120);
+            // query status later
+            setTimeout(()=> { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_status'); }, 400);
+        } catch(err){ console.error('[Prompter][roles] saveRoles failed', err); }
+    }
+
+    function requestRoles(){
+        try {
+            console.debug('[Prompter][roles][requestRoles] requesting roles file');
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_ROLES');
+            setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 60);
+            // backend после обработки выставит roles_json_b64 -> запросим его чуть позже
+            setTimeout(()=> { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_json_b64'); }, 260);
+        } catch(err){ console.error('[Prompter][roles] requestRoles failed', err); }
+    }
+
+    function integrateLoadedRoles(jsonText){
+        try {
+            if(!jsonText) return;
+            const parsed = JSON.parse(jsonText);
+            if (parsed && typeof parsed === 'object') {
+                if (typeof parsed.actorRoleMappingText === 'string') settings.actorRoleMappingText = parsed.actorRoleMappingText;
+                if (parsed.actorColors && typeof parsed.actorColors === 'object') settings.actorColors = parsed.actorColors;
+                console.debug('[Prompter][roles][integrateLoadedRoles] applied roles data');
+                // Rebuild maps and optionally re-render existing subtitles
+                buildActorRoleMaps();
+                if (subtitleData.length > 0) handleTextResponse(subtitleData);
+            }
+        } catch(err){ console.error('[Prompter][roles] integrateLoadedRoles failed', err); }
     }
     
     function initialize() {
@@ -448,6 +573,7 @@ $(document).ready(function() {
             wwr_start();
             getTracks();
             getProjectName();
+            requestRoles(); // запрос отдельного файла ролей
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
@@ -494,6 +620,15 @@ $(document).ready(function() {
             if (parts[0] === 'EXTSTATE' && parts[1] === 'PROMPTER_WEBUI') {
                 if (parts[2] === 'response_tracks') handleTracksResponse(parts.slice(3).join('\t'));
                 else if (parts[2] === 'project_name') { currentProjectName = parts.slice(3).join('\t'); updateTitle(); }
+                else if (parts[2] === 'roles_json_b64') {
+                    const payload = parts.slice(3).join('\t');
+                    console.debug('[Prompter][roles][onreply] received roles_json_b64 length', payload.length);
+                    const decoded = rolesFromBase64Url(payload);
+                    integrateLoadedRoles(decoded);
+                } else if (parts[2] === 'roles_status') {
+                    const status = parts.slice(3).join('\t');
+                    console.debug('[Prompter][roles][status]', status);
+                }
             } else if (parts[0] === 'TRANSPORT') handleTransportResponse(parts);
         }
     };
@@ -541,11 +676,16 @@ $(document).ready(function() {
             subtitleElements = [];
             textDisplay.empty();
             if (subtitleData.length === 0) return;
+            // After loading subtitles we may need to refresh stats button visibility
+            scheduleStatsButtonEvaluation();
             
             let lineStyles = $('#dynamic-line-styles');
             if (lineStyles.length === 0) { lineStyles = $('<style id="dynamic-line-styles"></style>').appendTo('head'); }
             
             let lastRoleForCheckerboard = null, lastColorForCheckerboard = null, colorIndex = 0, dynamicRoleStyles = "", lastRoleForDeduplication = null;
+
+            // Build role->actor map once per render based on settings
+            buildActorRoleMaps();
 
             subtitleData.forEach((line, index) => {
                 let role = '', text = line.text;
@@ -581,7 +721,22 @@ $(document).ready(function() {
                 roleElement.css('visibility', showRoleInColumn ? 'visible' : 'hidden');
                 swatchElement.css('visibility', showSwatch ? 'visible' : 'hidden');
                 
-                if (showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches && hasColor) {
+                // Inject actor-based background color if available (only inside REAPER editing context)
+                let actorColorApplied = false;
+                if (role && roleToActor[role] && settings.roleDisplayStyle !== 'inline') {
+                    const actor = roleToActor[role];
+                    const actorColor = settings.actorColors && settings.actorColors[actor];
+                    if (actorColor) {
+                        // Apply actor color and set tooltip with actor name
+                        let effectiveBgColor = actorColor;
+                        let effectiveTextColor = isColorLight(effectiveBgColor) ? '#000' : '#fff';
+                        dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .subtitle-role { background-color: ${effectiveBgColor}; color: ${effectiveTextColor}; }`;
+                        roleElement.attr('title', actor);
+                        actorColorApplied = true;
+                    }
+                }
+
+                if (!actorColorApplied && showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches && hasColor) {
                     roleElement.addClass('role-colored-bg').css('visibility', 'visible');
                     let effectiveBgColor = line.color, effectiveTextColor;
                     if (settings.roleFontColorEnabled) { effectiveBgColor = lightenColor(line.color); effectiveTextColor = '#000000'; }
@@ -599,6 +754,155 @@ $(document).ready(function() {
             statusIndicator.text(`Текст получен, всего ${subtitleData.length} реплик`);
             applySettings();
         } catch (e) { console.error("Error in handleTextResponse:", e); }
+    }
+
+    // === Actor Coloring Utilities ===
+    function parseActorRoleMapping(rawText) {
+        // Each line: ACTOR (space|comma|colon) ROLE1, ROLE2, ROLE3
+        const map = {};// actor -> array roles
+        const lines = (rawText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+            // Split actor from roles by first occurrence of colon/comma/space delimiter pattern
+            const m = line.match(/^([^:,]+?)\s*(?:[:\-,])\s*(.+)$/);
+            if (m) {
+                const actor = m[1].trim();
+                const rolesPart = m[2].trim();
+                const roles = rolesPart.split(/[,;]+|\s+/).map(r => r.trim()).filter(Boolean);
+                if (actor && roles.length) {
+                    if (!map[actor]) map[actor] = new Set();
+                    roles.forEach(r => map[actor].add(r));
+                }
+            }
+        }
+        // Convert Sets -> arrays
+        const result = {};
+        Object.keys(map).forEach(a => { result[a] = Array.from(map[a]); });
+        return result;
+    }
+
+    function buildActorRoleMaps() {
+        roleToActor = {};
+        actorToRoles = {};
+        const parsed = parseActorRoleMapping(settings.actorRoleMappingText || '');
+        Object.keys(parsed).forEach(actor => {
+            const roles = parsed[actor];
+            actorToRoles[actor] = new Set(roles);
+            roles.forEach(role => {
+                if (!roleToActor[role]) roleToActor[role] = actor; // first mapping wins
+            });
+        });
+        assignDefaultActorColors();
+    }
+
+    function assignDefaultActorColors(){
+        if(!settings.actorColors) settings.actorColors = {};
+        const existing = settings.actorColors;
+        let idx = 0;
+        Object.keys(actorToRoles).forEach(actor => {
+            if(!existing[actor]){
+                existing[actor] = ACTOR_BASE_COLORS[idx % ACTOR_BASE_COLORS.length];
+                idx++;
+            }
+        });
+    }
+
+    function regenerateActorColorListUI() {
+        const container = $('#actor-color-list');
+        if (!container.length) return;
+        container.empty();
+        buildActorRoleMaps();
+        const actors = Object.keys(actorToRoles).sort((a,b)=> a.localeCompare(b,'ru'));
+        actors.forEach(actor => {
+            const roles = Array.from(actorToRoles[actor]).join(', ');
+            const colorVal = (settings.actorColors && settings.actorColors[actor]) || 'rgba(60,60,60,0.6)';
+            const row = $(`
+                <div class="actor-color-item" data-actor="${actor}">
+                    <div class="actor-color-item-label">${actor}</div>
+                    <div class="actor-color-item-roles">${roles}</div>
+                    <input type="text" class="actor-color-input" value="${colorVal}" />
+                    <button class="delete-actor-color" title="Удалить актёра">✕</button>
+                </div>`);
+            container.append(row);
+        });
+        // Initialize Spectrum on newly added inputs
+        container.find('.actor-color-input').each(function(){
+            $(this).spectrum({
+                type: "component", showPaletteOnly: true, togglePaletteOnly: true, hideAfterPaletteSelect: true,
+                showInput: true, showInitial: true, allowEmpty: false, showAlpha: true, preferredFormat: "rgba",
+                change: function(color){ if(color){ $(this).val(color.toRgbString()); } }
+            });
+        });
+        updateUnassignedRolesUI();
+        scheduleStatsButtonEvaluation();
+    }
+
+    // Compute roles present in subtitleData but not mapped to any actor
+    function computeUnassignedRoles() {
+        const mappedRoles = new Set(Object.keys(roleToActor));
+        const allRoles = new Set();
+        if (Array.isArray(subtitleData)) {
+            subtitleData.forEach(line => {
+                if (!line || !line.text) return;
+                const m = line.text.match(/^\[(.*?)\]\s*/);
+                if (m && m[1]) { allRoles.add(m[1]); }
+            });
+        }
+        const unassigned = [];
+        allRoles.forEach(r => { if (!mappedRoles.has(r)) unassigned.push(r); });
+        unassigned.sort((a,b)=> a.localeCompare(b,'ru'));
+        return unassigned;
+    }
+
+    function updateUnassignedRolesUI() {
+        const list = $('#unassigned-roles-list');
+        if (!list.length) return;
+        const roles = computeUnassignedRoles();
+        list.empty();
+        if (roles.length === 0) {
+            list.append('<span class="unassigned-role-chip" style="opacity:0.6">Все роли назначены</span>');
+            return;
+        }
+        roles.forEach(r => {
+            list.append(`<span class="unassigned-role-chip" data-role="${r}">${r}</span>`);
+        });
+    }
+
+    function saveActorsFromUI() {
+        const rawMapping = $('#actor-role-mapping-text').val();
+        settings.actorRoleMappingText = rawMapping;
+        // Collect colors that пользователь явно видел/менял в списке
+        const newColors = {};
+        $('#actor-color-list .actor-color-item').each(function(){
+            const actor = $(this).data('actor');
+            const input = $(this).find('.actor-color-input');
+            let val = input.val();
+            if (input.spectrum && input.spectrum("get")) {
+                const c = input.spectrum("get");
+                if (c && c.toRgbString) val = c.toRgbString();
+            }
+            if (actor) newColors[actor] = val;
+        });
+        // Автогенерация цветов для новых актёров, добавленных в текст мэппинга, но ещё не отображённых в списке (чтобы файл roles не был пустым по цветам).
+        try {
+            const parsed = parseActorRoleMapping(rawMapping || '');
+            const allActors = Object.keys(parsed);
+            // Используем уже занятые цвета для смещения индекса
+            let idx = 0;
+            const usedActors = Object.keys(newColors);
+            // Берём стартовый индекс = числу уже известных актёров (стабильный порядок добавления)
+            idx = usedActors.length;
+            allActors.forEach(actor => {
+                if (!newColors[actor]) {
+                    const color = ACTOR_BASE_COLORS[idx % ACTOR_BASE_COLORS.length];
+                    newColors[actor] = color;
+                    idx++;
+                }
+            });
+        } catch(err){ console.error('[Prompter][roles] auto-color generation failed', err); }
+        settings.actorColors = newColors;
+        saveRoles();
+        // Перепарсим и перерисуем текст если уже загружен
+        if (subtitleData.length > 0) handleTextResponse(subtitleData);
     }
     
     function handleTransportResponse(transportData) {
@@ -652,6 +956,127 @@ $(document).ready(function() {
     $('.modal-close-button, #settings-modal').on('click', function(event) { if (event.target === this) $('#settings-modal').hide(); });
     saveSettingsButton.on('click', saveSettings);
     resetSettingsButton.on('click', resetSettings);
+    $('#actors-button').on('click', function(){
+        // Заполнить textarea текущим mapping
+        $('#actor-role-mapping-text').val(settings.actorRoleMappingText || '');
+        regenerateActorColorListUI();
+        $('#actors-modal').show();
+    });
+    $('#stats-button').on('click', function(){ buildAndShowStats(); });
+    // Realtime mapping update while typing
+    $('#actor-role-mapping-text').on('input', function(){
+        settings.actorRoleMappingText = $(this).val();
+        // Rebuild only lightweight preview (do not save yet)
+        regenerateActorColorListUI();
+        // Update rendered subtitles highlight if roles affect coloring
+        if (subtitleData.length > 0) handleTextResponse(subtitleData);
+    });
+
+    // ================= STATISTICS =================
+    function computeStats() {
+        const roleCounts = new Map();
+        const actorCounts = new Map();
+        const colorCounts = new Map();
+        let totalRoleLines = 0;
+        let totalActorLines = 0;
+        let totalColorLines = 0; // only used when no actors mapped
+        const haveActorMapping = Object.keys(roleToActor).length > 0; // any role->actor relation
+        if (Array.isArray(subtitleData)) {
+            for (const line of subtitleData) {
+                if (!line || !line.text) continue;
+                const m = line.text.match(/^\[(.*?)\]\s*/);
+                if (m && m[1]) {
+                    const role = m[1];
+                    totalRoleLines++;
+                    roleCounts.set(role, (roleCounts.get(role) || 0) + 1);
+                    const actor = roleToActor[role];
+                    if (actor) {
+                        totalActorLines++;
+                        actorCounts.set(actor, (actorCounts.get(actor) || 0) + 1);
+                    } else if (!haveActorMapping && line.color) {
+                        // Only collect color stats if вообще нет сопоставлений актёров
+                        totalColorLines++;
+                        colorCounts.set(line.color, (colorCounts.get(line.color) || 0) + 1);
+                    }
+                }
+            }
+        }
+        return { roleCounts, actorCounts, colorCounts, totalRoleLines, totalActorLines, totalColorLines, haveActorMapping };
+    }
+
+    function buildAndShowStats(){
+        const { roleCounts, actorCounts, colorCounts, totalRoleLines, totalActorLines, totalColorLines, haveActorMapping } = computeStats();
+        const statsModal = $('#stats-modal');
+        const rolesSection = $('#stats-roles-section');
+        const actorsSection = $('#stats-actors-section');
+        const colorsSection = $('#stats-colors-section');
+        const emptyMsg = $('#stats-empty');
+        let any=false;
+        // Roles table
+        if (totalRoleLines > 0 && roleCounts.size > 0) {
+            const tbody = $('#stats-roles-table tbody').empty();
+            const arr = Array.from(roleCounts.entries()).sort((a,b)=> b[1]-a[1]);
+            arr.forEach(([role,count])=>{
+                const pct = ((count/totalRoleLines)*100).toFixed(1);
+                tbody.append(`<tr><td>${role}</td><td>${count}</td><td>${pct}</td></tr>`);
+            });
+            $('#stats-roles-total').text(totalRoleLines);
+            rolesSection.show(); any=true;
+        } else { rolesSection.hide(); }
+        // Actors table (primary if any actor mapping present and counts > 0)
+        if (totalActorLines > 0 && actorCounts.size > 0) {
+            const tbody = $('#stats-actors-table tbody').empty();
+            const arr = Array.from(actorCounts.entries()).sort((a,b)=> b[1]-a[1]);
+            arr.forEach(([actor,count])=>{
+                const pct = ((count/totalActorLines)*100).toFixed(1);
+                tbody.append(`<tr><td>${actor}</td><td>${count}</td><td>${pct}</td></tr>`);
+            });
+            $('#stats-actors-total').text(totalActorLines);
+            actorsSection.show(); any=true;
+        } else { actorsSection.hide(); }
+        // Colors table: показываем ТОЛЬКО если НЕТ назначенных актёров вообще, но есть цвета в репликах
+        if (!haveActorMapping) {
+            const colorTotal = totalColorLines;
+            if (colorTotal > 0 && colorCounts.size > 0) {
+                const tbody = $('#stats-colors-table tbody').empty();
+                const arr = Array.from(colorCounts.entries()).sort((a,b)=> b[1]-a[1]);
+                arr.forEach(([col,count])=>{
+                    const pct = ((count/colorTotal)*100).toFixed(1);
+                    tbody.append(`<tr><td><span style="display:inline-block;width:1.2rem;height:1.2rem;vertical-align:middle;border-radius:0.2rem;background:${col};margin-right:0.4rem;border:1px solid #555"></span>${col}</td><td>${count}</td><td>${pct}</td></tr>`);
+                });
+                $('#stats-colors-total').text(colorTotal);
+                colorsSection.show(); any=true;
+            } else { colorsSection.hide(); }
+        } else { colorsSection.hide(); }
+
+        emptyMsg.toggle(!any);
+        statsModal.show();
+    }
+
+    function evaluateStatsButtonVisibility(){
+        const { roleCounts, actorCounts, haveActorMapping, colorCounts, totalColorLines } = computeStats();
+        const btn = $('#stats-button');
+        const roleHas = roleCounts && roleCounts.size>0;
+        const actorHas = actorCounts && actorCounts.size>0;
+        const colorHas = !haveActorMapping && colorCounts.size>0 && totalColorLines>0; // only if no actor mapping
+        if (roleHas || actorHas || colorHas) btn.show(); else btn.hide();
+    }
+    let statsEvalRaf=null; function scheduleStatsButtonEvaluation(){ if(statsEvalRaf) cancelAnimationFrame(statsEvalRaf); statsEvalRaf=requestAnimationFrame(evaluateStatsButtonVisibility); }
+    $(document).on('click', '.modal-close-button', function(){
+        const target = $(this).data('close');
+        if(target) { $('#'+target).hide(); }
+    });
+    $('#actors-modal').on('click', function(e){ if(e.target === this) $(this).hide(); });
+    // Закрытие статистики по клику вне окна
+    $('#stats-modal').on('click', function(e){ if(e.target === this) $(this).hide(); });
+    // Глобальное закрытие stats по ESC
+    $(document).on('keydown.rwv_stats_escape', function(e){
+        if(e.key === 'Escape') { const m = $('#stats-modal:visible'); if(m.length) m.hide(); }
+    });
+    $(document).on('click', '.delete-actor-color', function(){
+        $(this).closest('.actor-color-item').remove();
+    });
+    $('#save-actors-button').on('click', function(){ saveActorsFromUI(); $('#actors-modal').hide(); });
 
     // Live preview отключён: изменения применяются только по кнопке Сохранить / Сбросить.
     // Если нужно вернуть мгновенное применение, раскомментировать строку ниже.
@@ -802,5 +1227,24 @@ $(document).ready(function() {
     [150, 300, 600, 900, 1200].forEach(t => setTimeout(scheduleTransportWrapEvaluation, t));
     // Preview wrap reaction while двигаем ползунок масштаба (без сохранения)
     $('#ui-scale').on('input', scheduleTransportWrapEvaluation);
-    
+
+    // Initialize collapsible fieldsets (settings modal)
+    (function initCollapsibleFieldsets(){
+        const $modal = $('#settings-modal');
+        if(!$modal.length) return;
+        $modal.find('fieldset.fieldset-collapsible > legend').each(function(){
+            const $legend = $(this);
+            const $fs = $legend.parent();
+            const expanded = !$fs.hasClass('collapsed');
+            $legend.attr({ role: 'button', tabindex: '0', 'aria-expanded': expanded ? 'true':'false' });
+            function toggle(){
+                $fs.toggleClass('collapsed').toggleClass('expanded');
+                const isExp = !$fs.hasClass('collapsed');
+                $legend.attr('aria-expanded', isExp ? 'true':'false');
+            }
+            $legend.on('click', function(e){ e.preventDefault(); toggle(); });
+            $legend.on('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); toggle(); }});
+        });
+    })();
+
 });

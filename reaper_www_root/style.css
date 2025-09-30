@@ -34,8 +34,8 @@ h1 { margin: 0; flex-grow: 1; font-size: 2em; }
 .controls-right { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; flex: 0 1 auto; min-width: 0; margin-inline-start: auto; }
 #navigation-panel label, #navigation-panel select { font-size: 1.5em; }
 #track-selector { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 0.25rem; }
-#refresh-button, #settings-button, #save-settings-button { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
-#refresh-button:hover, #settings-button:hover, #save-settings-button:hover { background-color: #5a5a5a; }
+#refresh-button, #settings-button, #save-settings-button, #actors-button, #stats-button { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
+#refresh-button:hover, #settings-button:hover, #save-settings-button:hover, #actors-button:hover, #stats-button:hover { background-color: #5a5a5a; }
 .icon-svg { width: 1.2em; height: 1.2em; fill: currentColor; }
 #transport-status { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 0.5em; font-family: monospace; font-weight: bold; padding: 0 1em; transition: color 0.3s; font-size: 2.2em; margin: auto; }
 #transport-icon-container { display: inline-block; width: 1.2em; height: 1.2em; }
@@ -70,7 +70,7 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 .subtitle-progress-bar { height: 100%; width: 100%; background-color: #ffc107; border-radius: 0.1875rem; transform-origin: left; transform: scaleX(0); transition: transform 0.1s linear; }
 .current-line .subtitle-progress-container { opacity: 1 !important; }
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0, 0, 0, 0.6); }
-.modal-content { background-color: #2f2f2f; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 37.5rem; border-radius: 0.5rem; position: relative; }
+.modal-content { background-color: #2f2f2f; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 37.5rem; border-radius: 0.5rem; position: relative; font-size: 0.85em; }
 .modal-close-button { color: #aaa; position: absolute; top: 0.625rem; right: 1.25rem; font-size: 1.75rem; font-weight: bold; cursor: pointer; }
 .modal-close-button:hover, .modal-close-button:focus { color: white; text-decoration: none; }
 .setting-item input[type="text"], .setting-item input[type="number"], .setting-item select { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; flex-basis: 50%; }
@@ -78,6 +78,20 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 .settings-body { margin-top: 1.25rem; border-top: 1px solid #444; padding-top: 1.25rem; }
 fieldset { border: 1px solid #555; border-radius: 0.5rem; padding: 0.5rem 1rem 1rem; margin-bottom: 1rem; }
 legend { padding: 0 0.5em; color: #ccc; font-weight: bold; }
+/* Collapsible fieldsets */
+.fieldset-collapsible > legend { cursor: pointer; position: relative; padding-left: 1.1em; }
+.fieldset-collapsible > legend:before { content: '\25BC'; position: absolute; left: 0; top: 0; font-size: 0.9em; transition: transform 0.2s; }
+.fieldset-collapsible.collapsed > legend:before { transform: rotate(-90deg); }
+.fieldset-collapsible.collapsed > *:not(legend) { display: none !important; }
+
+/* Checkerboard paired layout */
+.checkerboard-pair-row { display: flex; gap: 1.25rem; margin-bottom: 0.75rem; }
+/* Each cell becomes a horizontal flex row: label | input+button */
+.checkerboard-cell { flex: 1; display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+.checkerboard-cell > label { flex: 0 0 auto; white-space: nowrap; font-size: 0.95em; }
+.checkerboard-cell .input-with-button { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 0.4rem; }
+.checkerboard-cell .input-with-button input[type="text"] { flex: 0 0 auto; width: 70px; min-width: 70px; padding: 0.35em 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; }
+.checkerboard-cell .copy-color-btn { height: 2.1rem; width: 2.1rem; padding: 0; }
 .setting-group-title { font-weight: bold; margin: 0.5rem 0 1rem; color: #ccc; }
 hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .setting-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
@@ -100,8 +114,8 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .light-theme h1 { color: #000; }
 .light-theme #status-indicator { color: #666; }
 .light-theme #track-selector { background-color: #e9e9e9; color: #111; border: 1px solid #ccc; }
-.light-theme #refresh-button, .light-theme #settings-button { background-color: #dcdcdc; color: #333; }
-.light-theme #refresh-button:hover, .light-theme #settings-button:hover { background-color: #cecece; }
+.light-theme #refresh-button, .light-theme #settings-button, .light-theme #actors-button, .light-theme #stats-button { background-color: #dcdcdc; color: #333; }
+.light-theme #refresh-button:hover, .light-theme #settings-button:hover, .light-theme #actors-button:hover, .light-theme #stats-button:hover { background-color: #cecece; }
 .light-theme #transport-status.status-stop { color: #111; }
 .light-theme #transport-status.status-play { color: #28a745; }
 .light-theme #transport-status.status-record { color: #dc3545; }
@@ -130,6 +144,27 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .light-theme .setting-item .sp-input { background-color: #e9e9e9; color: #111; border-color: #ccc; }
 .sp-original-input-container input { width: 70px; }
 .input-with-button { display: flex; align-items: center; margin-left: auto; gap: 0.5rem; }
+
+/* Unified inline color-row layout for highlight section (current line) */
+.setting-group-inline-colors { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; align-items: flex-start; margin-bottom: 1rem; }
+.setting-group-inline-colors .setting-item { margin: 0; min-width: 10rem; flex: 1 1 auto; display: flex; align-items: center; gap: 0.6rem; }
+.setting-group-inline-colors .setting-item label { flex: 0 0 auto; margin: 0; white-space: nowrap; }
+.setting-group-inline-colors .setting-item .input-with-button { margin-left: auto; flex: 0 0 auto; }
+.setting-group-inline-colors .setting-item input[type="text"] { width: 7rem; }
+/* Header flex for click highlight section */
+.setting-group-header-flex { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.setting-group-header-flex .setting-group-title { margin: 0; }
+.inline-checkbox { display: flex; align-items: center; gap: 0.5rem; }
+
+/* Inline row for click highlight options */
+.setting-inline-row { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; margin-bottom: 0.75rem; }
+.setting-inline-row .setting-item.mini { margin: 0; display: flex; align-items: center; gap: 0.6rem; flex: 1 1 auto; min-width: 12rem; }
+.setting-inline-row .setting-item.mini label { margin: 0; white-space: nowrap; }
+.setting-inline-row .setting-item.mini .input-with-button { margin-left: auto; flex: 0 0 auto; }
+/* Inline pause color picker variant */
+.pause-inline-color { margin-bottom: 0.75rem; }
+.pause-inline-color .input-with-button { margin-left: auto; display: flex; align-items: center; gap: 0.4rem; }
+.pause-inline-color .input-with-button input[type="text"] { width: 70px; min-width:70px; padding: 0.35em 0.5em; background-color:#333; color:#eee; border:1px solid #555; border-radius:4px; }
 .copy-color-btn { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; }
 .copy-color-btn:hover { background-color: #5a5a5a; }
 .light-theme .copy-color-btn { background-color: #dcdcdc; color: #333; }
@@ -143,6 +178,45 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .button-danger:hover { background-color: #dc3545; color: white; }
 .light-theme .button-danger { background-color: #dcdcdc; color: #333; }
 .light-theme .button-danger:hover { background-color: #dc3545; color: white; }
+
+/* ===== Actors coloring modal ===== */
+#actors-modal .modal-content { max-width: 50rem; }
+textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: vertical; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 0.5em; font-family: monospace; font-size: 0.9em; }
+.actor-color-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.actor-color-item { display: flex; align-items: center; gap: 0.75rem; background: #2b2b2b; padding: 0.5rem 0.75rem; border-radius: 0.5rem; }
+.light-theme .actor-color-item { background: #ddd; }
+.actor-color-item-label { flex: 0 0 12rem; font-weight: 600; }
+.actor-color-item-roles { flex: 1; font-size: 0.8em; opacity: 0.8; }
+.actor-color-item .sp-replacer { margin-left: auto; }
+.actor-color-item .sp-replacer { padding: 0; background: transparent; border: 0; display: flex; align-items: center; }
+.actor-color-item .sp-preview { width: 2.5rem; height: 2.5rem; border-radius: 4px; border: 1px solid #555; margin-right: 0.5rem; }
+.actor-color-item .sp-preview-inner, .actor-color-item .sp-alpha-inner { border-radius: 3px; }
+.actor-color-item input[type="text"] { width: 70px; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 0.5em; }
+.light-theme .actor-color-item .sp-preview { border-color: #ccc; }
+.light-theme .actor-color-item input[type="text"] { background-color: #e9e9e9; color: #111; border-color: #ccc; }
+.actor-color-item input[type="text"] { width: 8rem; }
+.actor-color-item .delete-actor-color { background: #444; color: #eee; border: none; border-radius: 0.25rem; padding: 0.4em; cursor: pointer; }
+.actor-color-item .delete-actor-color:hover { background: #c0392b; }
+.light-theme .actor-color-item .delete-actor-color { background: #bbb; color: #222; }
+.light-theme .actor-color-item .delete-actor-color:hover { background: #e74c3c; color: #fff; }
+.actor-color-item .color-preview-box { width: 2rem; height: 2rem; border-radius: 0.4rem; border: 1px solid #555; }
+
+/* Unassigned roles list */
+.unassigned-roles-list { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.25rem 0; }
+.unassigned-role-chip { background: #444; color: #eee; padding: 0.25rem 0.55rem; border-radius: 1rem; font-size: 0.75em; line-height: 1; white-space: nowrap; cursor: default; opacity: 0.9; }
+.unassigned-role-chip.newly-unassigned { outline: 1px solid #888; }
+.light-theme .unassigned-role-chip { background: #ccc; color: #222; }
+
+/* Stats modal */
+.stats-table { width: 100%; border-collapse: collapse; margin: 0.75rem 0 1.5rem; font-size: 0.85em; }
+.stats-table th, .stats-table td { padding: 0.4rem 0.5rem; text-align: left; border-bottom: 1px solid #444; }
+.stats-table th { background: #333; position: sticky; top: 0; }
+.light-theme .stats-table th { background: #e0e0e0; }
+.stats-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.03); }
+.light-theme .stats-table tbody tr:nth-child(even) { background: rgba(0,0,0,0.05); }
+.stats-table tfoot th { background: #2a2a2a; }
+.light-theme .stats-table tfoot th { background: #d5d5d5; }
+
 
 /* ===================== Responsive Layout ===================== */
 /* NOTE: Removed all responsive font-size reductions. Font sizing is now solely controlled by user uiScale and base styles.
