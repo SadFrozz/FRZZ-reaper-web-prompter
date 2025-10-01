@@ -131,15 +131,13 @@ jobs:
         run: |
           {
             echo "body<<EOF"
-            echo "FRZZ Reaper Web Prompter"
+            echo "Интерактивный текстовый монитор для REAPER ${GITHUB_REF_NAME}"
             echo ""
             echo "Tag: ${GITHUB_REF_NAME}"
             if [ "${{ steps.prerelease.outputs.prerelease }}" = "true" ]; then echo "(Pre-release)"; fi
             echo ""
-            echo "Changelog:"; echo ""; echo "${{ steps.changelog.outputs.section }}" | sed 's/^/  /'
+            echo "Ченджлог:"; echo ""; echo "${{ steps.changelog.outputs.section }}" | sed 's/^/  /'
             echo ""
-            echo "Installers:"; echo "  - Windows & macOS installers attached as artifacts in workflow run"
-            echo "(No repackaging performed)"
             echo "EOF"
           } >> $GITHUB_OUTPUT
 
