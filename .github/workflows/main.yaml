@@ -90,6 +90,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set Product Names (RU/EN)
+        run: |
+          echo "PRODUCT_NAME_RU=Интерактивный текстовый монитор для REAPER" >> $GITHUB_ENV
+          echo "PRODUCT_NAME_EN=FRZZ Web Prompter" >> $GITHUB_ENV
+
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
@@ -129,14 +134,21 @@ jobs:
       - name: Build Release Body
         id: body
         run: |
+          # Переводим стандартные заголовки секций CHANGELOG на русский (если они на английском)
+          SECTION_ORIG="${{ steps.changelog.outputs.section }}"
+          SECTION_TR=$(echo "$SECTION_ORIG" | sed -E \
+            -e 's/^### Added/### Добавлено/' \
+            -e 's/^### Changed/### Изменено/' \
+            -e 's/^### Fixed/### Исправлено/' \
+            -e 's/^### Removed/### Удалено/' \
+            -e 's/^### Security/### Безопасность/' \
+            -e 's/^### Notes/### Примечания/' )
           {
             echo "body<<EOF"
-            echo "Интерактивный текстовый монитор для REAPER ${GITHUB_REF_NAME}"
-            echo ""
-            echo "Tag: ${GITHUB_REF_NAME}"
+            echo "${PRODUCT_NAME_RU} ${GITHUB_REF_NAME}"
             if [ "${{ steps.prerelease.outputs.prerelease }}" = "true" ]; then echo "(Pre-release)"; fi
             echo ""
-            echo "Ченджлог:"; echo ""; echo "${{ steps.changelog.outputs.section }}" | sed 's/^/  /'
+            echo "Ченджлог:"; echo ""; echo "$SECTION_TR" | sed 's/^/  /'
             echo ""
             echo "EOF"
           } >> $GITHUB_OUTPUT
@@ -144,7 +156,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: FRZZ Web Prompter ${{ github.ref_name }}
+          name: ${{ env.PRODUCT_NAME_RU }} ${{ github.ref_name }}
           body: ${{ steps.body.outputs.body }}
           draft: false
           prerelease: ${{ steps.prerelease.outputs.prerelease }}
