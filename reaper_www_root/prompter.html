@@ -2,8 +2,8 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>REAPER Web Prompter v1.3.3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>REAPER Web Prompter v1.4.0</title>
     <link rel="stylesheet" href="style.css">
     <script src="jquery.min.js"></script>
     <link rel="stylesheet" type="text/css" href="spectrum.css">
@@ -37,6 +37,24 @@
                 </div>
                 
                 <div class="controls-right">
+                    <!-- Actors coloring button placed BEFORE stats/settings -->
+                    <button id="actors-button" title="Раскраска актёров (цвета)">
+                        <!-- Brush icon (geometry preserved) -->
+                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+                            <g transform="translate(-99 -154) scale(1)">
+                                <path d="M128.735,157.585 L116.047,170.112 L114.65,168.733 L127.339,156.206 C127.725,155.825 128.35,155.825 128.735,156.206 C129.121,156.587 129.121,157.204 128.735,157.585 L128.735,157.585 Z M112.556,173.56 C112.427,173.433 111.159,172.181 111.159,172.181 L113.254,170.112 L114.65,171.491 L112.556,173.56 L112.556,173.56 Z M110.461,178.385 C109.477,179.298 105.08,181.333 102.491,179.36 C102.491,179.36 103.392,178.657 104.074,177.246 C105.703,172.919 109.763,173.56 109.763,173.56 L111.159,174.938 C111.173,174.952 112.202,176.771 110.461,178.385 L110.461,178.385 Z M130.132,154.827 C128.975,153.685 127.099,153.685 125.942,154.827 L108.764,171.788 C106.661,171.74 103.748,172.485 102.491,176.603 C101.53,178.781 99,178.671 99,178.671 C104.253,184.498 110.444,181.196 111.857,179.764 C113.1,178.506 113.279,176.966 113.146,175.734 L130.132,158.964 C131.289,157.821 131.289,155.969 130.132,154.827 L130.132,154.827 Z"/>
+                            </g>
+                        </svg>
+                    </button>
+                    <button id="stats-button" title="Статистика" style="display:none;">
+                        <!-- Stats icon centered -->
+                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+                            <!-- Shifted 3px right -->
+                            <g transform="translate(3 0) scale(1)">
+                                <path d="M14 0h-2c-1.1 0-2 .9-2 2v28c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V2c0-1.1-.9-2-2-2zm10 16h-2c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V18c0-1.1-.9-2-2-2zM4 9H2c-1.1 0-2 .9-2 2v19c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V11c0-1.1-.9-2-2-2z"/>
+                            </g>
+                        </svg>
+                    </button>
                     <button id="settings-button" title="Настройки">
                         <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43,12.98c0.04,-0.32 0.07,-0.64 0.07,-0.98s-0.03,-0.66 -0.07,-0.98l2.11,-1.65c0.19,-0.15 0.24,-0.42 0.12,-0.64l-2,-3.46c-0.12,-0.22 -0.39,-0.3 -0.61,-0.22l-2.49,1c-0.52,-0.4 -1.08,-0.73 -1.69,-0.98l-0.38,-2.65C14.46,2.18 14.25,2 14,2h-4c-0.25,0 -0.46,0.18 -0.49,0.42l-0.38,2.65c-0.61,0.25 -1.17,0.59 -1.69,0.98l-2.49,-1c-0.23,0.09 -0.49,0 -0.61,0.22l-2,3.46c-0.13,0.22 -0.07,0.49 0.12,0.64l2.11,1.65c-0.04,0.32 -0.07,0.65 -0.07,0.98s0.03,0.66 0.07,0.98l-2.11,1.65c-0.19,0.15 -0.24,0.42 -0.12,0.64l2,3.46c0.12,0.22 0.39,0.3 0.61,0.22l2.49,-1c0.52,0.4 1.08,0.73 1.69,0.98l0.38,2.65c0.03,0.24 0.24,0.42 0.49,0.42h4c0.25,0 0.46,-0.18 0.49,-0.42l0.38,-2.65c0.61,-0.25 1.17,-0.59 1.69,-0.98l2.49,1c0.23,0.09 0.49,0 0.61,-0.22l2,-3.46c0.12,-0.22 0.07,-0.49 -0.12,-0.64L19.43,12.98zM12,15.5c-1.93,0 -3.5,-1.57 -3.5,-3.5s1.57,-3.5 3.5,-3.5s3.5,1.57 3.5,3.5S13.93,15.5 12,15.5z" /></svg>
                     </button>
@@ -58,7 +76,7 @@
             <span class="modal-close-button">&times;</span>
             <h2>Настройки</h2>
             <div class="settings-body">
-                <fieldset>
+                <fieldset class="fieldset-collapsible expanded">
                     <legend>Отображение колонки</legend>
                     <div class="setting-item">
                         <label for="process-roles">Обрабатывать роли [в скобках]</label>
@@ -102,7 +120,7 @@
                         </div>
                     </div>
                 </fieldset>
-                <fieldset>
+                <fieldset class="fieldset-collapsible expanded">
                     <legend>Шахматная раскраска</legend>
                     <div class="setting-item">
                         <label for="checkerboard-enabled">Включить</label>
@@ -117,54 +135,60 @@
                                 <option value="by_color">Следить за цветами</option>
                             </select>
                         </div>
-                        <div class="setting-item">
-                            <label for="checkerboard-bg1">Фон 1</label>
-                            <div class="input-with-button">
-                                <input type="text" id="checkerboard-bg1" value="rgba(34,34,34,1)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                        <div class="checkerboard-pair-row">
+                            <div class="checkerboard-cell">
+                                <label for="checkerboard-bg1">Фон 1</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="checkerboard-bg1" value="rgba(34,34,34,1)">
+                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                </div>
+                            </div>
+                            <div class="checkerboard-cell">
+                                <label for="checkerboard-font1">Шрифт 1</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
+                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                </div>
                             </div>
                         </div>
-                        <div class="setting-item">
-                            <label for="checkerboard-font1">Шрифт 1</label>
-                            <div class="input-with-button">
-                                <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                        <div class="checkerboard-pair-row">
+                            <div class="checkerboard-cell">
+                                <label for="checkerboard-bg2">Фон 2</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="checkerboard-bg2" value="rgba(42,42,42,1)">
+                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                </div>
                             </div>
-                        </div>
-                        <div class="setting-item">
-                            <label for="checkerboard-bg2">Фон 2</label>
-                            <div class="input-with-button">
-                                <input type="text" id="checkerboard-bg2" value="rgba(42,42,42,1)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                            </div>
-                        </div>
-                        <div class="setting-item">
-                            <label for="checkerboard-font2">Шрифт 2</label>
-                            <div class="input-with-button">
-                                <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                            <div class="checkerboard-cell">
+                                <label for="checkerboard-font2">Шрифт 2</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
+                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </fieldset>
                 
-                <fieldset>
+                <fieldset class="fieldset-collapsible expanded">
                     <legend>Подсветка</legend>
                     <div class="setting-group">
                         <p class="setting-group-title">Текущая реплика (с прогресс-баром)</p>
+                        <div class="setting-group-inline-colors">
                         <div class="setting-item">
-                            <label for="highlight-current-bg">Цвет фона</label>
+                            <label for="highlight-current-bg">Фон</label>
                             <div class="input-with-button">
                                 <input type="text" id="highlight-current-bg" value="rgba(80, 80, 0, 0.4)">
                                 <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                             </div>
                         </div>
                         <div class="setting-item">
-                            <label for="progress-bar-color">Цвет прогресс-бара</label>
+                            <label for="progress-bar-color">Прогресс-бар</label>
                             <div class="input-with-button">
                                 <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
                                 <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                             </div>
+                        </div>
                         </div>
                         <div class="setting-item">
                             <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
@@ -181,39 +205,37 @@
                         </div>
                     </div>
                     <hr>
-                    <div class="setting-group">
-                        <p class="setting-group-title">Подсветка в паузах</p>
-                        <div class="setting-item">
-                            <label for="highlight-pause-bg">Цвет фона</label>
-                            <div class="input-with-button">
-                                <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                            </div>
+                    <div class="setting-group-header-flex pause-inline-color">
+                        <p class="setting-group-title">Цвет подсветки в паузах</p>
+                        <div class="input-with-button">
+                            <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
+                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                         </div>
                     </div>
                     <hr>
                     <div class="setting-group">
-                        <p class="setting-group-title">Подсветка по клику на таймкод</p>
-                        <div class="setting-item">
-                            <label for="highlight-click-enabled">Включить</label>
-                            <input type="checkbox" id="highlight-click-enabled">
+                        <div class="setting-group-header-flex">
+                            <p class="setting-group-title">Подсветка по клику на таймкод</p>
+                            <div class="inline-checkbox">
+                                <input type="checkbox" id="highlight-click-enabled" aria-label="Включить подсветку по клику">
+                            </div>
                         </div>
-                        <div id="highlight-click-options-wrapper" style="display: none;">
-                            <div class="setting-item">
-                                <label for="highlight-click-bg">Цвет фона</label>
+                        <div id="highlight-click-options-wrapper" class="setting-inline-row" style="display: none;">
+                            <div class="setting-item mini">
+                                <label for="highlight-click-bg">Фон</label>
                                 <div class="input-with-button">
                                     <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
                                     <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                                 </div>
                             </div>
-                            <div class="setting-item">
-                            <label for="highlight-click-duration">Длительность (мс)</label>
-                            <input type="number" id="highlight-click-duration" class="short-input">
+                            <div class="setting-item mini">
+                                <label for="highlight-click-duration">Длительность (мс)</label>
+                                <input type="number" id="highlight-click-duration" class="short-input" value="800" min="50" max="60000" step="50">
                             </div>
                         </div>
                     </div>
                 </fieldset>
-                <fieldset>
+                <fieldset class="fieldset-collapsible expanded">
                     <legend>Общие настройки</legend>
                     <div class="setting-item">
                         <label for="title-mode">Заголовок</label>
@@ -229,8 +251,8 @@
                         <input type="text" id="custom-title-text">
                     </div>
                     <div class="setting-item">
-                        <label for="nav-panel-position">Навигационная панель сверху</label>
-                        <input type="checkbox" id="nav-panel-position">
+                        <label for="navigation-panel-position">Навигационная панель сверху</label>
+                        <input type="checkbox" id="navigation-panel-position">
                     </div>
                     <div class="setting-item">
                         <label for="auto-scroll">Автоматическая прокрутка</label>
@@ -265,8 +287,8 @@
                     </div>
                     <div class="setting-item">
                         <label for="ui-scale">Масштаб интерфейса</label>
-                        <input type="range" id="ui-scale" min="50" max="200" step="25">
-                        <span id="ui-scale-value">100%</span>
+                        <input type="range" id="ui-scale" min="50" max="300" step="25">
+                        <span id="ui-scale-value">100</span>
                     </div>
                     <div class="setting-item">
                         <label for="line-spacing">Межстрочный отступ</label>
@@ -278,6 +300,67 @@
                     <button id="reset-settings-button" class="button-danger">Сбросить по умолчанию</button>
                     <button id="save-settings-button">Сохранить</button>
                 </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="actors-modal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close-button" data-close="actors-modal">&times;</span>
+            <h2>Раскраска актёров</h2>
+            <div class="settings-body">
+                <fieldset>
+                    <legend>Сопоставление актёр → роли</legend>
+                    <div class="setting-item-vertical">
+                        <label for="actor-role-mapping-text">Каждая строка: АКТЁР (пробел | запятая | двоеточие) РОЛЬ1, РОЛЬ2, ...</label>
+                        <textarea id="actor-role-mapping-text" rows="6" placeholder="Иванов: РОЛЬ_1, РОЛЬ_2\nПетров РОЛЬ_3, РОЛЬ_4"></textarea>
+                    </div>
+                </fieldset>
+                <fieldset>
+                    <legend>Цвета актёров</legend>
+                    <div id="actor-color-list" class="actor-color-list"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>Роли без актёра</legend>
+                    <div id="unassigned-roles-list" class="unassigned-roles-list" aria-live="polite"></div>
+                </fieldset>
+                <div class="modal-footer-buttons">
+                    <button id="save-actors-button">Сохранить раскраску</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="stats-modal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close-button" data-close="stats-modal">&times;</span>
+            <h2>Статистика</h2>
+            <div class="settings-body" id="stats-body">
+                <div id="stats-roles-section" style="display:none;">
+                    <h3>По ролям</h3>
+                    <table class="stats-table" id="stats-roles-table">
+                        <thead><tr><th>Роль</th><th>Кол-во</th><th>%</th></tr></thead>
+                        <tbody></tbody>
+                        <tfoot><tr><th>Всего</th><th id="stats-roles-total"></th><th>100%</th></tr></tfoot>
+                    </table>
+                </div>
+                <div id="stats-actors-section" style="display:none;">
+                    <h3>По актёрам</h3>
+                    <table class="stats-table" id="stats-actors-table">
+                        <thead><tr><th>Актёр</th><th>Кол-во</th><th>%</th></tr></thead>
+                        <tbody></tbody>
+                        <tfoot><tr><th>Всего</th><th id="stats-actors-total"></th><th>100%</th></tr></tfoot>
+                    </table>
+                </div>
+                <div id="stats-colors-section" style="display:none;">
+                    <h3>По цветам</h3>
+                    <table class="stats-table" id="stats-colors-table">
+                        <thead><tr><th>Цвет</th><th>Кол-во</th><th>%</th></tr></thead>
+                        <tbody></tbody>
+                        <tfoot><tr><th>Всего</th><th id="stats-colors-total"></th><th>100%</th></tr></tfoot>
+                    </table>
+                </div>
+                <div id="stats-empty" style="display:none; opacity:0.7;">Нет данных для статистики.</div>
             </div>
         </div>
     </div>

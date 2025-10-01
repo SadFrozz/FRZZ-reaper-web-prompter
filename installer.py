@@ -8,10 +8,13 @@ import time
 import threading
 
 # --- КОНФИГУРАЦИЯ ---
-ACTION_ID = "FRZZ_WEB_NOTES_READER"
-SCRIPT_NAME = "FRZZ_web_prompter_backend.lua"
+ACTION_ID_BACKEND = "FRZZ_WEB_NOTES_READER"  # backend data/script processor
+ACTION_ID_LAUNCH  = "FRZZ_NOTES_READER_LAUNCH"  # launcher front script
+SCRIPT_BACKEND = "FRZZ_web_prompter_backend.lua"
+SCRIPT_LAUNCH  = "FRZZ_web_prompter.lua"
 WEB_INTERFACE_FILENAME = "prompter.html"
-ACTION_LINE_TEMPLATE = 'SCR 4 0 {id} "Custom: Web Prompter Backend" {script}'
+ACTION_LINE_TEMPLATE_BACKEND = 'SCR 4 0 {id} "Custom: Web Prompter Backend" {script}'
+ACTION_LINE_TEMPLATE_LAUNCH  = 'SCR 4 0 {id} "Custom: Web Prompter Launch" {script}'
 
 # --- ОСНОВНЫЕ ФУНКЦИИ ---
 
@@ -33,24 +36,78 @@ def get_prompter_title():
         return default_title
 
 def copy_script_files(resource_path):
-    print("\n---\n🔎 Шаг 0: Копирование файлов...")
+    print("\n---\n🔎 Шаг 0: Копирование файлов (Scripts + reaper_www_root + UserPlugins)...")
     try:
         base_dir = get_base_path()
         source_scripts_dir = os.path.join(base_dir, 'Scripts')
         source_www_dir = os.path.join(base_dir, 'reaper_www_root')
+        source_userplugins_dir = os.path.join(base_dir, 'UserPlugins')
         if not os.path.isdir(source_scripts_dir) or not os.path.isdir(source_www_dir):
             print(f"⛔️ Ошибка: Не найдены папки Scripts или reaper_www_root рядом с установщиком!"); return False
-        
-        dest_scripts_dir = os.path.join(resource_path, 'Scripts')
-        dest_www_dir = os.path.join(resource_path, 'reaper_www_root') # <-- ИСПРАВЛЕН ПУТЬ
 
-        print(f"Копирую содержимое из '{source_scripts_dir}' в '{dest_scripts_dir}'...")
+        dest_scripts_dir = os.path.join(resource_path, 'Scripts')
+        dest_www_dir = os.path.join(resource_path, 'reaper_www_root')
+        dest_userplugins_dir = os.path.join(resource_path, 'UserPlugins')
+
+        print(f"Копирую Scripts → {dest_scripts_dir}")
         shutil.copytree(source_scripts_dir, dest_scripts_dir, dirs_exist_ok=True)
-        print(f"Копирую содержимое из '{source_www_dir}' в '{dest_www_dir}'...")
+        print(f"Копирую WWW → {dest_www_dir}")
         shutil.copytree(source_www_dir, dest_www_dir, dirs_exist_ok=True)
+
+        if os.path.isdir(source_userplugins_dir):
+            os.makedirs(dest_userplugins_dir, exist_ok=True)
+            copy_userplugins_binaries(source_userplugins_dir, dest_userplugins_dir)
+        else:
+            print("(Инфо) Папка UserPlugins отсутствует — пропуск копирования плагина Reaper WebView.")
+
         print("✅ Файлы успешно скопированы."); return True
     except Exception as e:
         print(f"⛔️ Произошла критическая ошибка при копировании файлов: {e}"); return False
+
+def _sha256(path):
+    """Return SHA256 hex digest of file or None if error."""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+def verify_usage_hint(resource_path):
+    """Verify that key components were successfully copied (by hash equality) and print usage hint.
+
+    Conditions:
+      - Script FRZZ_web_prompter.lua copied (source & destination hashes match)
+      - Plugin binary reaper_webview.(dll|dylib) copied and hashes match
+      - On Windows only: WebView2Loader.dll copied and hashes match
+
+    If all satisfied -> print the required instruction line in Russian.
+    """
+    base_dir = get_base_path()
+    # Paths
+    src_script = os.path.join(base_dir, 'Scripts', SCRIPT_LAUNCH)
+    dst_script = os.path.join(resource_path, 'Scripts', SCRIPT_LAUNCH)
+    system = platform.system()
+    plugin_name = 'reaper_webview.dll' if system == 'Windows' else 'reaper_webview.dylib'
+    src_plugin = os.path.join(base_dir, 'UserPlugins', plugin_name)
+    dst_plugin = os.path.join(resource_path, 'UserPlugins', plugin_name)
+    loader_name = 'WebView2Loader.dll' if system == 'Windows' else None
+    if loader_name:
+        src_loader = os.path.join(base_dir, 'UserPlugins', loader_name)
+        dst_loader = os.path.join(resource_path, 'UserPlugins', loader_name)
+    # Compute hashes
+    script_ok = os.path.exists(src_script) and os.path.exists(dst_script) and _sha256(src_script) == _sha256(dst_script)
+    plugin_ok = os.path.exists(src_plugin) and os.path.exists(dst_plugin) and _sha256(src_plugin) == _sha256(dst_plugin)
+    loader_ok = True
+    if loader_name:
+        loader_ok = os.path.exists(src_loader) and os.path.exists(dst_loader) and _sha256(src_loader) == _sha256(dst_loader)
+    if script_ok and plugin_ok and loader_ok:
+        print("\nℹ️  Для использования внутри Reaper используйте действие Web Prompter Launch")
+        return True
+    return False
 
 def get_reaper_resource_path():
     system = platform.system()
@@ -74,33 +131,96 @@ def get_reaper_resource_path():
         else:
             print("⛔️ Указанный путь некорректен или в нем отсутствует файл 'reaper.ini'. Попробуйте снова.")
 
+def _ensure_action(lines, action_id, script_name, template):
+    action_line = template.format(id=action_id, script=script_name)
+    modified = False
+    found_script_idx = -1
+    found_id_idx = -1
+    for i, line in enumerate(lines):
+        if script_name in line: found_script_idx = i
+        if action_id in line: found_id_idx = i
+    if found_script_idx != -1:
+        if action_id not in lines[found_script_idx]:
+            print(f"Исправляю ID для скрипта {script_name} → {action_id}")
+            lines[found_script_idx] = action_line + '\n'; modified = True
+        else:
+            print(f"✅ Action {action_id} для {script_name} уже корректен.")
+    elif found_id_idx != -1:
+        print(f"Обновляю строку action {action_id} под новый скрипт {script_name}")
+        lines[found_id_idx] = action_line + '\n'; modified = True
+    else:
+        print(f"Добавляю action {action_id} для {script_name}")
+        lines.append(action_line + '\n'); modified = True
+    return modified
+
 def process_keymap_file(resource_path):
     keymap_path = os.path.join(resource_path, 'reaper-kb.ini')
-    action_line = ACTION_LINE_TEMPLATE.format(id=ACTION_ID, script=SCRIPT_NAME)
     print("\n---\n🔎 Шаг 1: Проверка файла горячих клавиш (reaper-kb.ini)...")
     if not os.path.exists(keymap_path):
-        print(f"⚠️ Файл {keymap_path} не найден. Создаю новый...");
-        with open(keymap_path, 'w', encoding='utf-8') as f: f.write(action_line + '\n')
-        print("✅ Файл reaper-kb.ini создан и обновлен."); return
+        print(f"⚠️ Файл {keymap_path} не найден. Создаю новый...")
+        with open(keymap_path, 'w', encoding='utf-8') as f:
+            f.write(ACTION_LINE_TEMPLATE_BACKEND.format(id=ACTION_ID_BACKEND, script=SCRIPT_BACKEND) + '\n')
+            f.write(ACTION_LINE_TEMPLATE_LAUNCH.format(id=ACTION_ID_LAUNCH, script=SCRIPT_LAUNCH) + '\n')
+        print("✅ Файл reaper-kb.ini создан и обновлен (2 actions)."); return
     try:
         with open(keymap_path, 'r', encoding='utf-8') as f: lines = f.readlines()
-        modified = False; found_by_filename_idx = -1; found_by_id_idx = -1
-        for i, line in enumerate(lines):
-            if SCRIPT_NAME in line: found_by_filename_idx = i
-            if ACTION_ID in line: found_by_id_idx = i
-        if found_by_filename_idx != -1:
-            if ACTION_ID not in lines[found_by_filename_idx]:
-                print(f"Найден скрипт '{SCRIPT_NAME}', но у него некорректный ID. Исправляю..."); lines[found_by_filename_idx] = action_line + '\n'; modified = True
-            else: print("✅ Действие для текстового монитора уже корректно прописано.") # <-- Исправлено
-        elif found_by_id_idx != -1:
-            print(f"Найден ID '{ACTION_ID}' со старым именем скрипта. Обновляю..."); lines[found_by_id_idx] = action_line + '\n'; modified = True
-        else:
-            print(f"Действие для текстового монитора не найдено. Добавляю новую запись..."); lines.append(action_line + '\n'); modified = True # <-- Исправлено
-        if modified:
+        modified_backend = _ensure_action(lines, ACTION_ID_BACKEND, SCRIPT_BACKEND, ACTION_LINE_TEMPLATE_BACKEND)
+        modified_launch  = _ensure_action(lines, ACTION_ID_LAUNCH,  SCRIPT_LAUNCH,  ACTION_LINE_TEMPLATE_LAUNCH)
+        if modified_backend or modified_launch:
             with open(keymap_path, 'w', encoding='utf-8') as f: f.writelines(lines)
-            print("✅ Файл reaper-kb.ini успешно обновлен.")
+            print("✅ Файл reaper-kb.ini обновлён.")
     except Exception as e:
         print(f"⛔️ Произошла ошибка при работе с файлом reaper-kb.ini: {e}")
+
+def copy_userplugins_binaries(src_dir, dst_dir):
+    print("🔧 Копирование бинарей UserPlugins (с проверкой хеша)...")
+    import hashlib
+    system = platform.system()
+    pattern = '.dll' if system == 'Windows' else '.dylib'
+    # Собираем список исходных файлов
+    src_files = [f for f in os.listdir(src_dir) if f.lower().endswith(pattern)]
+    if not src_files:
+        print(f"(Инфо) Нет файлов *{pattern} для копирования.")
+        return
+
+    def sha256_of(path):
+        try:
+            h = hashlib.sha256()
+            with open(path, 'rb') as fp:
+                for chunk in iter(lambda: fp.read(65536), b''):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    for fname in src_files:
+        src_path = os.path.join(src_dir, fname)
+        dst_path = os.path.join(dst_dir, fname)
+        src_hash = sha256_of(src_path)
+        dst_hash = sha256_of(dst_path) if os.path.exists(dst_path) else None
+        if dst_hash and src_hash == dst_hash:
+            print(f"⏭  {fname} — уже актуален (hash совпадает). Пропуск.")
+            continue
+
+        while True:
+            try:
+                shutil.copy2(src_path, dst_path)
+                print(f"✅ Скопирован {fname} (hash: {src_hash[:8]}…)")
+                break
+            except PermissionError:
+                print(f"⚠️ Не удалось заменить {fname} — файл занят (возможно, REAPER запущен).")
+                choice = input("Закройте REAPER и выберите: [R]etry / [S]kip / [A]bort: ").strip().lower()
+                if choice.startswith('r'):
+                    continue
+                elif choice.startswith('s'):
+                    print(f"Пропуск файла {fname} по запросу пользователя.")
+                    break
+                else:
+                    print("Прерывание установки пользователем.")
+                    sys.exit(1)
+            except Exception as ex:
+                print(f"⛔️ Ошибка копирования {fname}: {ex}")
+                break
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -199,6 +319,8 @@ if __name__ == "__main__":
              sys.exit("Установка прервана из-за ошибки копирования файлов.")
         process_keymap_file(resource_folder)
         process_web_interface_settings(resource_folder)
+        # Показываем подсказку по использованию только если все ключевые файлы корректно скопированы
+        verify_usage_hint(resource_folder)
         prompt_to_close(30)
     else:
         print("Не удалось определить папку ресурсов REAPER. Установка прервана.")
