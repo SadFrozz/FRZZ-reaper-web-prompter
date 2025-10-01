@@ -150,5 +150,8 @@ jobs:
           body: ${{ steps.body.outputs.body }}
           draft: false
           prerelease: ${{ steps.prerelease.outputs.prerelease }}
+          files: |
+            artifacts/windows/*.exe
+            artifacts/macos/*.command
         env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
