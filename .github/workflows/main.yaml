@@ -1,6 +1,13 @@
-name: Build Python Installer
+name: Build & Release FRZZ Web Prompter
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -62,7 +69,6 @@ jobs:
           installer.py
         echo "Renaming executable to .command"
         mv "dist/FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" "dist/FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}.command"
-
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -70,3 +76,79 @@ jobs:
         path: |
           dist/*.exe
           dist/*.command
+
+  release:
+    name: Create Release from Tag
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-windows-latest
+          path: artifacts/windows
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-macos-latest
+          path: artifacts/macos
+
+      - name: Extract Changelog Section
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}" # e.g. v1.4.0
+          SECTION=""
+          if [ -f CHANGELOG.md ]; then
+            SECTION=$(awk -v tag="$TAG" 'BEGIN{found=0} /^## / { if(found){ exit } } $0 ~ "^## "tag { found=1; next } found { print }' CHANGELOG.md | sed '/^---$/d')
+          fi
+          if [ -z "$SECTION" ]; then
+            echo "ERROR: Changelog section for $TAG not found" >&2
+            exit 1
+          fi
+          echo "section<<EOF" >> $GITHUB_OUTPUT
+          echo "$SECTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Detect Pre-release
+        id: prerelease
+        run: |
+          PRERELEASE=false
+          if grep -E "^## ${GITHUB_REF_NAME} (Alpha|Beta|RC|RC[0-9]+)" CHANGELOG.md >/dev/null 2>&1; then
+            PRERELEASE=true
+          fi
+          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+
+      - name: Build Release Body
+        id: body
+        run: |
+          {
+            echo "body<<EOF"
+            echo "FRZZ Reaper Web Prompter"
+            echo ""
+            echo "Tag: ${GITHUB_REF_NAME}"
+            if [ "${{ steps.prerelease.outputs.prerelease }}" = "true" ]; then echo "(Pre-release)"; fi
+            echo ""
+            echo "Changelog:"; echo ""; echo "${{ steps.changelog.outputs.section }}" | sed 's/^/  /'
+            echo ""
+            echo "Installers:"; echo "  - Windows & macOS installers attached as artifacts in workflow run"
+            echo "(No repackaging performed)"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FRZZ Web Prompter ${{ github.ref_name }}
+          body: ${{ steps.body.outputs.body }}
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

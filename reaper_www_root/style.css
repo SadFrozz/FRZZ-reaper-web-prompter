@@ -52,17 +52,22 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
 .subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; }
-.subtitle-time { min-width: 10.625rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.2em 0.5em; order: 1; display: flex; align-items: center; justify-content: flex-end; }
+.subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.15em 0.4em; order: 1; display: flex; align-items: center; }
+.columns-swapped .subtitle-time { justify-content: flex-end; }
 .role-area { display: flex; align-items: stretch; order: 2; }
 .columns-swapped .subtitle-time { order: 2; }
 .columns-swapped .role-area { order: 1; }
 .columns-swapped .subtitle-time::after { content: ''; width: 0.5rem; height: 2em; background-color: #555; margin-left: 1.5rem; border-radius: 0.25rem; }
-.subtitle-color-swatch { width: 1.875rem; height: auto; margin-right: 0.625rem; border-radius: 0.25rem; flex-shrink: 0; }
+.subtitle-color-swatch { width: 1.875rem; height: auto; margin-right: 0.5rem; border-radius: 0.25rem; flex-shrink: 0; }
+body[data-role-style='column_with_swatch'] .subtitle-color-swatch { width: 0; margin-right: 0; }
+/* Compact swatch mode when role text not shown in a separate column (inline or hidden) */
+.has-inline-swatch .subtitle-color-swatch { width: 0.875rem; margin-right: 0.5rem; border-radius: 0.1875rem; }
+.has-inline-swatch .subtitle-role { display: none; }
 /* ++ ИЗМЕНЕНО: Добавлено правило visibility для исправления разметки ++ */
 .subtitle-role, .subtitle-color-swatch { transition: visibility 0s; }
 .role-hidden { visibility: hidden; }
 .subtitle-role { flex-shrink: 0; padding: 0.2em 0.5em; margin-right: 1.5em; text-align: right; color: #ccc; border-radius: 0.25rem; word-break: break-all; overflow-wrap: break-word; display: flex; align-items: center; justify-content: flex-end; }
-.subtitle-separator { width: 0.5rem; height: auto; background-color: #555; margin-right: 1.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; }
+.subtitle-separator { width: 0.5rem; height: auto; background-color: #555; margin-right: 0.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; }
 .subtitle-content { flex: 1; display: flex; flex-direction: column; order: 3; align-self: center; }
 .subtitle-text { flex: 1; font-size: 0.9em; }
 .subtitle-progress-container { height: 0.3125rem; background-color: #555; border-radius: 0.1875rem; margin-top: 0.5rem; opacity: 0; transition: opacity 0.15s ease-in-out; }
@@ -85,9 +90,12 @@ legend { padding: 0 0.5em; color: #ccc; font-weight: bold; }
 .fieldset-collapsible.collapsed > *:not(legend) { display: none !important; }
 
 /* Checkerboard paired layout */
-.checkerboard-pair-row { display: flex; gap: 1.25rem; margin-bottom: 0.75rem; }
-/* Each cell becomes a horizontal flex row: label | input+button */
+.checkerboard-pair-row { display: flex; gap: 1.25rem; margin-bottom: 0.75rem; flex-wrap: nowrap; }
+.checkerboard-pair-row.wrap { flex-wrap: wrap; }
 .checkerboard-cell { flex: 1; display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+.checkerboard-cell.responsive { flex: 1 1 15rem; }
+/* Each cell becomes a horizontal flex row: label | input+button */
+/* (moved above + extended) */
 .checkerboard-cell > label { flex: 0 0 auto; white-space: nowrap; font-size: 0.95em; }
 .checkerboard-cell .input-with-button { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 0.4rem; }
 .checkerboard-cell .input-with-button input[type="text"] { flex: 0 0 auto; width: 70px; min-width: 70px; padding: 0.35em 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; }
@@ -228,6 +236,9 @@ textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: 
 @media (max-width: 900px) {
     #navigation-panel { padding: 0.75rem 0.75rem 0.9rem; }
     #transport-timecode { letter-spacing: 0.05rem; }
+    /* Allow checkerboard pairs to wrap on narrower viewports */
+    .checkerboard-pair-row { flex-wrap: wrap; }
+    .checkerboard-cell { flex: 1 1 15rem; }
 }
 
 /* Very narrow / compact mode: collapse header layout (no font-size adjustments) */
@@ -236,6 +247,9 @@ textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: 
     #status-indicator { text-align: left; }
     .controls-left label { display: none; }
     #track-selector { max-width: 100%; }
+    /* Aggressive wrapping for very narrow devices */
+    .checkerboard-pair-row { flex-wrap: wrap; }
+    .checkerboard-cell { flex: 1 1 14rem; }
 }
 
 /* Extreme narrow: allow panel horizontal scrolling instead of overflow clipping */
@@ -246,6 +260,8 @@ textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: 
     .panel-controls::-webkit-scrollbar-thumb { background: #555; border-radius: 0.25rem; }
     .panel-controls::-webkit-scrollbar-thumb:hover { background: #666; }
     .controls-left, .controls-right, #transport-status { flex-basis: auto; flex-grow: 0; }
+    .checkerboard-pair-row { flex-wrap: wrap; }
+    .checkerboard-cell { flex: 1 1 12rem; }
 }
 
 /* Light theme adjustments for scrollbars (WebKit) */

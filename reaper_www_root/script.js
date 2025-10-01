@@ -46,6 +46,8 @@ let settings = {};
 let currentProjectName = '';
 let animationFrameId = null;
 let wwr_is_enabled = false;
+// Removed initialLoad flag: applySettings now, by default, uses in-memory `settings` object (source of truth)
+const ORIGINAL_DOCUMENT_TITLE = document.title;
 // High-contrast actor color palette (distinct hues for quick recognition)
 const ACTOR_BASE_COLORS = [
     'rgba(255, 0, 0, 0.9)',       // Red
@@ -135,6 +137,36 @@ $(document).ready(function() {
     }
 
     function lightenColor(hexColor, targetLuminance = 186) { if (!hexColor || hexColor === '#000000') return '#333333'; let hex = hexColor.replace('#', ''); let r = parseInt(hex.substring(0, 2), 16); let g = parseInt(hex.substring(2, 4), 16); let b = parseInt(hex.substring(4, 6), 16); let luminance = (0.299 * r + 0.587 * g + 0.114 * b); if (luminance >= targetLuminance) { return hexColor; } let factor = 0.05; while (luminance < targetLuminance && factor < 1) { r = Math.min(255, r + (255 - r) * factor); g = Math.min(255, g + (255 - g) * factor); b = Math.min(255, b + (255 - b) * factor); luminance = (0.299 * r + 0.587 * g + 0.114 * b); factor += 0.05; } return '#' + Math.round(r).toString(16).padStart(2, '0') + Math.round(g).toString(16).padStart(2, '0') + Math.round(b).toString(16).padStart(2, '0'); }
+    // Generic lightener for rgba/hex input returning bg + contrasting text color.
+    function lightenGeneric(colorStr, forceLightBg = true) {
+        try {
+            if (!colorStr) return { bg: '#666', text: '#000' };
+            let r,g,b,a = 1;
+            if (colorStr.startsWith('#')) {
+                let hex = colorStr.replace('#','');
+                if (hex.length === 3) hex = hex.split('').map(c=>c+c).join('');
+                r = parseInt(hex.substring(0,2),16); g = parseInt(hex.substring(2,4),16); b = parseInt(hex.substring(4,6),16);
+            } else if (/^rgba?/i.test(colorStr)) {
+                const m = colorStr.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([0-9.]+))?\)/i);
+                if (m) { r=+m[1]; g=+m[2]; b=+m[3]; if(m[4]!==undefined) a=+m[4]; }
+            } else { return { bg: colorStr, text: '#000' }; }
+            const lum = 0.299*r + 0.587*g + 0.114*b;
+            if (forceLightBg && lum < 186) {
+                // brighten progressively
+                let factor = 0.05;
+                while ((0.299*r + 0.587*g + 0.114*b) < 186 && factor < 1) {
+                    r = Math.min(255, r + (255-r)*factor);
+                    g = Math.min(255, g + (255-g)*factor);
+                    b = Math.min(255, b + (255-b)*factor);
+                    factor += 0.05;
+                }
+            }
+            const outLum = 0.299*r + 0.587*g + 0.114*b;
+            const text = outLum > 149 ? '#000000' : '#ffffff';
+            if (a !== 1) return { bg: `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`, text };
+            return { bg: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`, text };
+        } catch(e){ console.warn('lightenGeneric failed', e); return { bg: colorStr || '#666', text:'#000'}; }
+    }
     
     function formatTimecode(totalSeconds) { const hours = Math.floor(totalSeconds / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = Math.floor(totalSeconds % 60); const frames = Math.floor((totalSeconds - Math.floor(totalSeconds)) * settings.frameRate); return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`; }
     
@@ -143,13 +175,31 @@ $(document).ready(function() {
     function kebabToCamel(s) { return s.replace(/-./g, x => x.charAt(1).toUpperCase()); }
 
     function updateTitle() {
+        // Centralized title logic (window + H1). Prevent other functions from mutating document.title directly.
         $('body').removeClass('title-hidden');
+        let docTitle = ORIGINAL_DOCUMENT_TITLE;
         switch (settings.titleMode) {
-            case 'project_name': const displayName = currentProjectName ? `Текущий проект: ${currentProjectName}` : 'Загрузка имени проекта...'; mainTitle.text(displayName); break;
-            case 'custom_text': mainTitle.text(settings.customTitleText); break;
-            case 'none': $('body').addClass('title-hidden'); break;
-            default: mainTitle.text('Интерактивный текстовый монитор'); break;
+            case 'project_name': {
+                const displayName = currentProjectName ? `Текущий проект: ${currentProjectName}` : 'Загрузка имени проекта...';
+                mainTitle.text(displayName);
+                if (currentProjectName) docTitle = `${currentProjectName} – ${ORIGINAL_DOCUMENT_TITLE}`;
+                break;
+            }
+            case 'custom_text': {
+                mainTitle.text(settings.customTitleText || '');
+                if (settings.customTitleText) docTitle = `${settings.customTitleText} – ${ORIGINAL_DOCUMENT_TITLE}`;
+                break;
+            }
+            case 'none': {
+                $('body').addClass('title-hidden');
+                break;
+            }
+            default: {
+                mainTitle.text('Интерактивный текстовый монитор');
+                break;
+            }
         }
+        document.title = docTitle;
     }
    
     function updateScaleWrapperVisibility() {
@@ -173,22 +223,38 @@ $(document).ready(function() {
         });
     }
 
-    function applySettings() {
+    function applySettings(options) {
         try {
-            const tempSettings = {};
-            Object.keys(defaultSettings).forEach(key => {
-                const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
-                const el = $(id);
-                if (el.length) {
-                    if (el.is(':checkbox')) { tempSettings[key] = el.is(':checked'); }
-                    else if (el.is('input[type="range"]')) { const val = parseInt(el.val(), 10); tempSettings[key] = key === 'scrollSpeed' ? speedSteps[val] : val; }
-                    else if (el.is('input[type="number"]')) { tempSettings[key] = parseInt(el.val(), 10); }
-                    else { const color = el.spectrum("get"); if (color && color.toRgbString) { tempSettings[key] = color.toRgbString(); } else { tempSettings[key] = el.val(); } }
-                } else { tempSettings[key] = settings[key] || defaultSettings[key]; }
-            });
+            const fromDom = !!(options && options.fromDom);
+            let tempSettings;
+            if (!fromDom) {
+                // Use in-memory settings (authoritative)
+                tempSettings = { ...settings };
+            } else {
+                // Explicit DOM snapshot (used during live preview in future or if needed)
+                tempSettings = {};
+                Object.keys(defaultSettings).forEach(key => {
+                    const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
+                    const el = $(id);
+                    if (el.length) {
+                        if (el.is(':checkbox')) { tempSettings[key] = el.is(':checked'); }
+                        else if (el.is('input[type="range"]')) { const val = parseInt(el.val(), 10); tempSettings[key] = key === 'scrollSpeed' ? speedSteps[val] : val; }
+                        else if (el.is('input[type="number"]')) { tempSettings[key] = parseInt(el.val(), 10); }
+                        else {
+                            const color = el.spectrum && el.spectrum("get");
+                            if (color && color.toRgbString) { tempSettings[key] = color.toRgbString(); }
+                            else { tempSettings[key] = el.val(); }
+                        }
+                    } else { tempSettings[key] = settings[key] || defaultSettings[key]; }
+                });
+            }
             // Sanitize highlightClickDuration
             if (isNaN(tempSettings.highlightClickDuration) || tempSettings.highlightClickDuration <= 0 || tempSettings.highlightClickDuration > 60000) {
                 tempSettings.highlightClickDuration = settings.highlightClickDuration || defaultSettings.highlightClickDuration;
+            }
+            // Keep authoritative settings in sync with sanitized value (prevents modal showing stale invalid value)
+            if (settings.highlightClickDuration !== tempSettings.highlightClickDuration) {
+                settings.highlightClickDuration = tempSettings.highlightClickDuration;
             }
 
             // Preserve last non-empty keywords while user toggles other options (live preview phase)
@@ -208,16 +274,11 @@ $(document).ready(function() {
                 tempSettings.theme = themeToggle.is(':checked') ? 'light' : 'dark';
             } else if (!tempSettings.theme) { tempSettings.theme = 'dark'; }
 
-            // Live preview for title mode (previously only applied when project name arrived)
-            (function previewTitleMode(ts) {
-                $('body').removeClass('title-hidden');
-                if (ts.titleMode === 'none') { $('body').addClass('title-hidden'); }
-                else if (ts.titleMode === 'custom_text') { mainTitle.text(ts.customTitleText || ''); }
-                else if (ts.titleMode === 'project_name') { const displayName = currentProjectName ? `Текущий проект: ${currentProjectName}` : 'Загрузка имени проекта...'; mainTitle.text(displayName); }
-                else if (ts.titleMode === 'placeholder') { mainTitle.text('Интерактивный текстовый монитор'); }
-            })(tempSettings);
+            // Apply persistent settings (do not mutate global settings here, only visual application)
 
             $('body').toggleClass('light-theme', tempSettings.theme === 'light');
+            // Expose role display style for CSS-based adjustments
+            document.body.setAttribute('data-role-style', tempSettings.roleDisplayStyle || '');
             navigationPanel.toggleClass('top-panel', tempSettings.navigationPanelPosition === 'top');
             $('body').toggleClass('columns-swapped', tempSettings.swapColumns);
             $('body').toggleClass('hide-empty-role-column', tempSettings.autoHideEmptyColumn);
@@ -276,12 +337,23 @@ $(document).ready(function() {
             settingsStyle.text(styleText);
             // After applying font/UI scale, re-evaluate navigation panel wrapping
             scheduleTransportWrapEvaluation();
+            // Ensure visual title reflects authoritative settings + currentProjectName
+            updateTitle();
         } catch (e) { console.error("Error in applySettings:", e); }
     }
 
     // ++ НОВАЯ ФУНКЦИЯ: Обновляет весь UI в соответствии с объектом settings ++
     function updateUIFromSettings() {
         const s = settings;
+        // Helper to ensure a select reflects a value even if option missing (inject fallback)
+        function ensureSelectValue($sel, val){
+            if(!$sel || !$sel.length) return;
+            if($sel.find(`option[value="${val}"]`).length === 0){
+                // Inject fallback without localization (raw value) to avoid losing state
+                $sel.append(`<option value="${val}">${val}</option>`);
+            }
+            $sel.val(val);
+        }
         Object.keys(s).forEach(key => {
             const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
             const el = $(id);
@@ -300,6 +372,18 @@ $(document).ready(function() {
             }
         });
 
+        // Explicit sync for select fields that might have dynamic options or be out of DOM iteration order
+        // titleMode
+        if (titleModeSelect && titleModeSelect.length) { ensureSelectValue(titleModeSelect, s.titleMode); customTitleWrapper.toggle(s.titleMode === 'custom_text'); }
+        // roleDisplayStyle
+        if (roleDisplayStyleSelect && roleDisplayStyleSelect.length) { ensureSelectValue(roleDisplayStyleSelect, s.roleDisplayStyle); }
+        // checkerboard mode
+        const checkerboardModeSelect = $('#checkerboard-mode');
+        if (checkerboardModeSelect.length) { ensureSelectValue(checkerboardModeSelect, s.checkerboardMode || defaultSettings.checkerboardMode); }
+        // font family select
+        const fontFamilySelect = $('#font-family');
+        if (fontFamilySelect.length) { ensureSelectValue(fontFamilySelect, s.fontFamily || defaultSettings.fontFamily); }
+
         // Reflect navigation panel position into checkbox
         const navPosCheckbox = $('#navigation-panel-position');
         if (navPosCheckbox.length) {
@@ -312,7 +396,7 @@ $(document).ready(function() {
             themeToggle.prop('checked', s.theme === 'light');
         }
 
-        customTitleWrapper.toggle(s.titleMode === 'custom_text');
+    // (Handled above for reliability)
         autoFindKeywordsWrapper.toggle(s.autoFindTrack);
         $('#scroll-speed-wrapper').toggle(s.autoScroll);
         // Explicitly set value for auto-find keywords input (was missing, causing empty overwrite on save)
@@ -386,6 +470,9 @@ $(document).ready(function() {
     // Save visual/settings (actors excluded, stored separately)
     function saveSettings() {
         try {
+            // Snapshot actor-related data to preserve across visual settings rebuild
+            const actorMappingSnapshot = settings.actorRoleMappingText;
+            const actorColorsSnapshot = settings.actorColors;
             const settingsToSave = {};
             Object.keys(defaultSettings).forEach(key => {
                 const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
@@ -418,11 +505,34 @@ $(document).ready(function() {
                 settingsToSave.theme = themeToggle.is(':checked') ? 'light' : 'dark';
             }
             
+            // Reinstate actor mapping/colors (they have no controls inside settings modal)
+            settingsToSave.actorRoleMappingText = actorMappingSnapshot;
+            settingsToSave.actorColors = actorColorsSnapshot;
+
+            // Track previous role mapping size to detect sudden loss (diagnostic)
+            const prevRoleMapSize = Object.keys(roleToActor || {}).length;
             settings = settingsToSave;
             localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
             console.debug('[Prompter][saveSettings] Saved settings:', JSON.parse(JSON.stringify(settings)));
             applySettings();
-            if (subtitleData.length > 0) handleTextResponse(subtitleData); // Перерисовываем текст
+
+            // Determine whether we really need full subtitle re-render
+            const impactingKeys = [
+                'processRoles','roleDisplayStyle','enableColorSwatches','checkerboardEnabled','checkerboardMode',
+                'checkerboardBg1','checkerboardFont1','checkerboardBg2','checkerboardFont2','roleFontColorEnabled',
+                'highlightCurrentRoleEnabled'
+            ];
+            let needRerender = false;
+            for (const k of impactingKeys) {
+                if (k in settingsToSave && settingsToSave[k] !== undefined) { needRerender = true; break; }
+            }
+            if (needRerender && subtitleData.length > 0) {
+                handleTextResponse(subtitleData);
+                const newRoleMapSize = Object.keys(roleToActor || {}).length;
+                if (prevRoleMapSize > 0 && newRoleMapSize === 0) {
+                    console.warn('[Prompter][saveSettings] Actor role mapping lost after save; will rely on roles file integration to restore colors.');
+                }
+            }
             
             const settingsForFile = { ...settings };
             delete settingsForFile.actorRoleMappingText;
@@ -562,7 +672,13 @@ $(document).ready(function() {
                 console.debug('[Prompter][roles][integrateLoadedRoles] applied roles data');
                 // Rebuild maps and optionally re-render existing subtitles
                 buildActorRoleMaps();
-                if (subtitleData.length > 0) handleTextResponse(subtitleData);
+                if (subtitleData.length > 0) {
+                    // Only re-render if current mapping is empty OR actor colors exist (to refresh)
+                    const currentMapSize = Object.keys(roleToActor||{}).length;
+                    if (currentMapSize === 0 || Object.keys(settings.actorColors||{}).length > 0) {
+                        handleTextResponse(subtitleData);
+                    }
+                }
             }
         } catch(err){ console.error('[Prompter][roles] integrateLoadedRoles failed', err); }
     }
@@ -580,10 +696,20 @@ $(document).ready(function() {
         } catch(e) { console.error("Error in initialize:", e); }
     }
 
-    function getProjectName() {
+    function getProjectName(retry=0) {
+        const MAX_RETRIES = 6;
+        const BASE_DELAY = 160; // ms
         wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_NAME');
-        setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
-        setTimeout(() => { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_name'); }, 250);
+        setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry*15);
+        setTimeout(()=> {
+            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_name');
+            setTimeout(()=> {
+                if(!currentProjectName && retry < MAX_RETRIES) {
+                    console.debug('[Prompter][projectName] retry', retry+1);
+                    getProjectName(retry+1);
+                }
+            }, 60 + retry*35);
+        }, BASE_DELAY + retry*70);
     }
 
     function getTracks() {
@@ -641,6 +767,22 @@ $(document).ready(function() {
             tracks.forEach(track => { trackSelector.append(`<option value="${track.id}">${track.id + 1}: ${track.name}</option>`); });
             statusIndicator.text('Список дорожек загружен.');
             autoFindSubtitleTrack();
+            // Fail-safe: если через очень короткое время субтитры не подгружены, повторяем попытку один раз
+            if (!subtitleData || subtitleData.length === 0) {
+                setTimeout(() => {
+                    if ((!subtitleData || subtitleData.length === 0) && $('#track-selector option').length > 0) {
+                        console.debug('[Prompter][auto-load] retrying initial subtitle fetch');
+                        if (!settings.autoFindTrack) {
+                            // Возьмём первый трек если авто-поиск выключен
+                            $('#track-selector option:first').prop('selected', true);
+                            getText($('#track-selector').val());
+                        } else {
+                            // Повторный autoFind (мог не сработать из-за ещё не готовых settings)
+                            autoFindSubtitleTrack();
+                        }
+                    }
+                }, 800);
+            }
         } catch (e) {
             statusIndicator.text('Ошибка обработки списка дорожек.');
             console.error(e);
@@ -659,7 +801,13 @@ $(document).ready(function() {
             if ($('#track-selector option').length > 0) { $('#track-selector option:first').prop('selected', true); getText($('#track-selector').val()); }
             return;
         }
-        const keywords = settings.autoFindKeywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        const rawKw = (settings.autoFindKeywords || '').trim();
+        const keywords = rawKw.length ? rawKw.split(',').map(k => k.trim().toLowerCase()).filter(Boolean) : [];
+        if (keywords.length === 0) {
+            // Нет ключевых слов — просто берём первый трек
+            $('#track-selector option:first').prop('selected', true); getText($('#track-selector').val());
+            return;
+        }
         let found = false;
         $('#track-selector option').each(function() {
             const trackName = $(this).text().toLowerCase();
@@ -713,38 +861,55 @@ $(document).ready(function() {
                     else if (settings.checkerboardMode === 'by_color') { const currentColor = line.color || 'no_color'; if (currentColor !== lastColorForCheckerboard) { colorIndex = 1 - colorIndex; lastColorForCheckerboard = currentColor; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
                 }
                 
-                const hasColor = line.color;
-                const showRoleInColumn = settings.processRoles && role && (settings.roleDisplayStyle === 'column' || settings.roleDisplayStyle === 'column_with_swatch');
-                const showSwatch = settings.enableColorSwatches && hasColor && settings.roleDisplayStyle !== 'column_with_swatch' && !showRoleInColumn;
+                const itemColor = line.color || null;
+                const actor = role && roleToActor[role] ? roleToActor[role] : null;
+                const actorColor = actor && settings.actorColors ? settings.actorColors[actor] : null;
+                // Вычисляем окончательный цвет роли (actor имеет приоритет над item)
+                const finalRoleColor = actorColor || itemColor || null;
+                const isColumn = settings.roleDisplayStyle === 'column';
+                const isColumnWithSwatch = settings.roleDisplayStyle === 'column_with_swatch';
+                const showRoleInColumn = settings.processRoles && role && (isColumn || isColumnWithSwatch);
+                // В режиме 'column' хотим видеть отдельный цветной квадратик (свотч), но не фон ярлыка
+                let showSwatch = false;
+                if (settings.enableColorSwatches && !!finalRoleColor) {
+                    if (isColumn) {
+                        showSwatch = true; // специально показываем свотч рядом с ролью в колонке
+                    } else if (!isColumnWithSwatch && !showRoleInColumn) {
+                        // inline вариант или роль не отображается как колонка
+                        showSwatch = true;
+                    }
+                }
                 
                 // ++ ИЗМЕНЕНО: Используем visibility для сохранения разметки ++
                 roleElement.css('visibility', showRoleInColumn ? 'visible' : 'hidden');
                 swatchElement.css('visibility', showSwatch ? 'visible' : 'hidden');
-                
-                // Inject actor-based background color if available (only inside REAPER editing context)
-                let actorColorApplied = false;
-                if (role && roleToActor[role] && settings.roleDisplayStyle !== 'inline') {
-                    const actor = roleToActor[role];
-                    const actorColor = settings.actorColors && settings.actorColors[actor];
-                    if (actorColor) {
-                        // Apply actor color and set tooltip with actor name
-                        let effectiveBgColor = actorColor;
-                        let effectiveTextColor = isColorLight(effectiveBgColor) ? '#000' : '#fff';
-                        dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .subtitle-role { background-color: ${effectiveBgColor}; color: ${effectiveTextColor}; }`;
-                        roleElement.attr('title', actor);
-                        actorColorApplied = true;
-                    }
+                if (showSwatch && !showRoleInColumn) {
+                    lineElement.addClass('has-inline-swatch');
                 }
-
-                if (!actorColorApplied && showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches && hasColor) {
-                    roleElement.addClass('role-colored-bg').css('visibility', 'visible');
-                    let effectiveBgColor = line.color, effectiveTextColor;
-                    if (settings.roleFontColorEnabled) { effectiveBgColor = lightenColor(line.color); effectiveTextColor = '#000000'; }
-                    else { effectiveTextColor = isColorLight(effectiveBgColor) ? '#000000' : '#ffffff'; }
-                    dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .role-colored-bg { background-color: ${effectiveBgColor}; color: ${effectiveTextColor}; }`;
-                } else if (showSwatch) { swatchElement.css('background-color', line.color); }
                 
-                lineElement.find('.role-area').toggleClass('role-area-is-empty', !showRoleInColumn && !showSwatch);
+                // Унифицированная логика окраски роли
+                if (finalRoleColor) {
+                    let effectiveBg = finalRoleColor;
+                    let effectiveText;
+                    if (settings.roleFontColorEnabled) {
+                        // Принудительно делаем фон пригодным для чёрного текста
+                        const adj = lightenGeneric(finalRoleColor, true);
+                        effectiveBg = adj.bg;
+                        effectiveText = '#000000';
+                    } else {
+                        effectiveText = isColorLight(effectiveBg) ? '#000000' : '#ffffff';
+                    }
+                    if (showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches) {
+                        roleElement.addClass('role-colored-bg').css('visibility', 'visible');
+                        dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .role-colored-bg { background-color: ${effectiveBg}; color: ${effectiveText}; }`;
+                    } else if (showSwatch) {
+                        swatchElement.css('background-color', effectiveBg);
+                        // Контраст текста внутри самой роли не нужен (роль скрыта или inline)
+                    }
+                    if (actor) { roleElement.attr('title', actor); }
+                }
+                
+                lineElement.find('.role-area').toggleClass('role-area-is-empty', !(showRoleInColumn || showSwatch));
                 
                 textDisplay.append(lineElement);
                 subtitleElements.push(lineElement);
@@ -952,7 +1117,11 @@ $(document).ready(function() {
     // --- ОБРАБОТЧИКИ СОБЫТИЙ ---
     trackSelector.on('change', function() { getText($(this).val()); });
     refreshButton.on('click', getTracks);
-    $('#settings-button').on('click', function() { $('#settings-modal').show(); });
+    $('#settings-button').on('click', function() {
+        // Refresh form fields from authoritative settings before showing
+        updateUIFromSettings();
+        $('#settings-modal').show();
+    });
     $('.modal-close-button, #settings-modal').on('click', function(event) { if (event.target === this) $('#settings-modal').hide(); });
     saveSettingsButton.on('click', saveSettings);
     resetSettingsButton.on('click', resetSettings);
@@ -1139,9 +1308,7 @@ $(document).ready(function() {
     
     // --- ЗАПУСК ---
     // Async init chain: load settings first, then initialize engine.
-    loadSettings().then(() => {
-        initialize();
-    });
+    loadSettings().then(() => { applySettings(); initialize(); });
     // Dynamic viewport & safe-area handling (Android/iOS address bar, gesture insets)
     (function setupViewportMetrics(){
         const root = document.documentElement;
