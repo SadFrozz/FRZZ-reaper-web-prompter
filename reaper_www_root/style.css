@@ -49,7 +49,7 @@ h1 { margin: 0; flex-grow: 1; font-size: 2em; }
 .status-record { color: #F44336; }
 .status-record #icon-record { display: block; }
 main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #1e1e1e; border-radius: 0.5rem; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.3); order: 0; }
-#text-display-wrapper { flex-grow: 1; overflow-y: auto; }
+#text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
 .subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; }
 .subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.15em 0.4em; order: 1; display: flex; align-items: center; }

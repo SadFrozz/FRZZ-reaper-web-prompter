@@ -72,6 +72,7 @@ $(document).ready(function() {
     const mainTitle = $('h1');
     const trackSelector = $('#track-selector');
     const textDisplay = $('#text-display');
+    const textDisplayWrapper = $('#text-display-wrapper');
     const statusIndicator = $('#status-indicator');
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
@@ -109,8 +110,45 @@ $(document).ready(function() {
     const roleFontColorEnabledCheckbox = $('#role-font-color-enabled');
     let subtitleData = [];
     let subtitleElements = [];
+    // rAF id for render loop
+    // Move transportWrapRaf early to avoid TDZ error when scheduleTransportWrapEvaluation runs during applySettings
+    let transportWrapRaf = null;
+    // When roles.json is successfully loaded, prefer actor colors over per-line color entirely
+    let rolesLoaded = false;
+    // Guards to avoid duplicate loads
+    let subtitleLoadInFlight = false;
+    let subtitleLoadTrackId = null;
+    let subtitlesLoadedOnce = false;
     let currentLineIndex = -1;
     let latestTimecode = 0;
+    // Enable passive listeners for common scroll-blocking events registered via jQuery (.on)
+    (function enableJQueryPassive(){
+        try {
+            if ($.event && $.event.special) {
+                const evts = ['wheel','mousewheel','touchstart','touchmove','scroll'];
+                evts.forEach(evt => {
+                    const special = $.event.special[evt] = $.event.special[evt] || {};
+                    const setupOrig = special.setup;
+                    special.setup = function(_, ns, handle){
+                        this.addEventListener(evt, handle, { passive: true });
+                        return false; // prevent jQuery from adding non-passive fallback
+                    };
+                    // Also ensure teardown removes our listener
+                    const teardownOrig = special.teardown;
+                    special.teardown = function(_, ns){
+                        // jQuery passes the same handler
+                        // We can't access it here reliably; fallback to allow default teardown
+                        if (teardownOrig) return teardownOrig.apply(this, arguments);
+                        return false;
+                    };
+                });
+                console.debug('[Prompter][perf] jQuery passive listeners enabled for wheel/touch/scroll');
+            }
+        } catch(e) { console.warn('[Prompter][perf] failed to enable jQuery passive listeners', e); }
+    })();
+
+    console.info('[Prompter] document ready init start');
+
     // Actor coloring runtime caches
     let roleToActor = {}; // role -> actor
     let actorToRoles = {}; // actor -> Set(roles)
@@ -120,6 +158,14 @@ $(document).ready(function() {
     scrollSpeedSlider.attr('min', 0).attr('max', speedSteps.length - 1).attr('step', 1);
 
     // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+    // Simple debounce helper
+    function debounce(fn, ms) {
+        let t = null;
+        return function(...args){
+            if (t) clearTimeout(t);
+            t = setTimeout(() => fn.apply(this, args), ms);
+        };
+    }
     function isColorLight(color) {
         try {
             let r, g, b;
@@ -174,7 +220,20 @@ $(document).ready(function() {
 
     function kebabToCamel(s) { return s.replace(/-./g, x => x.charAt(1).toUpperCase()); }
 
+    // Emulation mode detection: enabled if ?emumode present and not explicitly 0/false
+    function isEmuMode() {
+        try {
+            const sp = new URLSearchParams(window.location.search);
+            if (!sp.has('emumode')) return false;
+            const v = sp.get('emumode');
+            if (v == null || v === '') return true;
+            if (/^(0|false)$/i.test(v)) return false;
+            return true;
+        } catch (_) { return false; }
+    }
+
     function updateTitle() {
+        console.debug('[Prompter][title] updateTitle', { titleMode: settings.titleMode, currentProjectName });
         // Centralized title logic (window + H1). Prevent other functions from mutating document.title directly.
         $('body').removeClass('title-hidden');
         let docTitle = ORIGINAL_DOCUMENT_TITLE;
@@ -225,6 +284,7 @@ $(document).ready(function() {
 
     function applySettings(options) {
         try {
+            console.debug('[Prompter][applySettings] applying', { fromDom: !!(options && options.fromDom) });
             const fromDom = !!(options && options.fromDom);
             let tempSettings;
             if (!fromDom) {
@@ -339,6 +399,7 @@ $(document).ready(function() {
             scheduleTransportWrapEvaluation();
             // Ensure visual title reflects authoritative settings + currentProjectName
             updateTitle();
+            console.debug('[Prompter][applySettings] done');
         } catch (e) { console.error("Error in applySettings:", e); }
     }
 
@@ -421,6 +482,20 @@ $(document).ready(function() {
     }
 
     async function loadSettings() {
+        const t0 = performance.now();
+        console.info('[Prompter][loadSettings] start', { emu: isEmuMode() });
+        if (isEmuMode()) {
+            // In EMU mode we do NOT fetch root settings.json, rely on defaults; reference/settings.json will be applied in loadEmuData
+            settings = { ...defaultSettings };
+            $('#ui-scale').attr({ min:50, max:300, step:25 });
+            initializeColorPickers();
+            updateUIFromSettings();
+            applySettings();
+            console.info('[Prompter][loadSettings] EMU: skip root settings.json; defaults applied');
+            const t1 = performance.now();
+            console.info('[Prompter][loadSettings] done', { ms: Math.round(t1 - t0) });
+            return;
+        }
         // Attempt to read settings.json from REAPER resource web root.
         // Rule: if file exists -> use it (ignore localStorage). If not -> defaults (optionally merge any localStorage overrides later if desired).
         let fileSettings = null;
@@ -465,6 +540,8 @@ $(document).ready(function() {
         updateUIFromSettings();
         applySettings();
         console.debug('[Prompter][loadSettings] Effective settings:', JSON.parse(JSON.stringify(settings)));
+        const t1 = performance.now();
+        console.info('[Prompter][loadSettings] done', { ms: Math.round(t1 - t0) });
     }
 
     // Save visual/settings (actors excluded, stored separately)
@@ -667,9 +744,11 @@ $(document).ready(function() {
             if(!jsonText) return;
             const parsed = JSON.parse(jsonText);
             if (parsed && typeof parsed === 'object') {
+                console.info('[Prompter][roles][integrateLoadedRoles] parsed', { hasMapping: !!parsed.actorRoleMappingText, colors: parsed.actorColors ? Object.keys(parsed.actorColors).length : 0 });
                 if (typeof parsed.actorRoleMappingText === 'string') settings.actorRoleMappingText = parsed.actorRoleMappingText;
                 if (parsed.actorColors && typeof parsed.actorColors === 'object') settings.actorColors = parsed.actorColors;
                 console.debug('[Prompter][roles][integrateLoadedRoles] applied roles data');
+                rolesLoaded = true;
                 // Rebuild maps and optionally re-render existing subtitles
                 buildActorRoleMaps();
                 if (subtitleData.length > 0) {
@@ -685,6 +764,8 @@ $(document).ready(function() {
     
     function initialize() {
         try {
+            const t0 = performance.now();
+            console.info('[Prompter] initialize (REAPER mode)');
             statusIndicator.text('Подключение к REAPER...');
             wwr_start();
             getTracks();
@@ -693,12 +774,15 @@ $(document).ready(function() {
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
+            const t1 = performance.now();
+            console.info('[Prompter] initialize done', { ms: Math.round(t1 - t0) });
         } catch(e) { console.error("Error in initialize:", e); }
     }
 
     function getProjectName(retry=0) {
         const MAX_RETRIES = 6;
         const BASE_DELAY = 160; // ms
+        console.debug('[Prompter][projectName] request');
         wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_NAME');
         setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry*15);
         setTimeout(()=> {
@@ -713,27 +797,71 @@ $(document).ready(function() {
     }
 
     function getTracks() {
+        if (isEmuMode()) {
+            // In emu, just refresh mock tracks list
+            console.info('[Prompter][EMU] getTracks mock');
+            statusIndicator.text('Эмуляция: загрузка списка дорожек...');
+            updateTrackSelector([{ id: 0, name: 'Subtitles' }]);
+            return;
+        }
+        const t0 = performance.now();
+        console.debug('[Prompter] getTracks real');
         statusIndicator.text('Запрос списка дорожек...');
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TRACKS`);
         setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
-        setTimeout(() => { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/response_tracks'); }, 250);
+        setTimeout(() => { 
+            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/response_tracks');
+            const t1 = performance.now();
+            console.debug('[Prompter] getTracks request issued', { ms: Math.round(t1 - t0) });
+        }, 250);
     }
 
     function getText(trackId) {
+        const t0 = performance.now();
+        console.info('[Prompter] getText request', { trackId, emu: isEmuMode(), inFlight: subtitleLoadInFlight, alreadyLoaded: subtitlesLoadedOnce });
+        // In emu mode, bypass REAPER and load from reference/<subtitle>.json
+        if (isEmuMode()) {
+            if (subtitlesLoadedOnce) { console.info('[Prompter][EMU] subtitles already loaded, skip getText'); return; }
+            try {
+                statusIndicator.text(`(EMU) Загрузка субтитров...`);
+                textDisplay.html('<p>Загрузка текста (эмуляция)...</p>');
+                const sp = new URLSearchParams(window.location.search);
+                const subtitleName = sp.get('subtitle') || 'subtitles';
+                const url = `reference/${subtitleName}.json?_ts=${Date.now()}`;
+                console.debug('[Prompter][EMU] fetch subtitles', { url });
+                const f0 = performance.now();
+                fetch(url)
+                    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+                    .then(data => { const f1 = performance.now(); console.info('[Prompter][EMU] subtitles loaded', { count: Array.isArray(data)? data.length: 'n/a', ms: Math.round(f1 - f0) }); handleTextResponse(data); })
+                    .catch(err => {
+                        statusIndicator.text('Ошибка загрузки файла субтитров (EMU).');
+                        textDisplay.html('<p>Не удалось загрузить reference/*.json. Проверьте локальные файлы.</p>');
+                        console.error('[EMU] subtitles load failed', err);
+                    })
+                    .finally(() => { const t1 = performance.now(); console.debug('[Prompter] getText (EMU) total', { ms: Math.round(t1 - t0) }); });
+            } catch (e) {
+                console.error('[EMU] getText failed', e);
+            }
+            return;
+        }
+        if (subtitleLoadInFlight && subtitleLoadTrackId === trackId) { console.warn('[Prompter] getText skipped: already in-flight for track', trackId); return; }
+        subtitleLoadInFlight = true; subtitleLoadTrackId = trackId;
         statusIndicator.text(`Запрос текста с дорожки ${trackId}...`);
         textDisplay.html('<p>Загрузка текста...</p>');
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command_param/${trackId}`);
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TEXT`);
         setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
         setTimeout(() => {
+            const f0 = performance.now();
             fetch('/subtitles.json?v=' + new Date().getTime())
                 .then(response => { if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`); return response.json(); })
-                .then(data => handleTextResponse(data))
+                .then(data => { const f1 = performance.now(); console.info('[Prompter] subtitles loaded (real)', { count: Array.isArray(data)? data.length : 'n/a', ms: Math.round(f1 - f0) }); handleTextResponse(data); })
                 .catch(error => {
                     statusIndicator.text('Ошибка загрузки файла субтитров.');
                     textDisplay.html('<p>Не удалось загрузить субтитры. Проверьте, что Reaper запущен и скрипты установлены корректно.</p>');
                     console.error(error);
-                });
+                })
+                .finally(() => { subtitleLoadInFlight = false; const t1 = performance.now(); console.debug('[Prompter] getText (real) total', { ms: Math.round(t1 - t0) }); });
         }, 500);
     }
     
@@ -762,43 +890,145 @@ $(document).ready(function() {
     function handleTracksResponse(jsonData) {
         if (!jsonData) return;
         try {
+            console.debug('[Prompter] handleTracksResponse');
             const tracks = JSON.parse(jsonData);
             trackSelector.empty();
             tracks.forEach(track => { trackSelector.append(`<option value="${track.id}">${track.id + 1}: ${track.name}</option>`); });
             statusIndicator.text('Список дорожек загружен.');
             autoFindSubtitleTrack();
-            // Fail-safe: если через очень короткое время субтитры не подгружены, повторяем попытку один раз
-            if (!subtitleData || subtitleData.length === 0) {
-                setTimeout(() => {
-                    if ((!subtitleData || subtitleData.length === 0) && $('#track-selector option').length > 0) {
-                        console.debug('[Prompter][auto-load] retrying initial subtitle fetch');
-                        if (!settings.autoFindTrack) {
-                            // Возьмём первый трек если авто-поиск выключен
-                            $('#track-selector option:first').prop('selected', true);
-                            getText($('#track-selector').val());
-                        } else {
-                            // Повторный autoFind (мог не сработать из-за ещё не готовых settings)
-                            autoFindSubtitleTrack();
-                        }
-                    }
-                }, 800);
-            }
+            // Removed auto-retry to avoid double loading
+            console.debug('[Prompter] tracks parsed', { count: Array.isArray(tracks) ? tracks.length : 0 });
         } catch (e) {
             statusIndicator.text('Ошибка обработки списка дорожек.');
             console.error(e);
         }
     }
 
+    let nextUpdateAt = 0;
     function renderLoop() {
         try {
-            updateTeleprompter(latestTimecode);
+            const now = performance.now();
+            if (now >= nextUpdateAt) {
+                nextUpdateAt = now + 50; // ~20 FPS
+                updateTeleprompter(latestTimecode);
+            }
             animationFrameId = requestAnimationFrame(renderLoop);
         } catch(e) { console.error("Error in renderLoop:", e); }
     }
+
+    // ===== EMULATION SUPPORT (isolated, no REAPER calls) =====
+    function updateTrackSelector(tracks) {
+        try {
+            trackSelector.empty();
+            (tracks || []).forEach(t => {
+                trackSelector.append(`<option value="${t.id}">${t.id + 1}: ${t.name}</option>`);
+            });
+            statusIndicator.text('Список дорожек (эмуляция) загружен.');
+            console.debug('[Prompter][EMU] updateTrackSelector', { count: (tracks||[]).length });
+        } catch (e) { console.error('[EMU] updateTrackSelector failed', e); }
+    }
+    function getStartSecondsFromQuery() {
+        try {
+            const sp = new URLSearchParams(window.location.search);
+            const mm = parseFloat(sp.get('time'));
+            if (Number.isFinite(mm) && mm >= 0) return mm * 60;
+        } catch (_) {}
+        return 0;
+    }
+    function getStartStatusFromQuery() {
+        try {
+            const sp = new URLSearchParams(window.location.search);
+            const st = parseInt(sp.get('status'), 10);
+            if (Number.isFinite(st)) return st; // 1 play, 0 stop, 5 rec
+        } catch (_) {}
+        return 1;
+    }
+    let transportEmuTimer = null;
+    function startTransportEmu(intervalMs = 50) {
+        try {
+            if (transportEmuTimer) { clearInterval(transportEmuTimer); transportEmuTimer = null; }
+            let playState = getStartStatusFromQuery();
+            let current = getStartSecondsFromQuery();
+            latestTimecode = current;
+            let lastWall = performance.now();
+            console.info('[EMU][transport] start', { intervalMs, startAtSec: current, status: playState });
+            transportEmuTimer = setInterval(() => {
+                const now = performance.now();
+                const dt = (now - lastWall) / 1000;
+                lastWall = now;
+                if (playState === 1) current += dt;
+                handleTransportResponse(['TRANSPORT', String(playState), String(current)]);
+            }, intervalMs);
+        } catch (err) { console.error('[EMU][transport] failed to start', err); }
+    }
+    async function loadEmuData() {
+        try {
+            // Settings first (optional)
+            const T0 = performance.now();
+            // 1) Roles first
+            try {
+                const r0 = performance.now();
+                const rr = await fetch('reference/roles.json?_ts=' + Date.now());
+                if (rr.ok) {
+                    const rolesObj = await rr.json();
+                    integrateLoadedRoles(JSON.stringify(rolesObj));
+                    regenerateActorColorListUI();
+                    const r1 = performance.now();
+                    console.info('[EMU] roles.json loaded from reference', { ms: Math.round(r1 - r0) });
+                } else {
+                    const r1 = performance.now();
+                    console.debug('[EMU] roles.json not found', { status: rr.status, ms: Math.round(r1 - r0) });
+                }
+            } catch (e) { console.debug('[EMU] roles.json not loaded', e); }
+            // 2) Then settings (visual only)
+            try {
+                const s0 = performance.now();
+                const rs = await fetch('reference/settings.json?_ts=' + Date.now());
+                if (rs.ok) {
+                    const fileSettings = await rs.json();
+                    settings = { ...defaultSettings, ...fileSettings };
+                    updateUIFromSettings();
+                    applySettings();
+                    const s1 = performance.now();
+                    console.info('[EMU] settings.json loaded from reference', { ms: Math.round(s1 - s0) });
+                } else {
+                    const s1 = performance.now();
+                    console.debug('[EMU] settings.json not found', { status: rs.status, ms: Math.round(s1 - s0) });
+                }
+            } catch (e) { console.debug('[EMU] settings.json not loaded', e); }
+            // Tracks + project (mock)
+            const tracks = [{ id: 0, name: 'Subtitles' }];
+            updateTrackSelector(tracks);
+            currentProjectName = currentProjectName || 'EMU Project';
+            updateTitle();
+            // Subtitles
+            const sp = new URLSearchParams(window.location.search);
+            const subtitleName = sp.get('subtitle') || 'subtitles';
+            const url = `reference/${subtitleName}.json?_ts=${Date.now()}`;
+            const f0 = performance.now();
+            console.info('[EMU] loading subtitles', { url });
+            statusIndicator.text('(EMU) Загрузка субтитров...');
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            await handleTextResponse(data);
+            statusIndicator.text(`(EMU) Текст получен, всего ${Array.isArray(data) ? data.length : 0} реплик`);
+            const f1 = performance.now();
+            const T1 = performance.now();
+            console.info('[EMU] subtitles loaded + rendered', { fetchAndRenderMs: Math.round(f1 - f0), totalMs: Math.round(T1 - T0), count: Array.isArray(data) ? data.length : 0 });
+        } catch (err) {
+            console.error('[EMU] loadEmuData failed', err);
+            statusIndicator.text('Ошибка эмуляции данных');
+        }
+    }
     
     function autoFindSubtitleTrack() {
+        const t0 = performance.now();
+        console.debug('[Prompter] autoFindSubtitleTrack start');
         if (!settings.autoFindTrack || $('#track-selector option').length === 0) {
             if ($('#track-selector option').length > 0) { $('#track-selector option:first').prop('selected', true); getText($('#track-selector').val()); }
+            const t1 = performance.now();
+            console.debug('[Prompter] autoFindSubtitleTrack done', { found: $('#track-selector option').length > 0, ms: Math.round(t1 - t0) });
             return;
         }
         const rawKw = (settings.autoFindKeywords || '').trim();
@@ -806,6 +1036,8 @@ $(document).ready(function() {
         if (keywords.length === 0) {
             // Нет ключевых слов — просто берём первый трек
             $('#track-selector option:first').prop('selected', true); getText($('#track-selector').val());
+            const t1 = performance.now();
+            console.debug('[Prompter] autoFindSubtitleTrack done', { found: true, ms: Math.round(t1 - t0) });
             return;
         }
         let found = false;
@@ -815,12 +1047,17 @@ $(document).ready(function() {
             if (match) { $(this).prop('selected', true); getText($(this).val()); found = true; return false; }
         });
         if (!found) { $('#track-selector option:first').prop('selected', true); getText($('#track-selector').val()); }
+        const t1 = performance.now();
+        console.debug('[Prompter] autoFindSubtitleTrack done', { found, ms: Math.round(t1 - t0) });
     }
 
     function handleTextResponse(subtitles) {
         try {
+            const t0 = performance.now();
+            console.info('[Prompter] handleTextResponse start', { type: Array.isArray(subtitles)? 'array':'invalid', count: Array.isArray(subtitles)? subtitles.length : 0 });
             if (!Array.isArray(subtitles)) { throw new Error('Полученные данные не являются массивом субтитров.'); }
             subtitleData = subtitles;
+            subtitlesLoadedOnce = true;
             subtitleElements = [];
             textDisplay.empty();
             if (subtitleData.length === 0) return;
@@ -833,8 +1070,12 @@ $(document).ready(function() {
             let lastRoleForCheckerboard = null, lastColorForCheckerboard = null, colorIndex = 0, dynamicRoleStyles = "", lastRoleForDeduplication = null;
 
             // Build role->actor map once per render based on settings
+            const tMap0 = performance.now();
             buildActorRoleMaps();
+            const tMap1 = performance.now();
 
+            // Build all rows in one pass
+            const tBuild0 = performance.now();
             subtitleData.forEach((line, index) => {
                 let role = '', text = line.text;
                 const roleMatch = text.match(/^\[(.*?)\]\s*/);
@@ -842,92 +1083,95 @@ $(document).ready(function() {
                     role = roleMatch[1];
                     if (settings.roleDisplayStyle !== 'inline') { text = text.substring(roleMatch[0].length); }
                 }
-
-                // Progress container is always present (space reserved) to avoid layout shift when highlighting current line
                 const lineHtml = `<div class="subtitle-container" data-index="${index}"><div class="role-area"><div class="subtitle-color-swatch"></div><div class="subtitle-role">${role}</div><div class="subtitle-separator"></div></div><div class="subtitle-time">${formatTimecode(line.start_time)}</div><div class="subtitle-content"><div class="subtitle-text"></div><div class="subtitle-progress-container"><div class="subtitle-progress-bar"></div></div></div></div>`;
                 const lineElement = $(lineHtml);
                 const roleElement = lineElement.find('.subtitle-role');
                 const swatchElement = lineElement.find('.subtitle-color-swatch');
                 lineElement.find('.subtitle-text').text(text);
-                
-                if (settings.deduplicateRoles && role && role === lastRoleForDeduplication) {
-                    roleElement.html('&nbsp;'); // Оставляем пустое пространство
+
+                if (settings.deduplicateRoles && role) {
+                    const prev = index>0 ? subtitleData[index-1] : null;
+                    if (prev) {
+                        const m = prev.text.match(/^\[(.*?)\]\s*/);
+                        const prevRole = m ? m[1] : null;
+                        if (prevRole && prevRole === role) roleElement.html('&nbsp;');
+                    }
                 }
-                lastRoleForDeduplication = role || null;
 
                 if (settings.checkerboardEnabled) {
                     if (settings.checkerboardMode === 'unconditional') { lineElement.addClass(`checkerboard-color-${(index % 2) + 1}`); }
                     else if (settings.checkerboardMode === 'by_role') { const currentRole = role || 'no_role'; if (currentRole !== lastRoleForCheckerboard) { colorIndex = 1 - colorIndex; lastRoleForCheckerboard = currentRole; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
                     else if (settings.checkerboardMode === 'by_color') { const currentColor = line.color || 'no_color'; if (currentColor !== lastColorForCheckerboard) { colorIndex = 1 - colorIndex; lastColorForCheckerboard = currentColor; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
                 }
-                
-                const itemColor = line.color || null;
+
+                // If roles were loaded, we ignore item line color completely as per requirement
+                const itemColor = rolesLoaded ? null : (line.color || null);
                 const actor = role && roleToActor[role] ? roleToActor[role] : null;
                 const actorColor = actor && settings.actorColors ? settings.actorColors[actor] : null;
-                // Вычисляем окончательный цвет роли (actor имеет приоритет над item)
                 const finalRoleColor = actorColor || itemColor || null;
                 const isColumn = settings.roleDisplayStyle === 'column';
                 const isColumnWithSwatch = settings.roleDisplayStyle === 'column_with_swatch';
                 const showRoleInColumn = settings.processRoles && role && (isColumn || isColumnWithSwatch);
-                // В режиме 'column' хотим видеть отдельный цветной квадратик (свотч), но не фон ярлыка
+                // swatch visibility rules
                 let showSwatch = false;
                 if (settings.enableColorSwatches && !!finalRoleColor) {
-                    if (isColumn) {
-                        showSwatch = true; // специально показываем свотч рядом с ролью в колонке
-                    } else if (!isColumnWithSwatch && !showRoleInColumn) {
-                        // inline вариант или роль не отображается как колонка
-                        showSwatch = true;
-                    }
+                    if (isColumn) showSwatch = true; else if (!isColumnWithSwatch && !showRoleInColumn) showSwatch = true;
                 }
-                
-                // ++ ИЗМЕНЕНО: Используем visibility для сохранения разметки ++
                 roleElement.css('visibility', showRoleInColumn ? 'visible' : 'hidden');
                 swatchElement.css('visibility', showSwatch ? 'visible' : 'hidden');
-                if (showSwatch && !showRoleInColumn) {
-                    lineElement.addClass('has-inline-swatch');
-                }
-                
-                // Унифицированная логика окраски роли
+                if (showSwatch && !showRoleInColumn) lineElement.addClass('has-inline-swatch');
+
                 if (finalRoleColor) {
-                    let effectiveBg = finalRoleColor;
-                    let effectiveText;
-                    if (settings.roleFontColorEnabled) {
-                        // Принудительно делаем фон пригодным для чёрного текста
-                        const adj = lightenGeneric(finalRoleColor, true);
-                        effectiveBg = adj.bg;
-                        effectiveText = '#000000';
-                    } else {
-                        effectiveText = isColorLight(effectiveBg) ? '#000000' : '#ffffff';
-                    }
+                    let effectiveBg = finalRoleColor; let effectiveText;
+                    if (settings.roleFontColorEnabled) { const adj = lightenGeneric(finalRoleColor, true); effectiveBg = adj.bg; effectiveText = '#000000'; }
+                    else { effectiveText = isColorLight(effectiveBg) ? '#000000' : '#ffffff'; }
                     if (showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches) {
                         roleElement.addClass('role-colored-bg').css('visibility', 'visible');
                         dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .role-colored-bg { background-color: ${effectiveBg}; color: ${effectiveText}; }`;
                     } else if (showSwatch) {
                         swatchElement.css('background-color', effectiveBg);
-                        // Контраст текста внутри самой роли не нужен (роль скрыта или inline)
                     }
-                    if (actor) { roleElement.attr('title', actor); }
+                    if (actor) roleElement.attr('title', actor);
                 }
-                
                 lineElement.find('.role-area').toggleClass('role-area-is-empty', !(showRoleInColumn || showSwatch));
-                
                 textDisplay.append(lineElement);
                 subtitleElements.push(lineElement);
             });
+            const tBuild1 = performance.now();
             
             lineStyles.text(dynamicRoleStyles);
+            const tStyles = performance.now();
             statusIndicator.text(`Текст получен, всего ${subtitleData.length} реплик`);
+            const tApply0 = performance.now();
             applySettings();
+            const tApply1 = performance.now();
+            const t1 = performance.now();
+            console.info('[Prompter] handleTextResponse done', {
+                msTotal: Math.round(t1 - t0),
+                msMap: Math.round(tMap1 - tMap0),
+                msBuildAppend: Math.round(tBuild1 - tBuild0),
+                msStyles: Math.round(tStyles - tBuild1),
+                msApply: Math.round(tApply1 - tApply0),
+                total: subtitleData.length
+            });
+            // Снимаем обработчики виртуализации если были
+            try {
+                if (window.__vwinScrollHandler) { textDisplayWrapper[0].removeEventListener('scroll', window.__vwinScrollHandler); window.__vwinScrollHandler = null; }
+                if (window.__vwinResizeHandler) { window.removeEventListener('resize', window.__vwinResizeHandler); window.__vwinResizeHandler = null; }
+                if (window.__vwinWheelHandler) { textDisplayWrapper[0].removeEventListener('wheel', window.__vwinWheelHandler); window.__vwinWheelHandler = null; }
+                if (window.__vwinTouchHandler) { textDisplayWrapper[0].removeEventListener('touchmove', window.__vwinTouchHandler); window.__vwinTouchHandler = null; }
+            } catch(_){}
         } catch (e) { console.error("Error in handleTextResponse:", e); }
     }
+
+    // removed unused createSubtitleElement (legacy from virtualization)
 
     // === Actor Coloring Utilities ===
     function parseActorRoleMapping(rawText) {
         // Each line: ACTOR (space|comma|colon) ROLE1, ROLE2, ROLE3
-        const map = {};// actor -> array roles
+        const map = {}; // actor -> Set(roles)
         const lines = (rawText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         for (const line of lines) {
-            // Split actor from roles by first occurrence of colon/comma/space delimiter pattern
             const m = line.match(/^([^:,]+?)\s*(?:[:\-,])\s*(.+)$/);
             if (m) {
                 const actor = m[1].trim();
@@ -939,7 +1183,6 @@ $(document).ready(function() {
                 }
             }
         }
-        // Convert Sets -> arrays
         const result = {};
         Object.keys(map).forEach(a => { result[a] = Array.from(map[a]); });
         return result;
@@ -1081,6 +1324,10 @@ $(document).ready(function() {
                 case 5: transportStatus.removeClass('status-stop status-play').addClass('status-record'); transportStateText.text('Rec'); break;
                 default: transportStatus.removeClass('status-play record').addClass('status-stop'); transportStateText.text('Stop'); break;
             }
+            if (playState !== (window.__lastPlayStateLogged ?? null)) {
+                console.debug('[Prompter][transport] state', playState);
+                window.__lastPlayStateLogged = playState;
+            }
         } catch(e) { console.error("Error in transport response:", e); }
     }
     
@@ -1099,10 +1346,10 @@ $(document).ready(function() {
             else if (currentLineIndex !== -1 && subtitleElements[currentLineIndex]) { subtitleElements[currentLineIndex].removeClass('current-line pause-highlight'); }
             if (newCurrentLineIndex !== currentLineIndex) {
                 if (newCurrentLineIndex !== -1 && subtitleElements[newCurrentLineIndex] && settings.autoScroll) {
-                    const newContainer = subtitleElements[newCurrentLineIndex], wrapper = $('#text-display-wrapper'), wrapperHeight = wrapper.height();
-                    const lineTop = newContainer.position().top + wrapper.scrollTop(), scrollDuration = 400 / (settings.scrollSpeed / 100);
+                    const newContainer = subtitleElements[newCurrentLineIndex], $wrapper = $('#text-display-wrapper'), wrapperHeight = $wrapper.height();
+                    const lineTop = newContainer.position().top + $wrapper.scrollTop(), scrollDuration = 400 / (settings.scrollSpeed / 100);
                     const linePositionInViewport = newContainer.position().top, topThreshold = wrapperHeight * 0.1, bottomThreshold = wrapperHeight * 0.9 - newContainer.outerHeight(true);
-                    if (linePositionInViewport < topThreshold || linePositionInViewport > bottomThreshold) wrapper.stop().animate({ scrollTop: lineTop - (wrapperHeight * 0.2) }, scrollDuration);
+                    if (linePositionInViewport < topThreshold || linePositionInViewport > bottomThreshold) $wrapper.stop().animate({ scrollTop: lineTop - (wrapperHeight * 0.2) }, scrollDuration);
                 }
                 currentLineIndex = newCurrentLineIndex;
             }
@@ -1273,6 +1520,7 @@ $(document).ready(function() {
     // roleFontColorEnabledCheckbox.on('change', () => { if (subtitleData.length > 0) handleTextResponse(subtitleData); });
     
     transportTimecode.on('click', function() {
+        console.debug('[Prompter] timecode click center');
         // Always allow manual centering regardless of autoScroll flag
         let targetIndex = currentLineIndex;
         if (targetIndex === -1 && subtitleData.length > 0) {
@@ -1307,8 +1555,19 @@ $(document).ready(function() {
     });
     
     // --- ЗАПУСК ---
-    // Async init chain: load settings first, then initialize engine.
-    loadSettings().then(() => { applySettings(); initialize(); });
+    // Async init chain: load settings first, then initialize engine or emu
+    loadSettings().then(async () => {
+        applySettings();
+        if (isEmuMode()) {
+            await loadEmuData();
+            // Start emu transport + render loop
+            startTransportEmu(50);
+            renderLoop();
+            evaluateTransportWrap();
+        } else {
+            initialize();
+        }
+    });
     // Dynamic viewport & safe-area handling (Android/iOS address bar, gesture insets)
     (function setupViewportMetrics(){
         const root = document.documentElement;
@@ -1347,7 +1606,6 @@ $(document).ready(function() {
         }
     })();
     // Attach resize observer / listener for dynamic transport wrap
-    let transportWrapRaf = null;
     function scheduleTransportWrapEvaluation(){
         if(transportWrapRaf) cancelAnimationFrame(transportWrapRaf);
         transportWrapRaf = requestAnimationFrame(evaluateTransportWrap);
@@ -1381,7 +1639,7 @@ $(document).ready(function() {
             if(needed > available + 2){ panel.addClass('transport-wrapped'); }
         } catch(err){ console.error('Error evaluating transport wrap:', err); }
     }
-    window.addEventListener('resize', scheduleTransportWrapEvaluation);
+    window.addEventListener('resize', scheduleTransportWrapEvaluation, { passive: true });
     // Additional observers (ResizeObserver if available) to catch font/icon late layout shifts
     try {
         if(window.ResizeObserver){
@@ -1413,5 +1671,5 @@ $(document).ready(function() {
             $legend.on('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); toggle(); }});
         });
     })();
-
+    console.info('[Prompter] document ready init done');
 });
