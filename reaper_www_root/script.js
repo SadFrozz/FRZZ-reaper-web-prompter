@@ -63,7 +63,10 @@ const ACTOR_BASE_COLORS = [
 const SETTINGS_CHUNK_SIZE = 250; // was 700
 const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
+const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
+
 $(document).ready(function() {
+    const initStartTs = performance.now();
     // --- ПЕРЕМЕННЫЕ ---
     const REASCRIPT_ACTION_ID = "_FRZZ_WEB_NOTES_READER";
     const BASE_LINE_SPACING = 0.5;
@@ -115,12 +118,25 @@ $(document).ready(function() {
     let transportWrapRaf = null;
     // When roles.json is successfully loaded, prefer actor colors over per-line color entirely
     let rolesLoaded = false;
+    let rolesLoadInFlight = false;
+    let rolesLoadRequestTs = 0;
+    let rolesLoadSeq = 0;
+    let rolesLoadActiveSeq = 0;
+    let rolesLoadTimeoutId = null;
+    let rolesLoadReason = '';
+    let rolesLoadResolvers = [];
+    let emuDataLoadedOnce = false;
+    let emuRolesFetchAttempted = false;
+    let emuRolesFetchPromise = null;
     // Guards to avoid duplicate loads
     let subtitleLoadInFlight = false;
     let subtitleLoadTrackId = null;
     let subtitlesLoadedOnce = false;
     let currentLineIndex = -1;
     let latestTimecode = 0;
+    let firstRenderTs = null;
+    const readyStagesLogged = new Set();
+    let transportStageLogged = false;
     // Enable passive listeners for common scroll-blocking events registered via jQuery (.on)
     (function enableJQueryPassive(){
         try {
@@ -212,6 +228,33 @@ $(document).ready(function() {
             if (a !== 1) return { bg: `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`, text };
             return { bg: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`, text };
         } catch(e){ console.warn('lightenGeneric failed', e); return { bg: colorStr || '#666', text:'#000'}; }
+    }
+
+    function logReadyStage(stage) {
+        if (readyStagesLogged.has(stage)) return;
+        readyStagesLogged.add(stage);
+        const now = performance.now();
+        const payload = {
+            stage,
+            msSinceInit: Math.round(now - initStartTs)
+        };
+        if (firstRenderTs !== null) {
+            payload.msToFirstRender = Math.round(firstRenderTs - initStartTs);
+            payload.msSinceFirstRender = Math.round(now - firstRenderTs);
+        }
+        console.info('[Prompter][ready]', payload);
+    }
+
+    function getEmuRolesMissingFlag() {
+        try { return sessionStorage.getItem(EMU_ROLES_MISSING_KEY) === '1'; }
+        catch (_) { return false; }
+    }
+
+    function setEmuRolesMissingFlag(flag) {
+        try {
+            if (flag) sessionStorage.setItem(EMU_ROLES_MISSING_KEY, '1');
+            else sessionStorage.removeItem(EMU_ROLES_MISSING_KEY);
+        } catch (_) { /* storage may be unavailable */ }
     }
     
     function formatTimecode(totalSeconds) { const hours = Math.floor(totalSeconds / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = Math.floor(totalSeconds % 60); const frames = Math.floor((totalSeconds - Math.floor(totalSeconds)) * settings.frameRate); return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`; }
@@ -708,6 +751,32 @@ $(document).ready(function() {
     }
     function chunkString(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
 
+    function finalizeRolesLoad(status, extra = {}) {
+        if (rolesLoadTimeoutId) {
+            clearTimeout(rolesLoadTimeoutId);
+            rolesLoadTimeoutId = null;
+        }
+        const elapsed = rolesLoadRequestTs ? Math.round(performance.now() - rolesLoadRequestTs) : null;
+        const info = {
+            status,
+            seq: extra.seq != null ? extra.seq : rolesLoadActiveSeq,
+            reason: extra.reason || rolesLoadReason || 'unspecified',
+            durationMs: elapsed,
+            ...extra
+        };
+        console.info('[Prompter][roles][request] complete', info);
+        rolesLoadInFlight = false;
+        rolesLoadRequestTs = 0;
+        rolesLoadReason = '';
+        const pending = rolesLoadResolvers.slice();
+        rolesLoadResolvers = [];
+        pending.forEach(fn => {
+            try { fn(info); } catch (err) {
+                console.warn('[Prompter][roles][ensure] resolver callback failed', err);
+            }
+        });
+    }
+
     function saveRoles(){
         try {
             const rolesPayload = {
@@ -729,37 +798,119 @@ $(document).ready(function() {
         } catch(err){ console.error('[Prompter][roles] saveRoles failed', err); }
     }
 
-    function requestRoles(){
+    function requestRoles(reason = 'manual'){
+        if (rolesLoadInFlight) {
+            console.debug('[Prompter][roles][request] already in flight', { seq: rolesLoadActiveSeq, reason });
+            return;
+        }
+        rolesLoadInFlight = true;
+        rolesLoadRequestTs = performance.now();
+        rolesLoadActiveSeq = ++rolesLoadSeq;
+        rolesLoadReason = reason;
+        console.info('[Prompter][roles][request] start', { seq: rolesLoadActiveSeq, reason });
         try {
-            console.debug('[Prompter][roles][requestRoles] requesting roles file');
             wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_ROLES');
             setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 60);
             // backend после обработки выставит roles_json_b64 -> запросим его чуть позже
             setTimeout(()=> { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_json_b64'); }, 260);
-        } catch(err){ console.error('[Prompter][roles] requestRoles failed', err); }
+        } catch(err){
+            console.error('[Prompter][roles] requestRoles failed', err);
+            finalizeRolesLoad('error', { error: err.message, reason });
+            return;
+        }
+        if (rolesLoadTimeoutId) {
+            clearTimeout(rolesLoadTimeoutId);
+            rolesLoadTimeoutId = null;
+        }
+        rolesLoadTimeoutId = setTimeout(() => {
+            if (rolesLoadInFlight && rolesLoadActiveSeq === rolesLoadSeq) {
+                finalizeRolesLoad('timeout', { reason: 'no_backend_response', seq: rolesLoadActiveSeq });
+            }
+        }, 2000);
     }
 
-    function integrateLoadedRoles(jsonText){
+    function ensureRolesLoaded(options = {}) {
+        const reason = options.reason || 'unspecified';
+        if (rolesLoaded) {
+            const info = { status: 'cached', seq: rolesLoadActiveSeq, reason, durationMs: 0 };
+            console.debug('[Prompter][roles][ensure] using cached roles', info);
+            return Promise.resolve(info);
+        }
+        return new Promise(resolve => {
+            rolesLoadResolvers.push(resolve);
+            if (!rolesLoadInFlight) {
+                requestRoles(reason);
+            } else {
+                console.debug('[Prompter][roles][ensure] awaiting active load', { seq: rolesLoadActiveSeq, reason });
+            }
+        });
+    }
+
+    function integrateLoadedRoles(jsonText, meta = {}){
+        const parseStart = performance.now();
         try {
-            if(!jsonText) return;
-            const parsed = JSON.parse(jsonText);
-            if (parsed && typeof parsed === 'object') {
-                console.info('[Prompter][roles][integrateLoadedRoles] parsed', { hasMapping: !!parsed.actorRoleMappingText, colors: parsed.actorColors ? Object.keys(parsed.actorColors).length : 0 });
-                if (typeof parsed.actorRoleMappingText === 'string') settings.actorRoleMappingText = parsed.actorRoleMappingText;
-                if (parsed.actorColors && typeof parsed.actorColors === 'object') settings.actorColors = parsed.actorColors;
-                console.debug('[Prompter][roles][integrateLoadedRoles] applied roles data');
-                rolesLoaded = true;
-                // Rebuild maps and optionally re-render existing subtitles
-                buildActorRoleMaps();
+            const raw = (jsonText || '').trim();
+            if (!raw) {
+                settings.actorRoleMappingText = '';
+                settings.actorColors = {};
+                roleToActor = {};
+                actorToRoles = {};
+                rolesLoaded = false;
+                regenerateActorColorListUI();
                 if (subtitleData.length > 0) {
-                    // Only re-render if current mapping is empty OR actor colors exist (to refresh)
-                    const currentMapSize = Object.keys(roleToActor||{}).length;
-                    if (currentMapSize === 0 || Object.keys(settings.actorColors||{}).length > 0) {
+                    handleTextResponse(subtitleData);
+                }
+                finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'empty_payload' });
+                return;
+            }
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+                settings.actorRoleMappingText = typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : '';
+                settings.actorColors = (parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {};
+                buildActorRoleMaps();
+                const mappedRolesCount = Object.keys(roleToActor || {}).length;
+                rolesLoaded = mappedRolesCount > 0;
+                console.info('[Prompter][roles][integrateLoadedRoles] parsed', {
+                    hasMappingText: !!settings.actorRoleMappingText,
+                    mappedRoles: mappedRolesCount,
+                    actorColors: Object.keys(settings.actorColors || {}).length,
+                    source: meta.source || 'backend'
+                });
+                regenerateActorColorListUI();
+                if (!rolesLoaded) {
+                    if (subtitleData.length > 0) {
                         handleTextResponse(subtitleData);
                     }
+                    finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'no_roles_in_payload' });
+                    return;
                 }
+                const parseDuration = Math.round(performance.now() - parseStart);
+                // Rebuild maps already done; optionally re-render existing subtitles
+                if (subtitleData.length > 0) {
+                    handleTextResponse(subtitleData);
+                }
+                finalizeRolesLoad('loaded', {
+                    ...meta,
+                    parseMs: parseDuration,
+                    mappedRoles: mappedRolesCount
+                });
+            } else {
+                rolesLoaded = false;
+                finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'invalid_payload' });
             }
-        } catch(err){ console.error('[Prompter][roles] integrateLoadedRoles failed', err); }
+        } catch(err){
+            rolesLoaded = false;
+            settings.actorRoleMappingText = '';
+            settings.actorColors = {};
+            roleToActor = {};
+            actorToRoles = {};
+            console.error('[Prompter][roles] integrateLoadedRoles failed', err);
+            regenerateActorColorListUI();
+            if (subtitleData.length > 0) {
+                handleTextResponse(subtitleData);
+            }
+            finalizeRolesLoad('error', { ...meta, error: err.message, parseMs: Math.round(performance.now() - parseStart) });
+        }
     }
     
     function initialize() {
@@ -770,7 +921,7 @@ $(document).ready(function() {
             wwr_start();
             getTracks();
             getProjectName();
-            requestRoles(); // запрос отдельного файла ролей
+            requestRoles('initialize'); // запрос отдельного файла ролей
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
@@ -816,7 +967,7 @@ $(document).ready(function() {
         }, 250);
     }
 
-    function getText(trackId) {
+    async function getText(trackId) {
         const t0 = performance.now();
         console.info('[Prompter] getText request', { trackId, emu: isEmuMode(), inFlight: subtitleLoadInFlight, alreadyLoaded: subtitlesLoadedOnce });
         // In emu mode, bypass REAPER and load from reference/<subtitle>.json
@@ -845,8 +996,29 @@ $(document).ready(function() {
             return;
         }
         if (subtitleLoadInFlight && subtitleLoadTrackId === trackId) { console.warn('[Prompter] getText skipped: already in-flight for track', trackId); return; }
+        statusIndicator.text('Синхронизация ролей...');
+        console.debug('[Prompter] ensure roles before subtitles', { trackId });
+        let rolesEnsureInfo = null;
+        try {
+            rolesEnsureInfo = await ensureRolesLoaded({ reason: 'before_subtitles' });
+            console.debug('[Prompter] roles ensure result', rolesEnsureInfo);
+        } catch (err) {
+            console.error('[Prompter][roles][ensure] failed before subtitles', err);
+            rolesEnsureInfo = { status: 'error', error: err ? err.message : 'unknown' };
+        }
+        if (rolesEnsureInfo && rolesEnsureInfo.status === 'error') {
+            console.warn('[Prompter] продолжим загрузку субтитров несмотря на ошибку загрузки ролей');
+        }
+        const ensureStatus = rolesEnsureInfo ? rolesEnsureInfo.status : null;
+        const statusText = ensureStatus === 'timeout'
+            ? `Роли не ответили вовремя, запрашиваем текст с дорожки ${trackId}...`
+            : ensureStatus === 'error'
+                ? `Ошибка при загрузке ролей, запрашиваем текст с дорожки ${trackId}...`
+                : ensureStatus === 'empty'
+                    ? `Роли не найдены, запрашиваем текст с дорожки ${trackId}...`
+                    : `Запрос текста с дорожки ${trackId}...`;
         subtitleLoadInFlight = true; subtitleLoadTrackId = trackId;
-        statusIndicator.text(`Запрос текста с дорожки ${trackId}...`);
+        statusIndicator.text(statusText);
         textDisplay.html('<p>Загрузка текста...</p>');
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command_param/${trackId}`);
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TEXT`);
@@ -861,7 +1033,18 @@ $(document).ready(function() {
                     textDisplay.html('<p>Не удалось загрузить субтитры. Проверьте, что Reaper запущен и скрипты установлены корректно.</p>');
                     console.error(error);
                 })
-                .finally(() => { subtitleLoadInFlight = false; const t1 = performance.now(); console.debug('[Prompter] getText (real) total', { ms: Math.round(t1 - t0) }); });
+                .finally(() => {
+                    subtitleLoadInFlight = false;
+                    const t1 = performance.now();
+                    const finalLog = {
+                        ms: Math.round(t1 - t0),
+                        rolesStatus: rolesEnsureInfo ? rolesEnsureInfo.status : 'n/a'
+                    };
+                    if (rolesEnsureInfo && typeof rolesEnsureInfo.durationMs === 'number') {
+                        finalLog.rolesDurationMs = rolesEnsureInfo.durationMs;
+                    }
+                    console.debug('[Prompter] getText (real) total', finalLog);
+                });
         }, 500);
     }
     
@@ -876,12 +1059,21 @@ $(document).ready(function() {
                 else if (parts[2] === 'project_name') { currentProjectName = parts.slice(3).join('\t'); updateTitle(); }
                 else if (parts[2] === 'roles_json_b64') {
                     const payload = parts.slice(3).join('\t');
-                    console.debug('[Prompter][roles][onreply] received roles_json_b64 length', payload.length);
+                    const encodedLength = payload ? payload.length : 0;
+                    console.debug('[Prompter][roles][onreply] received roles_json_b64', { encodedLength });
                     const decoded = rolesFromBase64Url(payload);
-                    integrateLoadedRoles(decoded);
+                    integrateLoadedRoles(decoded, {
+                        encodedLength,
+                        decodedLength: decoded ? decoded.length : 0
+                    });
                 } else if (parts[2] === 'roles_status') {
                     const status = parts.slice(3).join('\t');
                     console.debug('[Prompter][roles][status]', status);
+                    if (/NOT_FOUND|MISSING|NO_FILE/i.test(status)) {
+                        finalizeRolesLoad('empty', { backendStatus: status });
+                    } else if (/ERROR|FAIL/i.test(status)) {
+                        finalizeRolesLoad('error', { backendStatus: status });
+                    }
                 }
             } else if (parts[0] === 'TRANSPORT') handleTransportResponse(parts);
         }
@@ -962,24 +1154,54 @@ $(document).ready(function() {
         } catch (err) { console.error('[EMU][transport] failed to start', err); }
     }
     async function loadEmuData() {
+        if (emuDataLoadedOnce) {
+            console.debug('[EMU] loadEmuData skipped (already loaded once)');
+            return;
+        }
+        emuDataLoadedOnce = true;
         try {
             // Settings first (optional)
             const T0 = performance.now();
             // 1) Roles first
-            try {
-                const r0 = performance.now();
-                const rr = await fetch('reference/roles.json?_ts=' + Date.now());
-                if (rr.ok) {
-                    const rolesObj = await rr.json();
-                    integrateLoadedRoles(JSON.stringify(rolesObj));
-                    regenerateActorColorListUI();
-                    const r1 = performance.now();
-                    console.info('[EMU] roles.json loaded from reference', { ms: Math.round(r1 - r0) });
+            if (!emuRolesFetchPromise) {
+                emuRolesFetchAttempted = true;
+                const cachedMissing = getEmuRolesMissingFlag();
+                if (cachedMissing) {
+                    console.debug('[EMU] roles.json fetch skipped (cached missing flag)');
+                    emuRolesFetchPromise = Promise.resolve({ status: 'missing_cached' });
                 } else {
-                    const r1 = performance.now();
-                    console.debug('[EMU] roles.json not found', { status: rr.status, ms: Math.round(r1 - r0) });
+                const urlTs = Date.now();
+                const url = `reference/roles.json?_ts=${urlTs}`;
+                const rStart = performance.now();
+                console.debug('[EMU] roles.json request start', { url });
+                emuRolesFetchPromise = fetch(url)
+                    .then(async rr => {
+                        const r1 = performance.now();
+                        if (rr.ok) {
+                            const rolesObj = await rr.json();
+                            integrateLoadedRoles(JSON.stringify(rolesObj), { source: 'emu_reference' });
+                            console.info('[EMU] roles.json loaded from reference', { ms: Math.round(r1 - rStart), url });
+                            setEmuRolesMissingFlag(false);
+                            return { status: 'ok' };
+                        }
+                        console.debug('[EMU] roles.json not found', { status: rr.status, ms: Math.round(r1 - rStart), url });
+                        setEmuRolesMissingFlag(true);
+                        return { status: 'missing', statusCode: rr.status };
+                    })
+                    .catch(err => {
+                        console.debug('[EMU] roles.json not loaded', err);
+                        setEmuRolesMissingFlag(true);
+                        return { status: 'error', error: err ? err.message : 'unknown' };
+                    })
+                    .finally(() => {
+                        const elapsed = Math.round(performance.now() - rStart);
+                        console.debug('[EMU] roles.json request complete', { url, ms: elapsed });
+                    });
                 }
-            } catch (e) { console.debug('[EMU] roles.json not loaded', e); }
+            } else {
+                console.debug('[EMU] roles.json fetch skipped (already pending or finished)');
+            }
+            await emuRolesFetchPromise;
             // 2) Then settings (visual only)
             try {
                 const s0 = performance.now();
@@ -1073,6 +1295,8 @@ $(document).ready(function() {
             const tMap0 = performance.now();
             buildActorRoleMaps();
             const tMap1 = performance.now();
+            const roleMappingSize = Object.keys(roleToActor || {}).length;
+            const shouldIgnoreLineColors = roleMappingSize > 0;
 
             // Build all rows in one pass
             const tBuild0 = performance.now();
@@ -1104,9 +1328,9 @@ $(document).ready(function() {
                     else if (settings.checkerboardMode === 'by_color') { const currentColor = line.color || 'no_color'; if (currentColor !== lastColorForCheckerboard) { colorIndex = 1 - colorIndex; lastColorForCheckerboard = currentColor; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
                 }
 
-                // If roles were loaded, we ignore item line color completely as per requirement
-                const itemColor = rolesLoaded ? null : (line.color || null);
-                const actor = role && roleToActor[role] ? roleToActor[role] : null;
+                // Ignore subtitle-provided colors only when we actually have role mappings
+                const itemColor = shouldIgnoreLineColors ? null : (line.color || null);
+                const actor = shouldIgnoreLineColors && role && roleToActor[role] ? roleToActor[role] : null;
                 const actorColor = actor && settings.actorColors ? settings.actorColors[actor] : null;
                 const finalRoleColor = actorColor || itemColor || null;
                 const isColumn = settings.roleDisplayStyle === 'column';
@@ -1141,13 +1365,20 @@ $(document).ready(function() {
             
             lineStyles.text(dynamicRoleStyles);
             const tStyles = performance.now();
-            statusIndicator.text(`Текст получен, всего ${subtitleData.length} реплик`);
             const tApply0 = performance.now();
             applySettings();
             const tApply1 = performance.now();
             const t1 = performance.now();
+            const renderMs = t1 - t0;
+            const renderSeconds = renderMs / 1000;
+            statusIndicator.text(`Текст получен, всего ${subtitleData.length} реплик (рендер ${renderSeconds.toFixed(3)} с)`);
+            if (firstRenderTs === null) {
+                firstRenderTs = t1;
+                logReadyStage(isEmuMode() ? 'emu_first_render' : 'reaper_first_render');
+            }
             console.info('[Prompter] handleTextResponse done', {
-                msTotal: Math.round(t1 - t0),
+                msTotal: Math.round(renderMs),
+                secondsTotal: Number(renderSeconds.toFixed(3)),
                 msMap: Math.round(tMap1 - tMap0),
                 msBuildAppend: Math.round(tBuild1 - tBuild0),
                 msStyles: Math.round(tStyles - tBuild1),
@@ -1327,6 +1558,10 @@ $(document).ready(function() {
             if (playState !== (window.__lastPlayStateLogged ?? null)) {
                 console.debug('[Prompter][transport] state', playState);
                 window.__lastPlayStateLogged = playState;
+            }
+            if (!transportStageLogged) {
+                transportStageLogged = true;
+                logReadyStage(isEmuMode() ? 'emu_transport_update' : 'reaper_transport_update');
             }
         } catch(e) { console.error("Error in transport response:", e); }
     }
@@ -1564,6 +1799,7 @@ $(document).ready(function() {
             startTransportEmu(50);
             renderLoop();
             evaluateTransportWrap();
+            logReadyStage('emu_transport_started');
         } else {
             initialize();
         }
