@@ -64,6 +64,14 @@ const SETTINGS_CHUNK_SIZE = 250; // was 700
 const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
+// Pre-built markup skeleton reused for every subtitle row to minimize per-line DOM mutations.
+const SUBTITLE_SKELETON_HTML = '<div class="role-area role-area-is-empty"><div class="subtitle-color-swatch" style="visibility:hidden"></div><div class="subtitle-role" style="visibility:hidden"></div><div class="subtitle-separator"></div></div><div class="subtitle-time"></div><div class="subtitle-content"><div class="subtitle-text"></div></div>';
+const SUBTITLE_SKELETON_TEMPLATE = (() => {
+    const container = document.createElement('div');
+    container.className = 'subtitle-container';
+    container.innerHTML = SUBTITLE_SKELETON_HTML;
+    return container;
+})();
 
 $(document).ready(function() {
     const initStartTs = performance.now();
@@ -76,6 +84,15 @@ $(document).ready(function() {
     const trackSelector = $('#track-selector');
     const textDisplay = $('#text-display');
     const textDisplayWrapper = $('#text-display-wrapper');
+    const textDisplayEl = textDisplay[0] || null;
+    const textDisplayWrapperEl = textDisplayWrapper[0] || null;
+    const sharedProgressContainer = document.createElement('div');
+    sharedProgressContainer.className = 'subtitle-progress-container';
+    const sharedProgressBar = document.createElement('div');
+    sharedProgressBar.className = 'subtitle-progress-bar';
+    sharedProgressContainer.appendChild(sharedProgressBar);
+    let sharedProgressHost = null;
+    let sharedProgressIndex = -1;
     const statusIndicator = $('#status-indicator');
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
@@ -113,6 +130,27 @@ $(document).ready(function() {
     const roleFontColorEnabledCheckbox = $('#role-font-color-enabled');
     let subtitleData = [];
     let subtitleElements = [];
+    let subtitleContentElements = [];
+    let subtitleRoleElements = [];
+    let subtitleSwatchElements = [];
+    let subtitleRoleAreaElements = [];
+    let subtitlePaintStates = [];
+    let subtitleRoles = [];
+    let subtitleActors = [];
+    let subtitleActorColors = [];
+    let subtitleLineColors = [];
+    let subtitleFinalRoleColors = [];
+    let subtitleCheckerboardClasses = [];
+    let subtitleSameRolePrev = [];
+    let paintGeneration = 0;
+    let paintScheduled = false;
+    let lastVisibleStart = 0;
+    let lastVisibleEnd = 0;
+    const PAINT_BUFFER = 50;
+    let subtitleObserver = null;
+    const visibleIndices = new Set();
+    let visibleRangeStart = 0;
+    let visibleRangeEnd = -1;
     // rAF id for render loop
     // Move transportWrapRaf early to avoid TDZ error when scheduleTransportWrapEvaluation runs during applySettings
     let transportWrapRaf = null;
@@ -168,6 +206,8 @@ $(document).ready(function() {
     // Actor coloring runtime caches
     let roleToActor = {}; // role -> actor
     let actorToRoles = {}; // actor -> Set(roles)
+    let cachedActorRoleMappingText = null;
+    let cachedMappedRolesCount = 0;
     const speedSteps = [1];
     for (let i = 10; i <= 200; i += 10) { speedSteps.push(i); }
     speedSteps.push(500);
@@ -200,6 +240,15 @@ $(document).ready(function() {
 
     function lightenColor(hexColor, targetLuminance = 186) { if (!hexColor || hexColor === '#000000') return '#333333'; let hex = hexColor.replace('#', ''); let r = parseInt(hex.substring(0, 2), 16); let g = parseInt(hex.substring(2, 4), 16); let b = parseInt(hex.substring(4, 6), 16); let luminance = (0.299 * r + 0.587 * g + 0.114 * b); if (luminance >= targetLuminance) { return hexColor; } let factor = 0.05; while (luminance < targetLuminance && factor < 1) { r = Math.min(255, r + (255 - r) * factor); g = Math.min(255, g + (255 - g) * factor); b = Math.min(255, b + (255 - b) * factor); luminance = (0.299 * r + 0.587 * g + 0.114 * b); factor += 0.05; } return '#' + Math.round(r).toString(16).padStart(2, '0') + Math.round(g).toString(16).padStart(2, '0') + Math.round(b).toString(16).padStart(2, '0'); }
     // Generic lightener for rgba/hex input returning bg + contrasting text color.
+    const LIGHTEN_CACHE = new Map();
+    function getLightenedColorCached(colorStr, forceLightBg = true) {
+        if (!colorStr) return null;
+        const key = `${forceLightBg ? 1 : 0}|${colorStr}`;
+        if (LIGHTEN_CACHE.has(key)) return LIGHTEN_CACHE.get(key);
+        const value = lightenGeneric(colorStr, forceLightBg);
+        LIGHTEN_CACHE.set(key, value);
+        return value;
+    }
     function lightenGeneric(colorStr, forceLightBg = true) {
         try {
             if (!colorStr) return { bg: '#666', text: '#000' };
@@ -257,7 +306,401 @@ $(document).ready(function() {
         } catch (_) { /* storage may be unavailable */ }
     }
     
-    function formatTimecode(totalSeconds) { const hours = Math.floor(totalSeconds / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = Math.floor(totalSeconds % 60); const frames = Math.floor((totalSeconds - Math.floor(totalSeconds)) * settings.frameRate); return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`; }
+    function pad2(num) {
+        return num < 10 ? '0' + num : '' + num;
+    }
+
+    function formatTimecode(totalSeconds, frameRate = settings.frameRate) {
+        if (!isFinite(totalSeconds) || totalSeconds < 0) totalSeconds = 0;
+        let remaining = totalSeconds;
+        const hours = remaining >= 3600 ? Math.floor(remaining / 3600) : 0;
+        remaining -= hours * 3600;
+        const minutes = remaining >= 60 ? Math.floor(remaining / 60) : 0;
+        remaining -= minutes * 60;
+        const seconds = remaining >= 1 ? Math.floor(remaining) : 0;
+        const fraction = remaining - seconds;
+        const effectiveFrameRate = (frameRate && frameRate > 0) ? frameRate : 24;
+        let frames = Math.floor(fraction * effectiveFrameRate);
+        if (frames >= effectiveFrameRate) {
+            frames = 0;
+        }
+        return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}:${pad2(frames)}`;
+    }
+
+    let wrapperScrollAnimId = null;
+    function stopWrapperScrollAnimation() {
+        if (wrapperScrollAnimId !== null) {
+            cancelAnimationFrame(wrapperScrollAnimId);
+            wrapperScrollAnimId = null;
+        }
+    }
+
+    function animateWrapperScrollTo(target, durationMs) {
+        const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
+        if (!wrapper) return;
+        const clampedTarget = Math.max(target, 0);
+        if (!isFinite(durationMs) || durationMs <= 0) {
+            stopWrapperScrollAnimation();
+            wrapper.scrollTop = clampedTarget;
+            return;
+        }
+        stopWrapperScrollAnimation();
+        const start = wrapper.scrollTop;
+        const delta = clampedTarget - start;
+        if (Math.abs(delta) < 0.5) {
+            wrapper.scrollTop = clampedTarget;
+            return;
+        }
+        const startTime = performance.now();
+        const duration = Math.max(durationMs, 16);
+        const easeInOutQuad = t => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t);
+        const step = now => {
+            const progress = Math.min((now - startTime) / duration, 1);
+            const eased = easeInOutQuad(progress);
+            wrapper.scrollTop = start + delta * eased;
+            if (progress < 1) {
+                wrapperScrollAnimId = requestAnimationFrame(step);
+            } else {
+                wrapperScrollAnimId = null;
+            }
+        };
+        wrapperScrollAnimId = requestAnimationFrame(step);
+    }
+
+    function detachSharedProgress() {
+        if (sharedProgressContainer.parentNode) {
+            if (sharedProgressContainer.parentNode.classList) {
+                sharedProgressContainer.parentNode.classList.remove('has-progress');
+            }
+            sharedProgressContainer.parentNode.removeChild(sharedProgressContainer);
+        }
+        sharedProgressHost = null;
+        sharedProgressIndex = -1;
+    }
+
+    function attachSharedProgressToIndex(index) {
+        if (index < 0 || index >= subtitleContentElements.length) { detachSharedProgress(); return; }
+        const contentEl = subtitleContentElements[index];
+        if (!contentEl) { detachSharedProgress(); return; }
+        if (sharedProgressIndex === index && sharedProgressHost === contentEl) return;
+        detachSharedProgress();
+        contentEl.appendChild(sharedProgressContainer);
+        contentEl.classList.add('has-progress');
+        sharedProgressHost = contentEl;
+        sharedProgressIndex = index;
+    }
+
+    function extractLeadingRole(rawText, trimInline) {
+        if (!rawText || rawText.length < 3) return null;
+        if (rawText.charCodeAt(0) !== 91) return null; // '['
+        const len = rawText.length;
+        let idx = 1;
+        while (idx < len && rawText.charCodeAt(idx) !== 93) { // ']'
+            idx++;
+        }
+        if (idx >= len) return null;
+        const role = rawText.slice(1, idx);
+        if (!trimInline) {
+            return { role, text: rawText };
+        }
+        let next = idx + 1;
+        while (next < len) {
+            const code = rawText.charCodeAt(next);
+            if (code === 32 || code === 9) { // space or tab
+                next++;
+                continue;
+            }
+            break;
+        }
+        return { role, text: next < len ? rawText.slice(next) : '' };
+    }
+
+    function getCachedRoleParts(line, rawText) {
+        if (!line || typeof rawText !== 'string') return null;
+        const cache = line.__cachedRoleParts;
+        if (cache && cache.raw === rawText) {
+            return cache.hasRole ? cache : null;
+        }
+        const extracted = extractLeadingRole(rawText, true);
+        if (!extracted) {
+            line.__cachedRoleParts = { raw: rawText, role: '', textTrimmed: rawText, textInline: rawText, hasRole: false };
+            return null;
+        }
+        const nextCache = {
+            raw: rawText,
+            role: extracted.role,
+            textTrimmed: extracted.text,
+            textInline: rawText,
+            hasRole: true
+        };
+        line.__cachedRoleParts = nextCache;
+        return nextCache;
+    }
+
+    function disconnectVisibilityObserver() {
+        if (subtitleObserver) {
+            subtitleObserver.disconnect();
+            subtitleObserver = null;
+        }
+    }
+
+    function resetVisibilityTracking() {
+        visibleIndices.clear();
+        visibleRangeStart = 0;
+        visibleRangeEnd = -1;
+        lastVisibleStart = 0;
+        lastVisibleEnd = 0;
+    }
+
+    function setupVisibilityObserver() {
+        resetVisibilityTracking();
+        disconnectVisibilityObserver();
+        if (!textDisplayWrapperEl || !subtitleElements.length || typeof IntersectionObserver === 'undefined') {
+            visibleRangeStart = 0;
+            visibleRangeEnd = subtitleElements.length ? subtitleElements.length - 1 : -1;
+            schedulePaintVisible({ immediate: true });
+            return;
+        }
+        subtitleObserver = new IntersectionObserver(handleSubtitleIntersection, {
+            root: textDisplayWrapperEl,
+            threshold: [0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.99, 1]
+        });
+        subtitleElements.forEach((el, idx) => {
+            if (!el) return;
+            el.dataset.frzzIndex = String(idx);
+            subtitleObserver.observe(el);
+        });
+        // Ensure we paint at least something even before observer fires
+        visibleRangeEnd = Math.min(subtitleElements.length - 1, PAINT_BUFFER);
+        schedulePaintVisible({ immediate: true });
+    }
+
+    function handleSubtitleIntersection(entries) {
+        let changed = false;
+        for (const entry of entries) {
+            const target = entry.target;
+            const idx = target && target.dataset ? parseInt(target.dataset.frzzIndex, 10) : NaN;
+            if (!Number.isInteger(idx)) continue;
+            if (entry.isIntersecting && entry.intersectionRatio > 0) {
+                if (!visibleIndices.has(idx)) {
+                    visibleIndices.add(idx);
+                    changed = true;
+                }
+            } else if (visibleIndices.delete(idx)) {
+                changed = true;
+            }
+        }
+        if (changed) {
+            recomputeVisibleRangeFromVisibleSet();
+        }
+    }
+
+    function recomputeVisibleRangeFromVisibleSet() {
+        if (!visibleIndices.size) {
+            visibleRangeStart = lastVisibleStart;
+            visibleRangeEnd = lastVisibleEnd;
+        } else {
+            let min = Infinity;
+            let max = -1;
+            visibleIndices.forEach(idx => {
+                if (idx < min) min = idx;
+                if (idx > max) max = idx;
+            });
+            visibleRangeStart = Math.max(0, min);
+            visibleRangeEnd = Math.min(subtitleElements.length - 1, max);
+        }
+        schedulePaintVisible();
+    }
+
+    // Measure target scroll position ahead of DOM mutations to avoid layout thrashing.
+    function computeAutoScrollPlan(targetIndex) {
+        if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
+            return undefined;
+        }
+        const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
+        if (!wrapper) return undefined;
+        const targetNode = subtitleElements[targetIndex];
+        if (!targetNode) return undefined;
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const elementRect = targetNode.getBoundingClientRect();
+        const wrapperHeight = wrapperRect.height || wrapper.clientHeight || 0;
+        if (!wrapperHeight) return undefined;
+        const linePosition = elementRect.top - wrapperRect.top;
+        const elementHeight = elementRect.height || targetNode.offsetHeight || 1;
+        const topThreshold = wrapperHeight * 0.1;
+        const bottomThreshold = wrapperHeight * 0.9 - elementHeight;
+        if (linePosition >= topThreshold && linePosition <= bottomThreshold) {
+            return null;
+        }
+        const currentScrollTop = wrapper.scrollTop;
+        const targetScrollTop = Math.max(0, currentScrollTop + linePosition - wrapperHeight * 0.2);
+        const scrollSpeedValue = Math.max(settings.scrollSpeed || 1, 1);
+        const duration = 400 / (scrollSpeedValue / 100);
+        return { targetScrollTop, duration };
+    }
+
+    function autoScrollToIndex(targetIndex, precomputedPlan) {
+        if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
+            return;
+        }
+        const plan = (typeof precomputedPlan === 'undefined') ? computeAutoScrollPlan(targetIndex) : precomputedPlan;
+        if (!plan) {
+            return;
+        }
+        animateWrapperScrollTo(plan.targetScrollTop, plan.duration);
+    }
+
+    function invalidateAllLinePaint(options = {}) {
+        paintGeneration = (paintGeneration + 1) >>> 0;
+        if (options.resetBounds) {
+            lastVisibleStart = 0;
+            lastVisibleEnd = 0;
+        }
+        if (options.schedule !== false) {
+            schedulePaintVisible(options.immediate ? { immediate: true } : undefined);
+        }
+    }
+
+    function schedulePaintVisible(options) {
+        if (!subtitleElements.length) return;
+        const immediate = options && options.immediate;
+        if (immediate) {
+            paintVisibleRange();
+            return;
+        }
+        if (paintScheduled) return;
+        paintScheduled = true;
+        requestAnimationFrame(() => {
+            paintScheduled = false;
+            paintVisibleRange();
+        });
+    }
+
+    function paintVisibleRange() {
+        if (!subtitleElements.length) return;
+        let startIndex = visibleRangeStart;
+        let endIndex = visibleRangeEnd;
+        if (endIndex < startIndex) {
+            startIndex = 0;
+            endIndex = Math.min(subtitleElements.length - 1, PAINT_BUFFER);
+        }
+        const start = Math.max(0, startIndex - PAINT_BUFFER);
+        const end = Math.min(subtitleElements.length - 1, endIndex + PAINT_BUFFER);
+        paintRange(start, end);
+        lastVisibleStart = startIndex;
+        lastVisibleEnd = endIndex;
+    }
+
+    function paintRange(start, end) {
+        if (start > end) return;
+        for (let i = start; i <= end; i++) {
+            paintLine(i);
+        }
+    }
+
+    function paintLine(index, force = false) {
+        if (index < 0 || index >= subtitleElements.length) return;
+        const container = subtitleElements[index];
+        if (!container) return;
+        if (!force && subtitlePaintStates[index] === paintGeneration) return;
+
+        const roleElement = subtitleRoleElements[index];
+        const swatchElement = subtitleSwatchElements[index];
+        const roleArea = subtitleRoleAreaElements[index];
+        const role = subtitleRoles[index] || '';
+        const actor = subtitleActors[index] || null;
+        const actorColor = subtitleActorColors[index] || null;
+        const lineColor = subtitleLineColors[index] || null;
+        const finalRoleColor = subtitleFinalRoleColors[index] || null;
+        const checkerboardClass = subtitleCheckerboardClasses[index] || '';
+        const sameRoleChain = subtitleSameRolePrev[index] === true;
+
+        container.classList.remove('checkerboard-color-1', 'checkerboard-color-2', 'has-inline-swatch');
+        if (roleArea) {
+            roleArea.classList.add('role-area-is-empty');
+        }
+
+        if (roleElement) {
+            roleElement.classList.remove('role-colored-bg');
+            roleElement.style.backgroundColor = '';
+            roleElement.style.color = '';
+            roleElement.style.visibility = 'hidden';
+            roleElement.removeAttribute('title');
+            if (settings.deduplicateRoles && sameRoleChain) {
+                roleElement.textContent = '\u00A0';
+            } else {
+                roleElement.textContent = role;
+            }
+        }
+
+        if (swatchElement) {
+            swatchElement.style.backgroundColor = '';
+            swatchElement.style.visibility = 'hidden';
+        }
+
+        if (settings.checkerboardEnabled && checkerboardClass) {
+            container.classList.add(checkerboardClass);
+        }
+
+        const isColumn = settings.roleDisplayStyle === 'column';
+        const isColumnWithSwatch = settings.roleDisplayStyle === 'column_with_swatch';
+        const showRoleInColumn = settings.processRoles && !!role && (isColumn || isColumnWithSwatch);
+
+        let showSwatch = false;
+        if (settings.enableColorSwatches && finalRoleColor) {
+            if (isColumn) {
+                showSwatch = true;
+            } else if (!isColumnWithSwatch && !showRoleInColumn) {
+                showSwatch = true;
+            }
+        }
+
+        if (roleElement) {
+            roleElement.style.visibility = showRoleInColumn ? 'visible' : 'hidden';
+        }
+        if (showSwatch && swatchElement) {
+            swatchElement.style.visibility = 'visible';
+            if (!showRoleInColumn) {
+                container.classList.add('has-inline-swatch');
+            }
+        }
+
+        if (roleArea) {
+            roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumn || showSwatch));
+        }
+
+        if (finalRoleColor) {
+            if (roleElement && actor) {
+                roleElement.title = actor;
+            }
+            if (roleElement && showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches) {
+                const adj = settings.roleFontColorEnabled ? (getLightenedColorCached(finalRoleColor, true) || { bg: finalRoleColor, text: '#000000' }) : { bg: finalRoleColor, text: isColorLight(finalRoleColor) ? '#000000' : '#ffffff' };
+                roleElement.classList.add('role-colored-bg');
+                roleElement.style.visibility = 'visible';
+                roleElement.style.backgroundColor = adj.bg;
+                roleElement.style.color = adj.text || '#000000';
+            } else if (showSwatch && swatchElement) {
+                const adjSwatch = settings.roleFontColorEnabled ? (getLightenedColorCached(finalRoleColor, true) || { bg: finalRoleColor }) : { bg: finalRoleColor };
+                swatchElement.style.backgroundColor = adjSwatch.bg;
+            }
+        }
+
+        subtitlePaintStates[index] = paintGeneration;
+    }
+
+    function handleWrapperScroll() {
+        schedulePaintVisible();
+    }
+
+    if (textDisplayWrapperEl) {
+        textDisplayWrapperEl.addEventListener('scroll', handleWrapperScroll, { passive: true });
+    }
+    window.addEventListener('resize', () => {
+        schedulePaintVisible();
+        if (currentLineIndex !== -1 && settings.autoScroll) {
+            requestAnimationFrame(() => autoScrollToIndex(currentLineIndex));
+        }
+    }, { passive: true });
     
     function getScrollSpeedCaption(speed) { if (speed === 1) return "Я БЛИТЦ! СКОРОСТЬ БЕЗ ГРАНИЦ"; if (speed >= 10 && speed <= 40) return "Ой, что-то меня укачало"; if (speed >= 50 && speed <= 70) return "Да не укачивает меня, просто резко встал"; if (speed >= 80 && speed <= 100) return "У меня хороший вестибу-бу-булярный аппарат"; if (speed >= 110 && speed <= 150) return "Это по вашему скорость?"; if (speed >= 160 && speed <= 200) return "АМЕРИКАНСКИЕ ГОРКИ! Ю-ХУУУ!!!"; if (speed === 500) return "Вы Борис?"; return ""; }
 
@@ -442,6 +885,7 @@ $(document).ready(function() {
             scheduleTransportWrapEvaluation();
             // Ensure visual title reflects authoritative settings + currentProjectName
             updateTitle();
+            invalidateAllLinePaint({ schedule: true });
             console.debug('[Prompter][applySettings] done');
         } catch (e) { console.error("Error in applySettings:", e); }
     }
@@ -458,7 +902,7 @@ $(document).ready(function() {
             }
             $sel.val(val);
         }
-        Object.keys(s).forEach(key => {
+            Object.keys(s).forEach(key => {
             const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
             const el = $(id);
             if (el.length) {
@@ -867,8 +1311,7 @@ $(document).ready(function() {
             if (parsed && typeof parsed === 'object') {
                 settings.actorRoleMappingText = typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : '';
                 settings.actorColors = (parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {};
-                buildActorRoleMaps();
-                const mappedRolesCount = Object.keys(roleToActor || {}).length;
+                const mappedRolesCount = buildActorRoleMaps();
                 rolesLoaded = mappedRolesCount > 0;
                 console.info('[Prompter][roles][integrateLoadedRoles] parsed', {
                     hasMappingText: !!settings.actorRoleMappingText,
@@ -1280,94 +1723,179 @@ $(document).ready(function() {
             if (!Array.isArray(subtitles)) { throw new Error('Полученные данные не являются массивом субтитров.'); }
             subtitleData = subtitles;
             subtitlesLoadedOnce = true;
-            subtitleElements = [];
-            textDisplay.empty();
-            if (subtitleData.length === 0) return;
+            currentLineIndex = -1;
+            if (textDisplayEl) { textDisplayEl.textContent = ''; }
+            else { textDisplay.empty(); }
+            detachSharedProgress();
+            sharedProgressBar.style.transform = 'scaleX(0)';
+            disconnectVisibilityObserver();
+            resetVisibilityTracking();
+            const total = subtitleData.length;
+            subtitleElements = new Array(total);
+            subtitleContentElements = new Array(total);
+            subtitleRoleElements = new Array(total);
+            subtitleSwatchElements = new Array(total);
+            subtitleRoleAreaElements = new Array(total);
+            subtitlePaintStates = new Array(total);
+            subtitleRoles = new Array(total);
+            subtitleActors = new Array(total);
+            subtitleActorColors = new Array(total);
+            subtitleLineColors = new Array(total);
+            subtitleFinalRoleColors = new Array(total);
+            subtitleCheckerboardClasses = new Array(total);
+            subtitleSameRolePrev = new Array(total);
+            if (total === 0) {
+                invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
+                return;
+            }
             // After loading subtitles we may need to refresh stats button visibility
             scheduleStatsButtonEvaluation();
-            
-            let lineStyles = $('#dynamic-line-styles');
-            if (lineStyles.length === 0) { lineStyles = $('<style id="dynamic-line-styles"></style>').appendTo('head'); }
-            
-            let lastRoleForCheckerboard = null, lastColorForCheckerboard = null, colorIndex = 0, dynamicRoleStyles = "", lastRoleForDeduplication = null;
+
+            $('#dynamic-line-styles').remove();
+            const displayNode = textDisplayEl || textDisplay[0];
+            if (!displayNode) { console.error('[Prompter] text display container missing'); return; }
+
+            const processRoles = !!settings.processRoles;
+            const deduplicateRoles = !!settings.deduplicateRoles;
+            const roleDisplayStyle = settings.roleDisplayStyle;
+            const roleDisplayIsInline = roleDisplayStyle === 'inline';
+            const roleDisplayIsColumn = roleDisplayStyle === 'column';
+            const roleDisplayIsColumnWithSwatch = roleDisplayStyle === 'column_with_swatch';
+            const showRoleColumnSkeleton = processRoles && (roleDisplayIsColumn || roleDisplayIsColumnWithSwatch);
+            const enableColorSwatches = !!settings.enableColorSwatches;
+            const checkerboardEnabled = !!settings.checkerboardEnabled;
+            const checkerboardMode = settings.checkerboardMode;
+
+            let lastRoleForCheckerboard = null;
+            let lastColorForCheckerboard = null;
+            let colorIndex = 0;
 
             // Build role->actor map once per render based on settings
             const tMap0 = performance.now();
-            buildActorRoleMaps();
+            let roleMappingSize = 0;
+            if (processRoles) {
+                roleMappingSize = buildActorRoleMaps();
+            }
             const tMap1 = performance.now();
-            const roleMappingSize = Object.keys(roleToActor || {}).length;
             const shouldIgnoreLineColors = roleMappingSize > 0;
+            const actorColorsMap = settings.actorColors || {};
+            const configuredFrameRate = Number(settings.frameRate);
+            const frameRate = Number.isFinite(configuredFrameRate) && configuredFrameRate > 0 ? configuredFrameRate : 24;
+            const useActorMapping = shouldIgnoreLineColors;
+            const useLineColor = !shouldIgnoreLineColors;
+            let previousRoleRaw = null;
 
-            // Build all rows in one pass
+            // Build skeleton rows first, paint later
             const tBuild0 = performance.now();
-            subtitleData.forEach((line, index) => {
-                let role = '', text = line.text;
-                const roleMatch = text.match(/^\[(.*?)\]\s*/);
-                if (roleMatch && settings.processRoles) {
-                    role = roleMatch[1];
-                    if (settings.roleDisplayStyle !== 'inline') { text = text.substring(roleMatch[0].length); }
-                }
-                const lineHtml = `<div class="subtitle-container" data-index="${index}"><div class="role-area"><div class="subtitle-color-swatch"></div><div class="subtitle-role">${role}</div><div class="subtitle-separator"></div></div><div class="subtitle-time">${formatTimecode(line.start_time)}</div><div class="subtitle-content"><div class="subtitle-text"></div><div class="subtitle-progress-container"><div class="subtitle-progress-bar"></div></div></div></div>`;
-                const lineElement = $(lineHtml);
-                const roleElement = lineElement.find('.subtitle-role');
-                const swatchElement = lineElement.find('.subtitle-color-swatch');
-                lineElement.find('.subtitle-text').text(text);
-
-                if (settings.deduplicateRoles && role) {
-                    const prev = index>0 ? subtitleData[index-1] : null;
-                    if (prev) {
-                        const m = prev.text.match(/^\[(.*?)\]\s*/);
-                        const prevRole = m ? m[1] : null;
-                        if (prevRole && prevRole === role) roleElement.html('&nbsp;');
+            const fragment = document.createDocumentFragment();
+            for (let index = 0; index < total; index++) {
+                const line = subtitleData[index];
+                if (!line) continue;
+                const rawText = line.text || '';
+                let role = '';
+                let text = rawText;
+                if (processRoles && rawText.length > 0 && rawText.charCodeAt(0) === 91) {
+                    const cachedParts = getCachedRoleParts(line, rawText);
+                    if (cachedParts) {
+                        role = cachedParts.role;
+                        text = roleDisplayIsInline ? cachedParts.textInline : cachedParts.textTrimmed;
                     }
                 }
 
-                if (settings.checkerboardEnabled) {
-                    if (settings.checkerboardMode === 'unconditional') { lineElement.addClass(`checkerboard-color-${(index % 2) + 1}`); }
-                    else if (settings.checkerboardMode === 'by_role') { const currentRole = role || 'no_role'; if (currentRole !== lastRoleForCheckerboard) { colorIndex = 1 - colorIndex; lastRoleForCheckerboard = currentRole; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
-                    else if (settings.checkerboardMode === 'by_color') { const currentColor = line.color || 'no_color'; if (currentColor !== lastColorForCheckerboard) { colorIndex = 1 - colorIndex; lastColorForCheckerboard = currentColor; } lineElement.addClass(`checkerboard-color-${colorIndex + 1}`); }
+                const container = SUBTITLE_SKELETON_TEMPLATE.cloneNode(true);
+                const roleArea = container.firstElementChild;
+                const timeElement = roleArea ? roleArea.nextElementSibling : null;
+                const contentElement = timeElement ? timeElement.nextElementSibling : null;
+                const swatchElement = roleArea ? roleArea.firstElementChild : null;
+                const roleElement = swatchElement ? swatchElement.nextElementSibling : null;
+                const textElement = contentElement ? contentElement.firstElementChild : null;
+
+                let timeString;
+                if (line.__cachedFrameRate === frameRate && typeof line.__cachedTimecode === 'string') {
+                    timeString = line.__cachedTimecode;
+                } else {
+                    timeString = formatTimecode(line.start_time, frameRate);
+                    line.__cachedFrameRate = frameRate;
+                    line.__cachedTimecode = timeString;
                 }
 
-                // Ignore subtitle-provided colors only when we actually have role mappings
-                const itemColor = shouldIgnoreLineColors ? null : (line.color || null);
-                const actor = shouldIgnoreLineColors && role && roleToActor[role] ? roleToActor[role] : null;
-                const actorColor = actor && settings.actorColors ? settings.actorColors[actor] : null;
-                const finalRoleColor = actorColor || itemColor || null;
-                const isColumn = settings.roleDisplayStyle === 'column';
-                const isColumnWithSwatch = settings.roleDisplayStyle === 'column_with_swatch';
-                const showRoleInColumn = settings.processRoles && role && (isColumn || isColumnWithSwatch);
-                // swatch visibility rules
-                let showSwatch = false;
-                if (settings.enableColorSwatches && !!finalRoleColor) {
-                    if (isColumn) showSwatch = true; else if (!isColumnWithSwatch && !showRoleInColumn) showSwatch = true;
+                if (timeElement) {
+                    timeElement.textContent = timeString;
                 }
-                roleElement.css('visibility', showRoleInColumn ? 'visible' : 'hidden');
-                swatchElement.css('visibility', showSwatch ? 'visible' : 'hidden');
-                if (showSwatch && !showRoleInColumn) lineElement.addClass('has-inline-swatch');
+                if (textElement) {
+                    textElement.textContent = text;
+                }
 
-                if (finalRoleColor) {
-                    let effectiveBg = finalRoleColor; let effectiveText;
-                    if (settings.roleFontColorEnabled) { const adj = lightenGeneric(finalRoleColor, true); effectiveBg = adj.bg; effectiveText = '#000000'; }
-                    else { effectiveText = isColorLight(effectiveBg) ? '#000000' : '#ffffff'; }
-                    if (showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches) {
-                        roleElement.addClass('role-colored-bg').css('visibility', 'visible');
-                        dynamicRoleStyles += `.subtitle-container[data-index="${index}"] .role-colored-bg { background-color: ${effectiveBg}; color: ${effectiveText}; }`;
-                    } else if (showSwatch) {
-                        swatchElement.css('background-color', effectiveBg);
+                subtitleContentElements[index] = contentElement;
+                subtitleRoleElements[index] = roleElement;
+                subtitleSwatchElements[index] = swatchElement;
+                subtitleRoleAreaElements[index] = roleArea;
+                subtitlePaintStates[index] = -1;
+
+                let checkerboardClass = '';
+                if (checkerboardEnabled) {
+                    if (checkerboardMode === 'unconditional') {
+                        checkerboardClass = `checkerboard-color-${(index % 2) + 1}`;
+                    } else if (checkerboardMode === 'by_role') {
+                        const currentRole = role || 'no_role';
+                        if (currentRole !== lastRoleForCheckerboard) {
+                            colorIndex = 1 - colorIndex;
+                            lastRoleForCheckerboard = currentRole;
+                        }
+                        checkerboardClass = `checkerboard-color-${colorIndex + 1}`;
+                    } else if (checkerboardMode === 'by_color') {
+                        const currentColor = line.color || 'no_color';
+                        if (currentColor !== lastColorForCheckerboard) {
+                            colorIndex = 1 - colorIndex;
+                            lastColorForCheckerboard = currentColor;
+                        }
+                        checkerboardClass = `checkerboard-color-${colorIndex + 1}`;
                     }
-                    if (actor) roleElement.attr('title', actor);
                 }
-                lineElement.find('.role-area').toggleClass('role-area-is-empty', !(showRoleInColumn || showSwatch));
-                textDisplay.append(lineElement);
-                subtitleElements.push(lineElement);
-            });
+
+                const actor = role && useActorMapping ? roleToActor[role] || null : null;
+                const actorColor = actor ? actorColorsMap[actor] || null : null;
+                const lineColor = useLineColor ? (line.color || null) : null;
+
+                const showRoleInColumnSkeleton = showRoleColumnSkeleton && !!role;
+                const finalRoleColorCandidate = actorColor || lineColor || null;
+                const showInlineSwatchSkeleton = enableColorSwatches && !!finalRoleColorCandidate && !showRoleInColumnSkeleton && !roleDisplayIsColumn && !roleDisplayIsColumnWithSwatch;
+
+                const sameRoleChain = !!(role && previousRoleRaw === role);
+                subtitleSameRolePrev[index] = sameRoleChain;
+                previousRoleRaw = role || null;
+                if (roleElement) {
+                    roleElement.textContent = (deduplicateRoles && sameRoleChain) ? '\u00A0' : (role || '');
+                    roleElement.style.visibility = showRoleInColumnSkeleton ? 'visible' : 'hidden';
+                }
+                if (roleArea) {
+                    roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumnSkeleton || showInlineSwatchSkeleton));
+                }
+                if (swatchElement) {
+                    if (showInlineSwatchSkeleton) {
+                        container.classList.add('has-inline-swatch');
+                        swatchElement.style.visibility = 'visible';
+                    } else {
+                        swatchElement.style.visibility = 'hidden';
+                    }
+                }
+
+                subtitleRoles[index] = role;
+                subtitleActors[index] = actor;
+                subtitleActorColors[index] = actorColor;
+                subtitleLineColors[index] = lineColor;
+                subtitleFinalRoleColors[index] = finalRoleColorCandidate;
+                subtitleCheckerboardClasses[index] = checkerboardClass;
+                subtitleElements[index] = container;
+                fragment.appendChild(container);
+            }
             const tBuild1 = performance.now();
-            
-            lineStyles.text(dynamicRoleStyles);
-            const tStyles = performance.now();
-            const tApply0 = performance.now();
-            applySettings();
-            const tApply1 = performance.now();
+            const tAppend0 = performance.now();
+            displayNode.appendChild(fragment);
+            const tAppend1 = performance.now();
+            setupVisibilityObserver();
+            invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
+            schedulePaintVisible();
             const t1 = performance.now();
             const renderMs = t1 - t0;
             const renderSeconds = renderMs / 1000;
@@ -1380,18 +1908,19 @@ $(document).ready(function() {
                 msTotal: Math.round(renderMs),
                 secondsTotal: Number(renderSeconds.toFixed(3)),
                 msMap: Math.round(tMap1 - tMap0),
-                msBuildAppend: Math.round(tBuild1 - tBuild0),
-                msStyles: Math.round(tStyles - tBuild1),
-                msApply: Math.round(tApply1 - tApply0),
+                msBuild: Math.round(tBuild1 - tBuild0),
+                msDomAppend: Math.round(tAppend1 - tAppend0),
                 total: subtitleData.length
             });
             // Снимаем обработчики виртуализации если были
             try {
-                if (window.__vwinScrollHandler) { textDisplayWrapper[0].removeEventListener('scroll', window.__vwinScrollHandler); window.__vwinScrollHandler = null; }
+                const wrapperNode = textDisplayWrapperEl || textDisplayWrapper[0] || null;
+                if (wrapperNode && window.__vwinScrollHandler) { wrapperNode.removeEventListener('scroll', window.__vwinScrollHandler); window.__vwinScrollHandler = null; }
                 if (window.__vwinResizeHandler) { window.removeEventListener('resize', window.__vwinResizeHandler); window.__vwinResizeHandler = null; }
-                if (window.__vwinWheelHandler) { textDisplayWrapper[0].removeEventListener('wheel', window.__vwinWheelHandler); window.__vwinWheelHandler = null; }
-                if (window.__vwinTouchHandler) { textDisplayWrapper[0].removeEventListener('touchmove', window.__vwinTouchHandler); window.__vwinTouchHandler = null; }
+                if (wrapperNode && window.__vwinWheelHandler) { wrapperNode.removeEventListener('wheel', window.__vwinWheelHandler); window.__vwinWheelHandler = null; }
+                if (wrapperNode && window.__vwinTouchHandler) { wrapperNode.removeEventListener('touchmove', window.__vwinTouchHandler); window.__vwinTouchHandler = null; }
             } catch(_){}
+            updateTeleprompter(latestTimecode);
         } catch (e) { console.error("Error in handleTextResponse:", e); }
     }
 
@@ -1420,17 +1949,26 @@ $(document).ready(function() {
     }
 
     function buildActorRoleMaps() {
-        roleToActor = {};
-        actorToRoles = {};
-        const parsed = parseActorRoleMapping(settings.actorRoleMappingText || '');
-        Object.keys(parsed).forEach(actor => {
-            const roles = parsed[actor];
-            actorToRoles[actor] = new Set(roles);
-            roles.forEach(role => {
-                if (!roleToActor[role]) roleToActor[role] = actor; // first mapping wins
+        const mappingText = settings.actorRoleMappingText || '';
+        if (mappingText !== cachedActorRoleMappingText) {
+            roleToActor = {};
+            actorToRoles = {};
+            const parsed = parseActorRoleMapping(mappingText);
+            Object.keys(parsed).forEach(actor => {
+                const roles = parsed[actor];
+                const roleSet = new Set(roles);
+                actorToRoles[actor] = roleSet;
+                roles.forEach(role => {
+                    if (!roleToActor[role]) {
+                        roleToActor[role] = actor; // first mapping wins
+                    }
+                });
             });
-        });
+            cachedActorRoleMappingText = mappingText;
+            cachedMappedRolesCount = Object.keys(roleToActor).length;
+        }
         assignDefaultActorColors();
+        return cachedMappedRolesCount;
     }
 
     function assignDefaultActorColors(){
@@ -1565,34 +2103,156 @@ $(document).ready(function() {
             }
         } catch(e) { console.error("Error in transport response:", e); }
     }
+
+    function locateSubtitleIndexAtTime(currentTime) {
+        const total = subtitleData.length;
+        if (!total || !Number.isFinite(currentTime) || currentTime < subtitleData[0].start_time) {
+            return { index: -1, inPause: false };
+        }
+
+        const lastIndex = total - 1;
+        if (currentTime >= subtitleData[lastIndex].start_time) {
+            const lastLine = subtitleData[lastIndex];
+            return { index: lastIndex, inPause: currentTime >= lastLine.end_time };
+        }
+
+        const currIdx = currentLineIndex;
+        if (currIdx >= 0 && currIdx < total) {
+            const currentLine = subtitleData[currIdx];
+            const nextStart = currIdx + 1 < total ? subtitleData[currIdx + 1].start_time : Number.POSITIVE_INFINITY;
+            if (currentTime >= currentLine.start_time && currentTime < nextStart) {
+                return { index: currIdx, inPause: currentTime >= currentLine.end_time };
+            }
+            if (currentTime < currentLine.start_time && currIdx > 0) {
+                const prevLine = subtitleData[currIdx - 1];
+                if (currentTime >= prevLine.start_time && currentTime < currentLine.start_time) {
+                    return { index: currIdx - 1, inPause: currentTime >= prevLine.end_time };
+                }
+            }
+            if (currentTime >= nextStart && currIdx + 1 < total) {
+                const nextLine = subtitleData[currIdx + 1];
+                const afterNextStart = currIdx + 2 < total ? subtitleData[currIdx + 2].start_time : Number.POSITIVE_INFINITY;
+                if (currentTime >= nextLine.start_time && currentTime < afterNextStart) {
+                    return { index: currIdx + 1, inPause: currentTime >= nextLine.end_time };
+                }
+            }
+        }
+
+        let lo = 0;
+        let hi = total - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >>> 1;
+            const line = subtitleData[mid];
+            const start = line.start_time;
+            const nextStart = mid + 1 < total ? subtitleData[mid + 1].start_time : Number.POSITIVE_INFINITY;
+            if (currentTime < start) {
+                hi = mid - 1;
+                continue;
+            }
+            if (currentTime >= nextStart) {
+                lo = mid + 1;
+                continue;
+            }
+            return { index: mid, inPause: currentTime >= line.end_time };
+        }
+
+        const fallbackIdx = Math.max(0, Math.min(total - 1, lo));
+        const fallbackLine = subtitleData[fallbackIdx];
+        return { index: fallbackIdx, inPause: currentTime >= fallbackLine.end_time };
+    }
     
     function updateTeleprompter(currentTime) {
         try {
-            let newCurrentLineIndex = -1, inPause = false;
-            for (let i = subtitleData.length - 1; i >= 0; i--) {
-                if (subtitleData[i].start_time <= currentTime) {
-                    newCurrentLineIndex = i;
-                    if (currentTime >= subtitleData[i].end_time) { inPause = true; }
-                    break;
+            const located = locateSubtitleIndexAtTime(currentTime);
+            const newCurrentLineIndex = located.index;
+            const inPause = located.inPause;
+            const indexChanged = newCurrentLineIndex !== currentLineIndex;
+            let autoScrollPlan;
+            let autoScrollPlanComputed = false;
+
+            if (indexChanged && newCurrentLineIndex !== -1 && settings.autoScroll) {
+                autoScrollPlan = computeAutoScrollPlan(newCurrentLineIndex);
+                autoScrollPlanComputed = true;
+            }
+
+            if (indexChanged && currentLineIndex !== -1) {
+                const previousElement = subtitleElements[currentLineIndex];
+                if (previousElement) {
+                    previousElement.classList.remove('current-line');
+                    previousElement.classList.remove('pause-highlight');
                 }
             }
-            if (newCurrentLineIndex !== currentLineIndex) { if (currentLineIndex !== -1 && subtitleElements[currentLineIndex]) { subtitleElements[currentLineIndex].removeClass('current-line pause-highlight'); } }
-            if (newCurrentLineIndex !== -1 && subtitleElements[newCurrentLineIndex]) { const newElement = subtitleElements[newCurrentLineIndex]; if (inPause) { if (!newElement.hasClass('pause-highlight')) newElement.removeClass('current-line').addClass('pause-highlight'); } else { if (!newElement.hasClass('current-line')) newElement.removeClass('pause-highlight').addClass('current-line'); } }
-            else if (currentLineIndex !== -1 && subtitleElements[currentLineIndex]) { subtitleElements[currentLineIndex].removeClass('current-line pause-highlight'); }
-            if (newCurrentLineIndex !== currentLineIndex) {
-                if (newCurrentLineIndex !== -1 && subtitleElements[newCurrentLineIndex] && settings.autoScroll) {
-                    const newContainer = subtitleElements[newCurrentLineIndex], $wrapper = $('#text-display-wrapper'), wrapperHeight = $wrapper.height();
-                    const lineTop = newContainer.position().top + $wrapper.scrollTop(), scrollDuration = 400 / (settings.scrollSpeed / 100);
-                    const linePositionInViewport = newContainer.position().top, topThreshold = wrapperHeight * 0.1, bottomThreshold = wrapperHeight * 0.9 - newContainer.outerHeight(true);
-                    if (linePositionInViewport < topThreshold || linePositionInViewport > bottomThreshold) $wrapper.stop().animate({ scrollTop: lineTop - (wrapperHeight * 0.2) }, scrollDuration);
+
+            if (newCurrentLineIndex !== -1) {
+                const newElement = subtitleElements[newCurrentLineIndex];
+                if (newElement) {
+                    if (inPause) {
+                        if (!newElement.classList.contains('pause-highlight')) {
+                            newElement.classList.remove('current-line');
+                            newElement.classList.add('pause-highlight');
+                        }
+                    } else {
+                        if (!newElement.classList.contains('current-line')) {
+                            newElement.classList.remove('pause-highlight');
+                            newElement.classList.add('current-line');
+                        }
+                    }
                 }
+            } else if (currentLineIndex !== -1 && !indexChanged) {
+                const previousElement = subtitleElements[currentLineIndex];
+                if (previousElement) {
+                    previousElement.classList.remove('current-line');
+                    previousElement.classList.remove('pause-highlight');
+                }
+            }
+
+            if (indexChanged) {
+                if (newCurrentLineIndex !== -1) {
+                    attachSharedProgressToIndex(newCurrentLineIndex);
+                } else {
+                    detachSharedProgress();
+                }
+                const previousIndex = currentLineIndex;
                 currentLineIndex = newCurrentLineIndex;
+                if (previousIndex !== -1) {
+                    paintLine(previousIndex, true);
+                }
+                if (currentLineIndex !== -1) {
+                    paintLine(currentLineIndex, true);
+                }
+                if (settings.autoScroll && currentLineIndex !== -1) {
+                    if (autoScrollPlanComputed) {
+                        if (autoScrollPlan) {
+                            autoScrollToIndex(currentLineIndex, autoScrollPlan);
+                        } else if (typeof autoScrollPlan === 'undefined') {
+                            autoScrollToIndex(currentLineIndex);
+                        }
+                    } else {
+                        autoScrollToIndex(currentLineIndex);
+                    }
+                }
             }
-            if (currentLineIndex !== -1 && subtitleElements[currentLineIndex] && !inPause) {
-                const currentSub = subtitleData[currentLineIndex], lineDuration = currentSub.end_time - currentSub.start_time;
-                let percentage = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) * 100 : 0;
-                subtitleElements[currentLineIndex].find('.subtitle-progress-bar').css('transform', `scaleX(${Math.max(0, Math.min(100, percentage)) / 100})`);
-            } else if (currentLineIndex !== -1 && subtitleElements[currentLineIndex]) { subtitleElements[currentLineIndex].find('.subtitle-progress-bar').css('transform', 'scaleX(0)'); }
+
+            if (currentLineIndex !== -1) {
+                const activeElement = subtitleElements[currentLineIndex];
+                if (activeElement) {
+                    if (sharedProgressIndex !== currentLineIndex) {
+                        attachSharedProgressToIndex(currentLineIndex);
+                    }
+                    if (!inPause) {
+                        const currentSub = subtitleData[currentLineIndex];
+                        const lineDuration = currentSub.end_time - currentSub.start_time;
+                        const rawPercentage = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) * 100 : 0;
+                        const clampedPercentage = Math.max(0, Math.min(100, rawPercentage));
+                        sharedProgressBar.style.transform = `scaleX(${clampedPercentage / 100})`;
+                    } else {
+                        sharedProgressBar.style.transform = 'scaleX(0)';
+                    }
+                }
+            } else {
+                sharedProgressBar.style.transform = 'scaleX(0)';
+                detachSharedProgress();
+            }
         } catch (e) { console.error("Error in updateTeleprompter:", e); }
     }
     
@@ -1763,15 +2423,22 @@ $(document).ready(function() {
             targetIndex = subtitleData.findIndex(l => l.start_time >= latestTimecode);
             if (targetIndex === -1) targetIndex = subtitleData.length - 1;
         }
-        if (targetIndex !== -1 && subtitleElements[targetIndex]) {
+        if (targetIndex !== -1) {
             const targetElement = subtitleElements[targetIndex];
-            targetElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-            if (settings.highlightClickEnabled) {
-                targetElement.addClass('click-highlight');
-                const dur = (typeof settings.highlightClickDuration === 'number' && settings.highlightClickDuration > 0 && settings.highlightClickDuration <= 60000)
-                    ? settings.highlightClickDuration
-                    : defaultSettings.highlightClickDuration;
-                setTimeout(() => targetElement.removeClass('click-highlight'), dur);
+            if (targetElement) {
+                if (typeof targetElement.scrollIntoView === 'function') {
+                    targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+                if (settings.highlightClickEnabled) {
+                    targetElement.classList.add('click-highlight');
+                    const dur = (typeof settings.highlightClickDuration === 'number' && settings.highlightClickDuration > 0 && settings.highlightClickDuration <= 60000)
+                        ? settings.highlightClickDuration
+                        : defaultSettings.highlightClickDuration;
+                    setTimeout(() => targetElement.classList.remove('click-highlight'), dur);
+                }
+                attachSharedProgressToIndex(targetIndex);
+                paintLine(targetIndex, true);
+                schedulePaintVisible();
             }
         }
     });
