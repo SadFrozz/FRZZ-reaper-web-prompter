@@ -64,51 +64,6 @@ const SETTINGS_CHUNK_SIZE = 250; // was 700
 const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
-const SUBTITLE_TEMPLATE_CACHE = new Map();
-function getSubtitleTemplate(config) {
-    const key = `${config.includeRoleArea ? 1 : 0}${config.includeRoleElement ? 1 : 0}${config.includeSwatch ? 1 : 0}`;
-    if (!SUBTITLE_TEMPLATE_CACHE.has(key)) {
-        const container = document.createElement('div');
-        container.className = 'subtitle-container';
-        const parts = [];
-        if (config.includeRoleArea) {
-            parts.push('<div class="role-area role-area-is-empty">');
-            if (config.includeSwatch) {
-                parts.push('<div class="subtitle-color-swatch" style="visibility:hidden"></div>');
-            }
-            if (config.includeRoleElement) {
-                parts.push('<div class="subtitle-role" style="visibility:hidden"></div>');
-                parts.push('<div class="subtitle-separator"></div>');
-            }
-            parts.push('</div>');
-        }
-        parts.push('<div class="subtitle-time"></div>');
-        parts.push('<div class="subtitle-content"><div class="subtitle-text"></div></div>');
-        container.innerHTML = parts.join('');
-        const includeRoleArea = !!config.includeRoleArea;
-        const includeRoleElement = !!config.includeRoleElement;
-        const includeSwatch = !!config.includeSwatch;
-        const roleAreaIndex = includeRoleArea ? 0 : -1;
-        const timeIndex = includeRoleArea ? 1 : 0;
-        const contentIndex = includeRoleArea ? 2 : 1;
-        const swatchIndex = includeSwatch ? 0 : -1;
-        const roleIndex = includeRoleElement ? (includeSwatch ? 1 : 0) : -1;
-        SUBTITLE_TEMPLATE_CACHE.set(key, {
-            node: container,
-            resolve(cloneRoot) {
-                const children = cloneRoot.children;
-                const roleArea = roleAreaIndex !== -1 ? children[roleAreaIndex] || null : null;
-                const timeElement = children[timeIndex] || null;
-                const contentElement = children[contentIndex] || null;
-                const textElement = contentElement ? contentElement.firstElementChild : null;
-                const swatchElement = (roleArea && swatchIndex !== -1) ? roleArea.children[swatchIndex] || null : null;
-                const roleElement = (roleArea && roleIndex !== -1) ? roleArea.children[roleIndex] || null : null;
-                return { timeElement, contentElement, textElement, roleArea, swatchElement, roleElement };
-            }
-        });
-    }
-    return SUBTITLE_TEMPLATE_CACHE.get(key);
-}
 
 $(document).ready(function() {
     const initStartTs = performance.now();
@@ -1906,14 +1861,6 @@ $(document).ready(function() {
             const checkerboardMode = settings.checkerboardMode;
 
             const includeRoleColumn = processRoles && (roleDisplayIsColumn || roleDisplayIsColumnWithSwatch);
-            const templateConfig = {
-                includeRoleArea: includeRoleColumn || enableColorSwatches,
-                includeRoleElement: includeRoleColumn,
-                includeSwatch: enableColorSwatches
-            };
-            const showRoleColumnSkeleton = includeRoleColumn;
-            const templateInfo = getSubtitleTemplate(templateConfig);
-            const skeletonTemplate = templateInfo.node;
 
             let lastRoleForCheckerboard = null;
             let lastColorForCheckerboard = null;
@@ -1940,25 +1887,69 @@ $(document).ready(function() {
             for (let index = 0; index < total; index++) {
                 const line = subtitleData[index];
                 if (!line) continue;
+
                 const rawText = line.text || '';
                 let role = '';
-                let text = rawText;
+                let displayText = rawText;
                 if (processRoles && rawText.length > 0 && rawText.charCodeAt(0) === 91) {
                     const cachedParts = getCachedRoleParts(line, rawText);
                     if (cachedParts) {
                         role = cachedParts.role;
-                        text = roleDisplayIsInline ? cachedParts.textInline : cachedParts.textTrimmed;
+                        displayText = roleDisplayIsInline ? cachedParts.textInline : cachedParts.textTrimmed;
                     }
                 }
 
-                const container = skeletonTemplate.cloneNode(true);
-                const resolved = templateInfo.resolve(container);
-                const timeElement = resolved.timeElement;
-                const contentElement = resolved.contentElement;
-                const textElement = resolved.textElement;
-                const roleArea = resolved.roleArea;
-                const swatchElement = resolved.swatchElement;
-                const roleElement = resolved.roleElement;
+                const container = document.createElement('div');
+                container.className = 'subtitle-container';
+
+                const contentElement = document.createElement('div');
+                contentElement.className = 'subtitle-content';
+                const bodyElement = document.createElement('div');
+                bodyElement.className = 'subtitle-body';
+                contentElement.appendChild(bodyElement);
+
+                const textElement = document.createElement('span');
+                textElement.className = 'subtitle-text';
+                if (line.textHtml) {
+                    textElement.innerHTML = line.textHtml;
+                } else {
+                    textElement.textContent = displayText;
+                }
+
+                subtitleContentElements[index] = contentElement;
+                subtitlePaintStates[index] = -1;
+
+                const showRoleInline = processRoles && !!role && !includeRoleColumn && roleDisplayIsInline;
+                const showRoleInColumn = includeRoleColumn && !!role;
+
+                let roleElement = null;
+                if (includeRoleColumn) {
+                    roleElement = document.createElement('span');
+                    roleElement.className = 'subtitle-role column-role';
+                } else if (showRoleInline) {
+                    roleElement = document.createElement('span');
+                    roleElement.className = 'subtitle-role inline-role';
+                }
+
+                let separatorElement = null;
+                const includeSeparator = includeRoleColumn && !settings.swapColumns;
+                if (includeSeparator) {
+                    separatorElement = document.createElement('span');
+                    separatorElement.className = 'subtitle-separator';
+                }
+
+                const sameRoleChain = !!(role && previousRoleRaw === role);
+                previousRoleRaw = role || null;
+
+                if (roleElement) {
+                    if (roleElement.classList.contains('column-role')) {
+                        const displayRole = showRoleInColumn ? ((deduplicateRoles && sameRoleChain) ? '\u00A0' : (role || '')) : '';
+                        roleElement.textContent = displayRole;
+                        roleElement.classList.toggle('role-hidden', !showRoleInColumn);
+                    } else if (roleElement.classList.contains('inline-role')) {
+                        roleElement.textContent = role;
+                    }
+                }
 
                 let timeString;
                 if (line.__cachedFrameRate === frameRate && typeof line.__cachedTimecode === 'string') {
@@ -1968,14 +1959,9 @@ $(document).ready(function() {
                     line.__cachedFrameRate = frameRate;
                     line.__cachedTimecode = timeString;
                 }
-                if (timeElement) {
-                    timeElement.textContent = timeString;
-                }
-                if (textElement) {
-                    textElement.textContent = text;
-                }
-                subtitleContentElements[index] = contentElement;
-                subtitlePaintStates[index] = -1;
+                const timeElement = document.createElement('span');
+                timeElement.className = 'subtitle-time';
+                timeElement.textContent = timeString;
 
                 let checkerboardClass = '';
                 if (checkerboardEnabled) {
@@ -2001,64 +1987,91 @@ $(document).ready(function() {
                 const actor = role && useActorMapping ? roleToActor[role] || null : null;
                 const actorColor = actor ? actorColorsMap[actor] || null : null;
                 const lineColor = useLineColor ? (line.color || null) : null;
-
-                const showRoleInColumn = showRoleColumnSkeleton && !!role;
                 const finalRoleColorCandidate = actorColor || lineColor || null;
-                const showSwatch = enableColorSwatches && finalRoleColorCandidate && (roleDisplayIsColumn || (!roleDisplayIsColumnWithSwatch && !showRoleInColumn));
-                const showInlineSwatch = showSwatch && !showRoleInColumn;
 
-                const sameRoleChain = !!(role && previousRoleRaw === role);
-                previousRoleRaw = role || null;
+                let swatchElement = null;
+                const showColumnSwatch = enableColorSwatches && finalRoleColorCandidate && roleDisplayIsColumn;
+                const showInlineSwatch = enableColorSwatches && finalRoleColorCandidate && !roleDisplayIsColumn && !roleDisplayIsColumnWithSwatch && !showRoleInColumn;
 
                 if (roleElement) {
-                    roleElement.textContent = (deduplicateRoles && sameRoleChain) ? '\u00A0' : (role || '');
-                    roleElement.style.visibility = showRoleInColumn ? 'visible' : 'hidden';
                     if (actor) {
                         roleElement.title = actor;
-                    } else if (roleElement.title) {
+                    } else if (roleElement && roleElement.title) {
                         roleElement.removeAttribute('title');
                     }
-                    const roleNeedsBg = showRoleInColumn && roleDisplayIsColumnWithSwatch && enableColorSwatches && finalRoleColorCandidate;
-                    if (roleNeedsBg) {
-                        const adj = settings.roleFontColorEnabled
-                            ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate, text: '#000000' })
-                            : { bg: finalRoleColorCandidate, text: isColorLight(finalRoleColorCandidate) ? '#000000' : '#ffffff' };
-                        roleElement.classList.add('role-colored-bg');
-                        roleElement.style.backgroundColor = adj.bg;
-                        roleElement.style.color = adj.text || '#000000';
+                    if (showRoleInColumn) {
+                        roleElement.classList.toggle('role-hidden', false);
+                        if (roleDisplayIsColumnWithSwatch && enableColorSwatches && finalRoleColorCandidate) {
+                            const adj = settings.roleFontColorEnabled
+                                ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate, text: '#000000' })
+                                : { bg: finalRoleColorCandidate, text: isColorLight(finalRoleColorCandidate) ? '#000000' : '#ffffff' };
+                            roleElement.style.backgroundColor = adj.bg;
+                            roleElement.style.color = adj.text || '#000000';
+                            roleElement.classList.add('role-colored');
+                        } else {
+                            roleElement.style.backgroundColor = '';
+                            roleElement.style.color = '';
+                            roleElement.classList.remove('role-colored');
+                        }
                     } else {
-                        roleElement.classList.remove('role-colored-bg');
                         roleElement.style.backgroundColor = '';
                         roleElement.style.color = '';
+                        roleElement.classList.remove('role-colored');
                     }
                 }
 
-                if (swatchElement) {
-                    if (showSwatch) {
-                        swatchElement.style.visibility = 'visible';
-                        const swatchColor = settings.roleFontColorEnabled
-                            ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate })
-                            : { bg: finalRoleColorCandidate };
+                if (enableColorSwatches && finalRoleColorCandidate) {
+                    const swatchColor = settings.roleFontColorEnabled
+                        ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate })
+                        : { bg: finalRoleColorCandidate };
+                    if (showColumnSwatch) {
+                        swatchElement = document.createElement('span');
+                        swatchElement.className = 'subtitle-color-swatch column-swatch';
                         swatchElement.style.backgroundColor = swatchColor.bg;
-                    } else {
-                        swatchElement.style.visibility = 'hidden';
-                        swatchElement.style.backgroundColor = '';
+                    } else if (showInlineSwatch) {
+                        swatchElement = document.createElement('span');
+                        swatchElement.className = 'subtitle-color-swatch inline-swatch';
+                        swatchElement.style.backgroundColor = swatchColor.bg;
                     }
                 }
 
-                if (roleArea) {
-                    roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumn || showSwatch));
+                if (separatorElement) {
+                    const hasColumnVisuals = showRoleInColumn || showColumnSwatch;
+                    separatorElement.classList.toggle('separator-hidden', !hasColumnVisuals);
                 }
 
-                if (showInlineSwatch) {
-                    container.classList.add('has-inline-swatch');
-                }
+                container.classList.toggle('role-slot-empty', includeRoleColumn && !(showRoleInColumn || showColumnSwatch));
 
                 if (checkerboardClass) {
                     container.classList.add(checkerboardClass);
                 }
 
                 subtitleElements[index] = container;
+
+                container.appendChild(timeElement);
+
+                if (swatchElement && swatchElement.classList.contains('column-swatch')) {
+                    container.appendChild(swatchElement);
+                }
+
+                if (roleElement && roleElement.classList.contains('column-role')) {
+                    container.appendChild(roleElement);
+                }
+
+                if (separatorElement) {
+                    container.appendChild(separatorElement);
+                }
+
+                if (roleElement && roleElement.classList.contains('inline-role')) {
+                    bodyElement.appendChild(roleElement);
+                }
+
+                if (swatchElement && swatchElement.classList.contains('inline-swatch')) {
+                    bodyElement.appendChild(swatchElement);
+                }
+
+                bodyElement.appendChild(textElement);
+                container.appendChild(contentElement);
                 fragment.appendChild(container);
             }
             const tBuild1 = performance.now();

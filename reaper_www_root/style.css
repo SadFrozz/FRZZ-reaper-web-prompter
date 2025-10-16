@@ -52,23 +52,28 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
 .subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; }
-.subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.15em 0.4em; order: 1; display: flex; align-items: center; }
+.subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.15em 0.4em; order: 0; display: flex; align-items: center; }
 .columns-swapped .subtitle-time { justify-content: flex-end; }
 .role-area { display: flex; align-items: stretch; order: 2; }
-.columns-swapped .subtitle-time { order: 2; }
+.columns-swapped .subtitle-time { order: 3; }
 .columns-swapped .role-area { order: 1; }
+.columns-swapped .subtitle-color-swatch.column-swatch { order: 1; }
+.columns-swapped .subtitle-role:not(.inline-role) { order: 2; }
+.columns-swapped .subtitle-separator { order: 3; }
 .columns-swapped .subtitle-time::after { content: ''; width: 0.5rem; height: 2em; background-color: #555; margin-left: 1.5rem; border-radius: 0.25rem; }
 .subtitle-color-swatch { width: 1.875rem; height: auto; margin-right: 0.5rem; border-radius: 0.25rem; flex-shrink: 0; }
+.subtitle-color-swatch.column-swatch { order: 1; }
 body[data-role-style='column_with_swatch'] .subtitle-color-swatch { width: 0; margin-right: 0; }
 /* Compact swatch mode when role text not shown in a separate column (inline or hidden) */
-.has-inline-swatch .subtitle-color-swatch { width: 0.875rem; margin-right: 0.5rem; border-radius: 0.1875rem; }
+.has-inline-swatch .subtitle-color-swatch { width: 0.875rem; margin-right: 0.5rem; border-radius: 0.1875rem; order: initial; }
 .has-inline-swatch .subtitle-role { display: none; }
 /* ++ ИЗМЕНЕНО: Добавлено правило visibility для исправления разметки ++ */
 .subtitle-role, .subtitle-color-swatch { transition: visibility 0s; }
 .role-hidden { visibility: hidden; }
 .subtitle-role { flex-shrink: 0; padding: 0.2em 0.5em; margin-right: 1.5em; text-align: right; color: #ccc; border-radius: 0.25rem; word-break: break-all; overflow-wrap: break-word; display: flex; align-items: center; justify-content: flex-end; }
-.subtitle-separator { width: 0.5rem; height: auto; background-color: #555; margin-right: 0.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; }
-.subtitle-content { flex: 1; display: flex; flex-direction: column; order: 3; align-self: center; padding-bottom: 0.8125rem; }
+.subtitle-role:not(.inline-role) { order: 2; }
+.subtitle-separator { width: 0.5rem; height: auto; background-color: #555; margin-right: 0.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; order: 3; }
+.subtitle-content { flex: 1; display: flex; flex-direction: column; order: 5; align-self: center; padding-bottom: 0.8125rem; }
 .subtitle-content.has-progress { padding-bottom: 0; }
 .subtitle-text { flex: 1; font-size: 0.9em; }
 .subtitle-progress-container { height: 0.3125rem; background-color: #555; border-radius: 0.1875rem; margin-top: 0.5rem; opacity: 0; transition: opacity 0.15s ease-in-out; }
