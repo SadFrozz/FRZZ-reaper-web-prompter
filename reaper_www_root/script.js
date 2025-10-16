@@ -192,6 +192,11 @@ $(document).ready(function() {
     let rolesLoadTimeoutId = null;
     let rolesLoadReason = '';
     let rolesLoadResolvers = [];
+    let rolesSaveInFlight = false;
+    let rolesSaveStartedAt = 0;
+    let rolesStatusPollTimer = null;
+    let rolesStatusFallbackTimer = null;
+    let rolesStatusRetryCount = 0;
     let emuDataLoadedOnce = false;
     let emuRolesFetchAttempted = false;
     let emuRolesFetchPromise = null;
@@ -207,31 +212,116 @@ $(document).ready(function() {
     let transportPlayState = 0;
     let transportLastUpdateAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     let transportLastTimecode = 0;
-    // Enable passive listeners for common scroll-blocking events registered via jQuery (.on)
-    (function enableJQueryPassive(){
+    // Configure event listener optimizations (passive scroll + skip touch on non-touch devices)
+    (function configureInputEventOptimizations($root){
         try {
-            if ($.event && $.event.special) {
-                const evts = ['wheel','mousewheel','touchstart','touchmove','scroll'];
-                evts.forEach(evt => {
-                    const special = $.event.special[evt] = $.event.special[evt] || {};
+            if (!$root || !$root.event || !$root.fn) return;
+            if ($root.fn.__frzzEventOptimized) return;
+            $root.fn.__frzzEventOptimized = true;
+
+            const supportsPassive = (() => {
+                let supported = false;
+                try {
+                    const opts = Object.defineProperty({}, 'passive', {
+                        get() {
+                            supported = true;
+                            return true;
+                        }
+                    });
+                    const testListener = function() {};
+                    window.addEventListener('testPassive', testListener, opts);
+                    window.removeEventListener('testPassive', testListener, opts);
+                } catch (_) {
+                    supported = false;
+                }
+                return supported;
+            })();
+
+            const nav = typeof navigator !== 'undefined' ? navigator : null;
+            const hasTouchSupport = ('ontouchstart' in window) || (nav && ((nav.maxTouchPoints || 0) > 0 || (nav.msMaxTouchPoints || 0) > 0));
+
+            if (supportsPassive) {
+                const passiveEvents = ['wheel', 'mousewheel', 'scroll'];
+                passiveEvents.forEach(evt => {
+                    const special = $root.event.special[evt] = $root.event.special[evt] || {};
                     const setupOrig = special.setup;
-                    special.setup = function(_, ns, handle){
-                        this.addEventListener(evt, handle, { passive: true });
-                        return false; // prevent jQuery from adding non-passive fallback
-                    };
-                    // Also ensure teardown removes our listener
                     const teardownOrig = special.teardown;
-                    special.teardown = function(_, ns){
-                        // jQuery passes the same handler
-                        // We can't access it here reliably; fallback to allow default teardown
-                        if (teardownOrig) return teardownOrig.apply(this, arguments);
+                    special.setup = function(_, ns, handle) {
+                        if (setupOrig) setupOrig.apply(this, arguments);
+                        this.addEventListener(evt, handle, { passive: true });
                         return false;
                     };
+                    special.teardown = function(_, ns, handle) {
+                        this.removeEventListener(evt, handle, { passive: true });
+                        if (teardownOrig) return teardownOrig.apply(this, arguments);
+                        return undefined;
+                    };
                 });
-                console.debug('[Prompter][perf] jQuery passive listeners enabled for wheel/touch/scroll');
             }
-        } catch(e) { console.warn('[Prompter][perf] failed to enable jQuery passive listeners', e); }
-    })();
+
+            if (!hasTouchSupport) {
+                const touchEvents = new Set(['touchstart', 'touchmove', 'touchend', 'touchcancel']);
+                const filterEventTokens = input => {
+                    if (!input) return '';
+                    return input.split(/\s+/).map(token => token.trim()).filter(token => {
+                        if (!token) return false;
+                        const base = token.split('.')[0];
+                        return !touchEvents.has(base);
+                    }).join(' ');
+                };
+                const filterFirstArg = arg => {
+                    if (typeof arg === 'string') {
+                        const filtered = filterEventTokens(arg);
+                        return filtered ? filtered : null;
+                    }
+                    if (arg && typeof arg === 'object') {
+                        const result = {};
+                        Object.keys(arg).forEach(key => {
+                            const filteredKey = filterEventTokens(key);
+                            if (filteredKey) {
+                                result[filteredKey] = arg[key];
+                            }
+                        });
+                        return Object.keys(result).length ? result : null;
+                    }
+                    return arg;
+                };
+                const origOn = $root.fn.on;
+                const origOff = $root.fn.off;
+                const origOne = $root.fn.one;
+                $root.fn.on = function(...args) {
+                    if (!args.length) return origOn.apply(this, args);
+                    const filtered = filterFirstArg(args[0]);
+                    if (filtered === null) return this;
+                    args[0] = filtered;
+                    return origOn.apply(this, args);
+                };
+                $root.fn.off = function(...args) {
+                    if (!args.length) return origOff.apply(this, args);
+                    const filtered = filterFirstArg(args[0]);
+                    if (filtered === null) return this;
+                    args[0] = filtered;
+                    return origOff.apply(this, args);
+                };
+                $root.fn.one = function(...args) {
+                    if (!args.length) return origOne.apply(this, args);
+                    const filtered = filterFirstArg(args[0]);
+                    if (filtered === null) return this;
+                    args[0] = filtered;
+                    return origOne.apply(this, args);
+                };
+                console.debug('[Prompter][perf] touch listeners skipped (no touch support detected)');
+            }
+
+            if (supportsPassive) {
+                console.debug('[Prompter][perf] passive listeners enabled for wheel/mousewheel/scroll', {
+                    skipTouch: !hasTouchSupport
+                });
+            }
+        } catch (err) {
+            console.warn('[Prompter][perf] event optimization setup failed', err);
+        }
+    })($);
 
     console.info('[Prompter] document ready init start');
 
@@ -1137,6 +1227,75 @@ $(document).ready(function() {
     }
     function chunkString(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
 
+    function scheduleExtStateRequests(requests, spacingMs = 35){
+        if (!Array.isArray(requests) || requests.length === 0) return 0;
+        const interval = Math.max(0, spacingMs | 0);
+        requests.forEach((req, idx) => {
+            setTimeout(() => {
+                try {
+                    wwr_req(req);
+                } catch(err){ console.error('[Prompter][roles] extstate dispatch failed', err, req); }
+            }, idx * interval);
+        });
+        return interval * Math.max(0, requests.length - 1);
+    }
+    function invalidateRolesCache(reason = 'manual') {
+        if (rolesLoadTimeoutId) {
+            clearTimeout(rolesLoadTimeoutId);
+            rolesLoadTimeoutId = null;
+        }
+        rolesLoadInFlight = false;
+        rolesLoadRequestTs = 0;
+        rolesLoadReason = '';
+        rolesLoadResolvers = [];
+        rolesLoaded = false;
+        rolesLoadActiveSeq = ++rolesLoadSeq;
+        console.debug('[Prompter][roles] cache invalidated', { reason });
+        settings.actorRoleMappingText = '';
+        settings.actorColors = {};
+        roleToActor = {};
+        actorToRoles = {};
+        if (typeof regenerateActorColorListUI === 'function') {
+            regenerateActorColorListUI();
+        }
+    }
+
+
+    function clearRolesSaveTimers(){
+        if (rolesStatusPollTimer) { clearTimeout(rolesStatusPollTimer); rolesStatusPollTimer = null; }
+        if (rolesStatusFallbackTimer) { clearTimeout(rolesStatusFallbackTimer); rolesStatusFallbackTimer = null; }
+    }
+
+    function scheduleRolesStatusPoll(delayMs){
+        if (!rolesSaveInFlight) return;
+        if (rolesStatusPollTimer) clearTimeout(rolesStatusPollTimer);
+        rolesStatusPollTimer = setTimeout(() => {
+            if (!rolesSaveInFlight) return;
+            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_status');
+        }, delayMs);
+    }
+
+    function handleRolesStatusMessage(status){
+        console.debug('[Prompter][roles][status]', status);
+        if (/NOT_FOUND|MISSING|NO_FILE/i.test(status)) {
+            finalizeRolesLoad('empty', { backendStatus: status });
+        } else if (/ERROR|FAIL/i.test(status)) {
+            finalizeRolesLoad('error', { backendStatus: status });
+        }
+        if (!rolesSaveInFlight) return;
+        if (status === 'PENDING' || status === '') {
+            scheduleRolesStatusPoll(500);
+            return;
+        }
+        const duration = rolesSaveStartedAt ? Math.round(performance.now() - rolesSaveStartedAt) : null;
+        console.info('[Prompter][roles][saveRoles] backend status', { status, durationMs: duration });
+        rolesSaveInFlight = false;
+        clearRolesSaveTimers();
+        if (/SUCCESS|NO_PROJECT_SAVED_FALLBACK/i.test(status) && subtitleData.length > 0) {
+            handleTextResponse(subtitleData);
+        }
+    }
+
     function finalizeRolesLoad(status, extra = {}) {
         if (rolesLoadTimeoutId) {
             clearTimeout(rolesLoadTimeoutId);
@@ -1173,15 +1332,54 @@ $(document).ready(function() {
             const b64url = '__B64__' + rolesToBase64Url(jsonPretty);
             const parts = chunkString(b64url, ROLES_CHUNK_SIZE);
             console.debug('[Prompter][roles][saveRoles] encoded', { encoded_len: b64url.length, decoded_len: jsonPretty.length, chunks: parts.length });
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_encoded_len/${b64url.length}`);
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_decoded_len/${jsonPretty.length}`);
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_chunks/${parts.length}`);
-            parts.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_data_${idx}/${ch}`));
-            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_ROLES');
-            setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 120);
-            // query status later
-            setTimeout(()=> { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_status'); }, 400);
-        } catch(err){ console.error('[Prompter][roles] saveRoles failed', err); }
+            rolesSaveInFlight = true;
+            rolesSaveStartedAt = performance.now();
+            rolesStatusRetryCount = 0;
+            clearRolesSaveTimers();
+            const queuedRequests = [
+                'SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_status/PENDING',
+                `SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_encoded_len/${b64url.length}`,
+                `SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_total_decoded_len/${jsonPretty.length}`,
+                `SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_chunks/${parts.length}`
+            ];
+            parts.forEach((ch, idx)=> {
+                queuedRequests.push(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/roles_data_${idx}/${ch}`);
+            });
+            queuedRequests.push('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_ROLES');
+            const spacingMs = Math.min(60, Math.max(25, Math.round(parts.length / 2) + 25));
+            const transmitWindow = scheduleExtStateRequests(queuedRequests, spacingMs);
+            const dispatchDelay = Math.min(2600, Math.max(700, transmitWindow + 320));
+            console.debug('[Prompter][roles][saveRoles] dispatch scheduled', {
+                spacingMs,
+                transmitWindow,
+                dispatchDelay,
+                requests: queuedRequests.length
+            });
+            const triggerAction = () => { wwr_req(REASCRIPT_ACTION_ID); };
+            setTimeout(triggerAction, dispatchDelay);
+            setTimeout(triggerAction, dispatchDelay + 280);
+            scheduleRolesStatusPoll(dispatchDelay + 640);
+            const scheduleRetry = () => {
+                if (!rolesSaveInFlight) return;
+                if (rolesStatusRetryCount >= 2) {
+                    console.error('[Prompter][roles][saveRoles] backend did not respond (timeout)');
+                    rolesSaveInFlight = false;
+                    clearRolesSaveTimers();
+                    return;
+                }
+                rolesStatusRetryCount += 1;
+                console.warn('[Prompter][roles][saveRoles] backend still pending, retry', { attempt: rolesStatusRetryCount, chunks: parts.length });
+                wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_ROLES');
+                setTimeout(triggerAction, 120);
+                scheduleRolesStatusPoll(760);
+                rolesStatusFallbackTimer = setTimeout(scheduleRetry, 2400);
+            };
+            rolesStatusFallbackTimer = setTimeout(scheduleRetry, dispatchDelay + 2400);
+        } catch(err){
+            console.error('[Prompter][roles] saveRoles failed', err);
+            rolesSaveInFlight = false;
+            clearRolesSaveTimers();
+        }
     }
 
     function requestRoles(reason = 'manual'){
@@ -1234,67 +1432,75 @@ $(document).ready(function() {
 
     function integrateLoadedRoles(jsonText, meta = {}){
         const parseStart = performance.now();
+        const perfNow = () => Math.round(performance.now() - parseStart);
         try {
-            const raw = (jsonText || '').trim();
-            if (!raw) {
+            const raw = typeof jsonText === 'string' ? jsonText : '';
+            const trimmed = raw.trim();
+            if (!trimmed) {
+                rolesLoaded = false;
                 settings.actorRoleMappingText = '';
                 settings.actorColors = {};
                 roleToActor = {};
                 actorToRoles = {};
-                rolesLoaded = false;
                 regenerateActorColorListUI();
                 if (subtitleData.length > 0) {
                     handleTextResponse(subtitleData);
                 }
-                finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'empty_payload' });
+                finalizeRolesLoad('empty', { ...meta, parseMs: perfNow(), reason: 'empty_payload' });
                 return;
             }
-            const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === 'object') {
-                settings.actorRoleMappingText = typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : '';
-                settings.actorColors = (parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {};
-                const mappedRolesCount = buildActorRoleMaps();
-                rolesLoaded = mappedRolesCount > 0;
-                console.info('[Prompter][roles][integrateLoadedRoles] parsed', {
-                    hasMappingText: !!settings.actorRoleMappingText,
-                    mappedRoles: mappedRolesCount,
-                    actorColors: Object.keys(settings.actorColors || {}).length,
-                    source: meta.source || 'backend'
-                });
-                regenerateActorColorListUI();
-                if (!rolesLoaded) {
-                    if (subtitleData.length > 0) {
-                        handleTextResponse(subtitleData);
-                    }
-                    finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'no_roles_in_payload' });
-                    return;
-                }
-                const parseDuration = Math.round(performance.now() - parseStart);
-                // Rebuild maps already done; optionally re-render existing subtitles
-                if (subtitleData.length > 0) {
-                    handleTextResponse(subtitleData);
-                }
-                finalizeRolesLoad('loaded', {
-                    ...meta,
-                    parseMs: parseDuration,
-                    mappedRoles: mappedRolesCount
-                });
-            } else {
+
+            let parsed;
+            try {
+                parsed = JSON.parse(trimmed);
+            } catch (parseErr) {
+                console.error('[Prompter][roles] integrateLoadedRoles parse failed', parseErr);
                 rolesLoaded = false;
-                finalizeRolesLoad('empty', { ...meta, parseMs: Math.round(performance.now() - parseStart), reason: 'invalid_payload' });
+                finalizeRolesLoad('error', { ...meta, error: parseErr.message, parseMs: perfNow(), reason: 'json_parse_failed' });
+                return;
             }
-        } catch(err){
-            rolesLoaded = false;
-            settings.actorRoleMappingText = '';
-            settings.actorColors = {};
-            roleToActor = {};
-            actorToRoles = {};
-            console.error('[Prompter][roles] integrateLoadedRoles failed', err);
+
+            if (!parsed || typeof parsed !== 'object') {
+                rolesLoaded = false;
+                finalizeRolesLoad('empty', { ...meta, parseMs: perfNow(), reason: 'invalid_payload' });
+                return;
+            }
+
+            const mappingText = typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : '';
+            const actorColorsObj = (parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {};
+
+            settings.actorRoleMappingText = mappingText;
+            settings.actorColors = { ...actorColorsObj };
+
+            const mappedRolesCount = buildActorRoleMaps();
+            const actorColorsCount = Object.keys(settings.actorColors || {}).length;
+            const hasMappingText = mappingText.trim().length > 0;
+            rolesLoaded = mappedRolesCount > 0 || actorColorsCount > 0 || hasMappingText;
+
+            console.info('[Prompter][roles][integrateLoadedRoles] parsed', {
+                hasMappingText,
+                mappedRoles: mappedRolesCount,
+                actorColors: actorColorsCount,
+                source: meta.source || 'backend'
+            });
+
             regenerateActorColorListUI();
             if (subtitleData.length > 0) {
                 handleTextResponse(subtitleData);
             }
-            finalizeRolesLoad('error', { ...meta, error: err.message, parseMs: Math.round(performance.now() - parseStart) });
+
+            const outcome = rolesLoaded ? 'loaded' : 'empty';
+            finalizeRolesLoad(outcome, {
+                ...meta,
+                parseMs: perfNow(),
+                mappedRoles: mappedRolesCount,
+                actorColors: actorColorsCount,
+                hasMappingText
+            });
+        } catch(err){
+            rolesLoaded = false;
+            console.error('[Prompter][roles] integrateLoadedRoles failed', err);
+            finalizeRolesLoad('error', { ...meta, error: err.message, parseMs: perfNow() });
         }
     }
     
@@ -1441,7 +1647,10 @@ $(document).ready(function() {
             const parts = line.split('\t');
             if (parts[0] === 'EXTSTATE' && parts[1] === 'PROMPTER_WEBUI') {
                 if (parts[2] === 'response_tracks') handleTracksResponse(parts.slice(3).join('\t'));
-                else if (parts[2] === 'project_name') { currentProjectName = parts.slice(3).join('\t'); updateTitle(); }
+                else if (parts[2] === 'project_name') {
+                    currentProjectName = parts.slice(3).join('\t');
+                    updateTitle();
+                }
                 else if (parts[2] === 'roles_json_b64') {
                     const payload = parts.slice(3).join('\t');
                     const encodedLength = payload ? payload.length : 0;
@@ -1453,12 +1662,7 @@ $(document).ready(function() {
                     });
                 } else if (parts[2] === 'roles_status') {
                     const status = parts.slice(3).join('\t');
-                    console.debug('[Prompter][roles][status]', status);
-                    if (/NOT_FOUND|MISSING|NO_FILE/i.test(status)) {
-                        finalizeRolesLoad('empty', { backendStatus: status });
-                    } else if (/ERROR|FAIL/i.test(status)) {
-                        finalizeRolesLoad('error', { backendStatus: status });
-                    }
+                    handleRolesStatusMessage(status);
                 }
             } else if (parts[0] === 'TRANSPORT') handleTransportResponse(parts);
         }
@@ -2045,6 +2249,7 @@ $(document).ready(function() {
             });
         } catch(err){ console.error('[Prompter][roles] auto-color generation failed', err); }
         settings.actorColors = newColors;
+        rolesLoaded = Object.keys(newColors).length > 0 || (settings.actorRoleMappingText || '').trim().length > 0;
         saveRoles();
         // Перепарсим и перерисуем текст если уже загружен
         if (subtitleData.length > 0) handleTextResponse(subtitleData);
@@ -2234,7 +2439,14 @@ $(document).ready(function() {
     
     // --- ОБРАБОТЧИКИ СОБЫТИЙ ---
     trackSelector.on('change', function() { getText($(this).val()); });
-    refreshButton.on('click', getTracks);
+    refreshButton.on('click', () => {
+        invalidateRolesCache('refresh_button');
+        currentProjectName = '';
+        updateTitle();
+        getTracks();
+        getProjectName();
+        requestRoles('refresh_button');
+    });
     $('#settings-button').on('click', function() {
         // Refresh form fields from authoritative settings before showing
         updateUIFromSettings();
