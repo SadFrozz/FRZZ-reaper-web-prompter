@@ -64,14 +64,51 @@ const SETTINGS_CHUNK_SIZE = 250; // was 700
 const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
-// Pre-built markup skeleton reused for every subtitle row to minimize per-line DOM mutations.
-const SUBTITLE_SKELETON_HTML = '<div class="role-area role-area-is-empty"><div class="subtitle-color-swatch" style="visibility:hidden"></div><div class="subtitle-role" style="visibility:hidden"></div><div class="subtitle-separator"></div></div><div class="subtitle-time"></div><div class="subtitle-content"><div class="subtitle-text"></div></div>';
-const SUBTITLE_SKELETON_TEMPLATE = (() => {
-    const container = document.createElement('div');
-    container.className = 'subtitle-container';
-    container.innerHTML = SUBTITLE_SKELETON_HTML;
-    return container;
-})();
+const SUBTITLE_TEMPLATE_CACHE = new Map();
+function getSubtitleTemplate(config) {
+    const key = `${config.includeRoleArea ? 1 : 0}${config.includeRoleElement ? 1 : 0}${config.includeSwatch ? 1 : 0}`;
+    if (!SUBTITLE_TEMPLATE_CACHE.has(key)) {
+        const container = document.createElement('div');
+        container.className = 'subtitle-container';
+        const parts = [];
+        if (config.includeRoleArea) {
+            parts.push('<div class="role-area role-area-is-empty">');
+            if (config.includeSwatch) {
+                parts.push('<div class="subtitle-color-swatch" style="visibility:hidden"></div>');
+            }
+            if (config.includeRoleElement) {
+                parts.push('<div class="subtitle-role" style="visibility:hidden"></div>');
+                parts.push('<div class="subtitle-separator"></div>');
+            }
+            parts.push('</div>');
+        }
+        parts.push('<div class="subtitle-time"></div>');
+        parts.push('<div class="subtitle-content"><div class="subtitle-text"></div></div>');
+        container.innerHTML = parts.join('');
+        const includeRoleArea = !!config.includeRoleArea;
+        const includeRoleElement = !!config.includeRoleElement;
+        const includeSwatch = !!config.includeSwatch;
+        const roleAreaIndex = includeRoleArea ? 0 : -1;
+        const timeIndex = includeRoleArea ? 1 : 0;
+        const contentIndex = includeRoleArea ? 2 : 1;
+        const swatchIndex = includeSwatch ? 0 : -1;
+        const roleIndex = includeRoleElement ? (includeSwatch ? 1 : 0) : -1;
+        SUBTITLE_TEMPLATE_CACHE.set(key, {
+            node: container,
+            resolve(cloneRoot) {
+                const children = cloneRoot.children;
+                const roleArea = roleAreaIndex !== -1 ? children[roleAreaIndex] || null : null;
+                const timeElement = children[timeIndex] || null;
+                const contentElement = children[contentIndex] || null;
+                const textElement = contentElement ? contentElement.firstElementChild : null;
+                const swatchElement = (roleArea && swatchIndex !== -1) ? roleArea.children[swatchIndex] || null : null;
+                const roleElement = (roleArea && roleIndex !== -1) ? roleArea.children[roleIndex] || null : null;
+                return { timeElement, contentElement, textElement, roleArea, swatchElement, roleElement };
+            }
+        });
+    }
+    return SUBTITLE_TEMPLATE_CACHE.get(key);
+}
 
 $(document).ready(function() {
     const initStartTs = performance.now();
@@ -93,6 +130,7 @@ $(document).ready(function() {
     sharedProgressContainer.appendChild(sharedProgressBar);
     let sharedProgressHost = null;
     let sharedProgressIndex = -1;
+    let sharedProgressValue = 0;
     const statusIndicator = $('#status-indicator');
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
@@ -131,17 +169,8 @@ $(document).ready(function() {
     let subtitleData = [];
     let subtitleElements = [];
     let subtitleContentElements = [];
-    let subtitleRoleElements = [];
-    let subtitleSwatchElements = [];
-    let subtitleRoleAreaElements = [];
     let subtitlePaintStates = [];
-    let subtitleRoles = [];
-    let subtitleActors = [];
-    let subtitleActorColors = [];
-    let subtitleLineColors = [];
-    let subtitleFinalRoleColors = [];
-    let subtitleCheckerboardClasses = [];
-    let subtitleSameRolePrev = [];
+    const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
     let lastVisibleStart = 0;
@@ -175,6 +204,9 @@ $(document).ready(function() {
     let firstRenderTs = null;
     const readyStagesLogged = new Set();
     let transportStageLogged = false;
+    let transportPlayState = 0;
+    let transportLastUpdateAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let transportLastTimecode = 0;
     // Enable passive listeners for common scroll-blocking events registered via jQuery (.on)
     (function enableJQueryPassive(){
         try {
@@ -327,44 +359,20 @@ $(document).ready(function() {
         return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}:${pad2(frames)}`;
     }
 
-    let wrapperScrollAnimId = null;
-    function stopWrapperScrollAnimation() {
-        if (wrapperScrollAnimId !== null) {
-            cancelAnimationFrame(wrapperScrollAnimId);
-            wrapperScrollAnimId = null;
-        }
-    }
-
-    function animateWrapperScrollTo(target, durationMs) {
+    function smoothScrollWrapperTo(targetTop) {
         const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
         if (!wrapper) return;
-        const clampedTarget = Math.max(target, 0);
-        if (!isFinite(durationMs) || durationMs <= 0) {
-            stopWrapperScrollAnimation();
-            wrapper.scrollTop = clampedTarget;
-            return;
-        }
-        stopWrapperScrollAnimation();
-        const start = wrapper.scrollTop;
-        const delta = clampedTarget - start;
-        if (Math.abs(delta) < 0.5) {
-            wrapper.scrollTop = clampedTarget;
-            return;
-        }
-        const startTime = performance.now();
-        const duration = Math.max(durationMs, 16);
-        const easeInOutQuad = t => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t);
-        const step = now => {
-            const progress = Math.min((now - startTime) / duration, 1);
-            const eased = easeInOutQuad(progress);
-            wrapper.scrollTop = start + delta * eased;
-            if (progress < 1) {
-                wrapperScrollAnimId = requestAnimationFrame(step);
-            } else {
-                wrapperScrollAnimId = null;
+        const clampedTarget = Math.max(targetTop, 0);
+        const canSmoothScroll = typeof wrapper.scrollTo === 'function';
+        if (canSmoothScroll) {
+            try {
+                wrapper.scrollTo({ top: clampedTarget, behavior: 'smooth' });
+                return;
+            } catch (err) {
+                // fallback below when smooth behavior unsupported
             }
-        };
-        wrapperScrollAnimId = requestAnimationFrame(step);
+        }
+        wrapper.scrollTop = clampedTarget;
     }
 
     function detachSharedProgress() {
@@ -376,6 +384,10 @@ $(document).ready(function() {
         }
         sharedProgressHost = null;
         sharedProgressIndex = -1;
+        if (sharedProgressValue !== 0) {
+            sharedProgressBar.style.transform = 'scaleX(0)';
+        }
+        sharedProgressValue = 0;
     }
 
     function attachSharedProgressToIndex(index) {
@@ -388,6 +400,7 @@ $(document).ready(function() {
         contentEl.classList.add('has-progress');
         sharedProgressHost = contentEl;
         sharedProgressIndex = index;
+        sharedProgressValue = -1;
     }
 
     function extractLeadingRole(rawText, trimInline) {
@@ -456,6 +469,11 @@ $(document).ready(function() {
         resetVisibilityTracking();
         disconnectVisibilityObserver();
         if (!textDisplayWrapperEl || !subtitleElements.length || typeof IntersectionObserver === 'undefined') {
+            if (supportsInert) {
+                subtitleElements.forEach(el => {
+                    if (el) el.inert = false;
+                });
+            }
             visibleRangeStart = 0;
             visibleRangeEnd = subtitleElements.length ? subtitleElements.length - 1 : -1;
             schedulePaintVisible({ immediate: true });
@@ -468,6 +486,9 @@ $(document).ready(function() {
         subtitleElements.forEach((el, idx) => {
             if (!el) return;
             el.dataset.frzzIndex = String(idx);
+            if (supportsInert) {
+                el.inert = false;
+            }
             subtitleObserver.observe(el);
         });
         // Ensure we paint at least something even before observer fires
@@ -481,7 +502,11 @@ $(document).ready(function() {
             const target = entry.target;
             const idx = target && target.dataset ? parseInt(target.dataset.frzzIndex, 10) : NaN;
             if (!Number.isInteger(idx)) continue;
-            if (entry.isIntersecting && entry.intersectionRatio > 0) {
+            const isVisible = entry.isIntersecting && entry.intersectionRatio > 0;
+            if (supportsInert && target && typeof target.inert === 'boolean') {
+                target.inert = !isVisible;
+            }
+            if (isVisible) {
                 if (!visibleIndices.has(idx)) {
                     visibleIndices.add(idx);
                     changed = true;
@@ -521,19 +546,19 @@ $(document).ready(function() {
         if (!wrapper) return undefined;
         const targetNode = subtitleElements[targetIndex];
         if (!targetNode) return undefined;
-        const wrapperRect = wrapper.getBoundingClientRect();
-        const elementRect = targetNode.getBoundingClientRect();
-        const wrapperHeight = wrapperRect.height || wrapper.clientHeight || 0;
+        const wrapperHeight = wrapper.clientHeight || 0;
         if (!wrapperHeight) return undefined;
-        const linePosition = elementRect.top - wrapperRect.top;
-        const elementHeight = elementRect.height || targetNode.offsetHeight || 1;
+        // Direct offsets keep auto-scroll lightweight without manual cache rebuilds.
+        const targetOffsetTop = typeof targetNode.offsetTop === 'number' ? targetNode.offsetTop : 0;
+        const currentScrollTop = wrapper.scrollTop;
+        const relativeTop = targetOffsetTop - currentScrollTop;
+        const elementHeight = targetNode.offsetHeight || 1;
         const topThreshold = wrapperHeight * 0.1;
         const bottomThreshold = wrapperHeight * 0.9 - elementHeight;
-        if (linePosition >= topThreshold && linePosition <= bottomThreshold) {
+        if (relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
             return null;
         }
-        const currentScrollTop = wrapper.scrollTop;
-        const targetScrollTop = Math.max(0, currentScrollTop + linePosition - wrapperHeight * 0.2);
+        const targetScrollTop = Math.max(0, targetOffsetTop - wrapperHeight * 0.2);
         const scrollSpeedValue = Math.max(settings.scrollSpeed || 1, 1);
         const duration = 400 / (scrollSpeedValue / 100);
         return { targetScrollTop, duration };
@@ -547,7 +572,7 @@ $(document).ready(function() {
         if (!plan) {
             return;
         }
-        animateWrapperScrollTo(plan.targetScrollTop, plan.duration);
+        smoothScrollWrapperTo(plan.targetScrollTop);
     }
 
     function invalidateAllLinePaint(options = {}) {
@@ -560,6 +585,7 @@ $(document).ready(function() {
             schedulePaintVisible(options.immediate ? { immediate: true } : undefined);
         }
     }
+
 
     function schedulePaintVisible(options) {
         if (!subtitleElements.length) return;
@@ -600,91 +626,7 @@ $(document).ready(function() {
 
     function paintLine(index, force = false) {
         if (index < 0 || index >= subtitleElements.length) return;
-        const container = subtitleElements[index];
-        if (!container) return;
         if (!force && subtitlePaintStates[index] === paintGeneration) return;
-
-        const roleElement = subtitleRoleElements[index];
-        const swatchElement = subtitleSwatchElements[index];
-        const roleArea = subtitleRoleAreaElements[index];
-        const role = subtitleRoles[index] || '';
-        const actor = subtitleActors[index] || null;
-        const actorColor = subtitleActorColors[index] || null;
-        const lineColor = subtitleLineColors[index] || null;
-        const finalRoleColor = subtitleFinalRoleColors[index] || null;
-        const checkerboardClass = subtitleCheckerboardClasses[index] || '';
-        const sameRoleChain = subtitleSameRolePrev[index] === true;
-
-        container.classList.remove('checkerboard-color-1', 'checkerboard-color-2', 'has-inline-swatch');
-        if (roleArea) {
-            roleArea.classList.add('role-area-is-empty');
-        }
-
-        if (roleElement) {
-            roleElement.classList.remove('role-colored-bg');
-            roleElement.style.backgroundColor = '';
-            roleElement.style.color = '';
-            roleElement.style.visibility = 'hidden';
-            roleElement.removeAttribute('title');
-            if (settings.deduplicateRoles && sameRoleChain) {
-                roleElement.textContent = '\u00A0';
-            } else {
-                roleElement.textContent = role;
-            }
-        }
-
-        if (swatchElement) {
-            swatchElement.style.backgroundColor = '';
-            swatchElement.style.visibility = 'hidden';
-        }
-
-        if (settings.checkerboardEnabled && checkerboardClass) {
-            container.classList.add(checkerboardClass);
-        }
-
-        const isColumn = settings.roleDisplayStyle === 'column';
-        const isColumnWithSwatch = settings.roleDisplayStyle === 'column_with_swatch';
-        const showRoleInColumn = settings.processRoles && !!role && (isColumn || isColumnWithSwatch);
-
-        let showSwatch = false;
-        if (settings.enableColorSwatches && finalRoleColor) {
-            if (isColumn) {
-                showSwatch = true;
-            } else if (!isColumnWithSwatch && !showRoleInColumn) {
-                showSwatch = true;
-            }
-        }
-
-        if (roleElement) {
-            roleElement.style.visibility = showRoleInColumn ? 'visible' : 'hidden';
-        }
-        if (showSwatch && swatchElement) {
-            swatchElement.style.visibility = 'visible';
-            if (!showRoleInColumn) {
-                container.classList.add('has-inline-swatch');
-            }
-        }
-
-        if (roleArea) {
-            roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumn || showSwatch));
-        }
-
-        if (finalRoleColor) {
-            if (roleElement && actor) {
-                roleElement.title = actor;
-            }
-            if (roleElement && showRoleInColumn && settings.roleDisplayStyle === 'column_with_swatch' && settings.enableColorSwatches) {
-                const adj = settings.roleFontColorEnabled ? (getLightenedColorCached(finalRoleColor, true) || { bg: finalRoleColor, text: '#000000' }) : { bg: finalRoleColor, text: isColorLight(finalRoleColor) ? '#000000' : '#ffffff' };
-                roleElement.classList.add('role-colored-bg');
-                roleElement.style.visibility = 'visible';
-                roleElement.style.backgroundColor = adj.bg;
-                roleElement.style.color = adj.text || '#000000';
-            } else if (showSwatch && swatchElement) {
-                const adjSwatch = settings.roleFontColorEnabled ? (getLightenedColorCached(finalRoleColor, true) || { bg: finalRoleColor }) : { bg: finalRoleColor };
-                swatchElement.style.backgroundColor = adjSwatch.bg;
-            }
-        }
-
         subtitlePaintStates[index] = paintGeneration;
     }
 
@@ -1539,14 +1481,15 @@ $(document).ready(function() {
         }
     }
 
-    let nextUpdateAt = 0;
     function renderLoop() {
         try {
-            const now = performance.now();
-            if (now >= nextUpdateAt) {
-                nextUpdateAt = now + 50; // ~20 FPS
-                updateTeleprompter(latestTimecode);
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            let effectiveTimecode = latestTimecode;
+            if (transportPlayState === 1 || transportPlayState === 5) {
+                const deltaSeconds = Math.max(0, (now - transportLastUpdateAt) / 1000);
+                effectiveTimecode = transportLastTimecode + deltaSeconds;
             }
+            updateTeleprompter(effectiveTimecode);
             animationFrameId = requestAnimationFrame(renderLoop);
         } catch(e) { console.error("Error in renderLoop:", e); }
     }
@@ -1585,6 +1528,9 @@ $(document).ready(function() {
             let playState = getStartStatusFromQuery();
             let current = getStartSecondsFromQuery();
             latestTimecode = current;
+            transportPlayState = playState;
+            transportLastTimecode = current;
+            transportLastUpdateAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
             let lastWall = performance.now();
             console.info('[EMU][transport] start', { intervalMs, startAtSec: current, status: playState });
             transportEmuTimer = setInterval(() => {
@@ -1733,17 +1679,7 @@ $(document).ready(function() {
             const total = subtitleData.length;
             subtitleElements = new Array(total);
             subtitleContentElements = new Array(total);
-            subtitleRoleElements = new Array(total);
-            subtitleSwatchElements = new Array(total);
-            subtitleRoleAreaElements = new Array(total);
             subtitlePaintStates = new Array(total);
-            subtitleRoles = new Array(total);
-            subtitleActors = new Array(total);
-            subtitleActorColors = new Array(total);
-            subtitleLineColors = new Array(total);
-            subtitleFinalRoleColors = new Array(total);
-            subtitleCheckerboardClasses = new Array(total);
-            subtitleSameRolePrev = new Array(total);
             if (total === 0) {
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 return;
@@ -1761,10 +1697,19 @@ $(document).ready(function() {
             const roleDisplayIsInline = roleDisplayStyle === 'inline';
             const roleDisplayIsColumn = roleDisplayStyle === 'column';
             const roleDisplayIsColumnWithSwatch = roleDisplayStyle === 'column_with_swatch';
-            const showRoleColumnSkeleton = processRoles && (roleDisplayIsColumn || roleDisplayIsColumnWithSwatch);
             const enableColorSwatches = !!settings.enableColorSwatches;
             const checkerboardEnabled = !!settings.checkerboardEnabled;
             const checkerboardMode = settings.checkerboardMode;
+
+            const includeRoleColumn = processRoles && (roleDisplayIsColumn || roleDisplayIsColumnWithSwatch);
+            const templateConfig = {
+                includeRoleArea: includeRoleColumn || enableColorSwatches,
+                includeRoleElement: includeRoleColumn,
+                includeSwatch: enableColorSwatches
+            };
+            const showRoleColumnSkeleton = includeRoleColumn;
+            const templateInfo = getSubtitleTemplate(templateConfig);
+            const skeletonTemplate = templateInfo.node;
 
             let lastRoleForCheckerboard = null;
             let lastColorForCheckerboard = null;
@@ -1802,13 +1747,14 @@ $(document).ready(function() {
                     }
                 }
 
-                const container = SUBTITLE_SKELETON_TEMPLATE.cloneNode(true);
-                const roleArea = container.firstElementChild;
-                const timeElement = roleArea ? roleArea.nextElementSibling : null;
-                const contentElement = timeElement ? timeElement.nextElementSibling : null;
-                const swatchElement = roleArea ? roleArea.firstElementChild : null;
-                const roleElement = swatchElement ? swatchElement.nextElementSibling : null;
-                const textElement = contentElement ? contentElement.firstElementChild : null;
+                const container = skeletonTemplate.cloneNode(true);
+                const resolved = templateInfo.resolve(container);
+                const timeElement = resolved.timeElement;
+                const contentElement = resolved.contentElement;
+                const textElement = resolved.textElement;
+                const roleArea = resolved.roleArea;
+                const swatchElement = resolved.swatchElement;
+                const roleElement = resolved.roleElement;
 
                 let timeString;
                 if (line.__cachedFrameRate === frameRate && typeof line.__cachedTimecode === 'string') {
@@ -1818,18 +1764,13 @@ $(document).ready(function() {
                     line.__cachedFrameRate = frameRate;
                     line.__cachedTimecode = timeString;
                 }
-
                 if (timeElement) {
                     timeElement.textContent = timeString;
                 }
                 if (textElement) {
                     textElement.textContent = text;
                 }
-
                 subtitleContentElements[index] = contentElement;
-                subtitleRoleElements[index] = roleElement;
-                subtitleSwatchElements[index] = swatchElement;
-                subtitleRoleAreaElements[index] = roleArea;
                 subtitlePaintStates[index] = -1;
 
                 let checkerboardClass = '';
@@ -1857,35 +1798,62 @@ $(document).ready(function() {
                 const actorColor = actor ? actorColorsMap[actor] || null : null;
                 const lineColor = useLineColor ? (line.color || null) : null;
 
-                const showRoleInColumnSkeleton = showRoleColumnSkeleton && !!role;
+                const showRoleInColumn = showRoleColumnSkeleton && !!role;
                 const finalRoleColorCandidate = actorColor || lineColor || null;
-                const showInlineSwatchSkeleton = enableColorSwatches && !!finalRoleColorCandidate && !showRoleInColumnSkeleton && !roleDisplayIsColumn && !roleDisplayIsColumnWithSwatch;
+                const showSwatch = enableColorSwatches && finalRoleColorCandidate && (roleDisplayIsColumn || (!roleDisplayIsColumnWithSwatch && !showRoleInColumn));
+                const showInlineSwatch = showSwatch && !showRoleInColumn;
 
                 const sameRoleChain = !!(role && previousRoleRaw === role);
-                subtitleSameRolePrev[index] = sameRoleChain;
                 previousRoleRaw = role || null;
+
                 if (roleElement) {
                     roleElement.textContent = (deduplicateRoles && sameRoleChain) ? '\u00A0' : (role || '');
-                    roleElement.style.visibility = showRoleInColumnSkeleton ? 'visible' : 'hidden';
-                }
-                if (roleArea) {
-                    roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumnSkeleton || showInlineSwatchSkeleton));
-                }
-                if (swatchElement) {
-                    if (showInlineSwatchSkeleton) {
-                        container.classList.add('has-inline-swatch');
-                        swatchElement.style.visibility = 'visible';
+                    roleElement.style.visibility = showRoleInColumn ? 'visible' : 'hidden';
+                    if (actor) {
+                        roleElement.title = actor;
+                    } else if (roleElement.title) {
+                        roleElement.removeAttribute('title');
+                    }
+                    const roleNeedsBg = showRoleInColumn && roleDisplayIsColumnWithSwatch && enableColorSwatches && finalRoleColorCandidate;
+                    if (roleNeedsBg) {
+                        const adj = settings.roleFontColorEnabled
+                            ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate, text: '#000000' })
+                            : { bg: finalRoleColorCandidate, text: isColorLight(finalRoleColorCandidate) ? '#000000' : '#ffffff' };
+                        roleElement.classList.add('role-colored-bg');
+                        roleElement.style.backgroundColor = adj.bg;
+                        roleElement.style.color = adj.text || '#000000';
                     } else {
-                        swatchElement.style.visibility = 'hidden';
+                        roleElement.classList.remove('role-colored-bg');
+                        roleElement.style.backgroundColor = '';
+                        roleElement.style.color = '';
                     }
                 }
 
-                subtitleRoles[index] = role;
-                subtitleActors[index] = actor;
-                subtitleActorColors[index] = actorColor;
-                subtitleLineColors[index] = lineColor;
-                subtitleFinalRoleColors[index] = finalRoleColorCandidate;
-                subtitleCheckerboardClasses[index] = checkerboardClass;
+                if (swatchElement) {
+                    if (showSwatch) {
+                        swatchElement.style.visibility = 'visible';
+                        const swatchColor = settings.roleFontColorEnabled
+                            ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate })
+                            : { bg: finalRoleColorCandidate };
+                        swatchElement.style.backgroundColor = swatchColor.bg;
+                    } else {
+                        swatchElement.style.visibility = 'hidden';
+                        swatchElement.style.backgroundColor = '';
+                    }
+                }
+
+                if (roleArea) {
+                    roleArea.classList.toggle('role-area-is-empty', !(showRoleInColumn || showSwatch));
+                }
+
+                if (showInlineSwatch) {
+                    container.classList.add('has-inline-swatch');
+                }
+
+                if (checkerboardClass) {
+                    container.classList.add(checkerboardClass);
+                }
+
                 subtitleElements[index] = container;
                 fragment.appendChild(container);
             }
@@ -2087,6 +2055,9 @@ $(document).ready(function() {
             if (transportData.length < 3) return;
             const playState = parseInt(transportData[1], 10);
             latestTimecode = parseFloat(transportData[2]);
+            transportPlayState = Number.isFinite(playState) ? playState : 0;
+            transportLastUpdateAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            transportLastTimecode = Number.isFinite(latestTimecode) ? latestTimecode : 0;
             transportTimecode.text(formatTimecode(latestTimecode));
             switch (playState) {
                 case 1: transportStatus.removeClass('status-stop status-record').addClass('status-play'); transportStateText.text('Play'); break;
@@ -2242,15 +2213,20 @@ $(document).ready(function() {
                     if (!inPause) {
                         const currentSub = subtitleData[currentLineIndex];
                         const lineDuration = currentSub.end_time - currentSub.start_time;
-                        const rawPercentage = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) * 100 : 0;
-                        const clampedPercentage = Math.max(0, Math.min(100, rawPercentage));
-                        sharedProgressBar.style.transform = `scaleX(${clampedPercentage / 100})`;
+                        const rawFraction = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) : 0;
+                        const clampedFraction = Math.max(0, Math.min(1, rawFraction));
+                        if (Math.abs(clampedFraction - sharedProgressValue) > 0.001) {
+                            sharedProgressValue = clampedFraction;
+                            sharedProgressBar.style.transform = `scaleX(${clampedFraction})`;
+                        }
                     } else {
-                        sharedProgressBar.style.transform = 'scaleX(0)';
+                        if (sharedProgressValue !== 0) {
+                            sharedProgressValue = 0;
+                            sharedProgressBar.style.transform = 'scaleX(0)';
+                        }
                     }
                 }
-            } else {
-                sharedProgressBar.style.transform = 'scaleX(0)';
+            } else if (sharedProgressIndex !== -1) {
                 detachSharedProgress();
             }
         } catch (e) { console.error("Error in updateTeleprompter:", e); }
