@@ -125,6 +125,7 @@ $(document).ready(function() {
     let subtitleElements = [];
     let subtitleContentElements = [];
     let subtitlePaintStates = [];
+    let subtitleColorMetadata = [];
     const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
@@ -673,6 +674,46 @@ $(document).ready(function() {
         if (index < 0 || index >= subtitleElements.length) return;
         if (!force && subtitlePaintStates[index] === paintGeneration) return;
         subtitlePaintStates[index] = paintGeneration;
+
+        const meta = subtitleColorMetadata[index];
+        if (!meta || !meta.color) return;
+
+        const baseColor = meta.color;
+        const useLightened = !!settings.roleFontColorEnabled;
+        const lightened = useLightened ? (getLightenedColorCached(baseColor, true) || null) : null;
+
+        if (meta.roleElement) {
+            const roleEl = meta.roleElement;
+            const bgColor = lightened ? lightened.bg : baseColor;
+            if (roleEl.style.backgroundColor !== bgColor) {
+                roleEl.style.backgroundColor = bgColor;
+            }
+            const desiredText = useLightened
+                ? ((lightened && lightened.text) ? lightened.text : '#000000')
+                : (isColorLight(baseColor) ? '#000000' : '#ffffff');
+            if (roleEl.style.color !== desiredText) {
+                roleEl.style.color = desiredText;
+            }
+            if (!roleEl.classList.contains('role-colored')) {
+                roleEl.classList.add('role-colored');
+            }
+        }
+
+        if (meta.columnSwatch) {
+            const swatchEl = meta.columnSwatch;
+            const desiredBg = lightened ? lightened.bg : baseColor;
+            if (swatchEl.style.backgroundColor !== desiredBg) {
+                swatchEl.style.backgroundColor = desiredBg;
+            }
+        }
+
+        if (meta.inlineSwatch) {
+            const swatchEl = meta.inlineSwatch;
+            const desiredBg = lightened ? lightened.bg : baseColor;
+            if (swatchEl.style.backgroundColor !== desiredBg) {
+                swatchEl.style.backgroundColor = desiredBg;
+            }
+        }
     }
 
     function handleWrapperScroll() {
@@ -1839,6 +1880,7 @@ $(document).ready(function() {
             subtitleElements = new Array(total);
             subtitleContentElements = new Array(total);
             subtitlePaintStates = new Array(total);
+            subtitleColorMetadata = new Array(total);
             if (total === 0) {
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 return;
@@ -1887,6 +1929,8 @@ $(document).ready(function() {
             for (let index = 0; index < total; index++) {
                 const line = subtitleData[index];
                 if (!line) continue;
+
+                subtitleColorMetadata[index] = null;
 
                 const rawText = line.text || '';
                 let role = '';
@@ -1996,43 +2040,36 @@ $(document).ready(function() {
                 if (roleElement) {
                     if (actor) {
                         roleElement.title = actor;
-                    } else if (roleElement && roleElement.title) {
+                    } else if (roleElement.title) {
                         roleElement.removeAttribute('title');
                     }
-                    if (showRoleInColumn) {
-                        roleElement.classList.toggle('role-hidden', false);
-                        if (roleDisplayIsColumnWithSwatch && enableColorSwatches && finalRoleColorCandidate) {
-                            const adj = settings.roleFontColorEnabled
-                                ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate, text: '#000000' })
-                                : { bg: finalRoleColorCandidate, text: isColorLight(finalRoleColorCandidate) ? '#000000' : '#ffffff' };
-                            roleElement.style.backgroundColor = adj.bg;
-                            roleElement.style.color = adj.text || '#000000';
-                            roleElement.classList.add('role-colored');
-                        } else {
-                            roleElement.style.backgroundColor = '';
-                            roleElement.style.color = '';
-                            roleElement.classList.remove('role-colored');
-                        }
-                    } else {
-                        roleElement.style.backgroundColor = '';
-                        roleElement.style.color = '';
-                        roleElement.classList.remove('role-colored');
-                    }
+                    // Clear inline styles upfront; visible rows get colors during paint pass.
+                    roleElement.style.backgroundColor = '';
+                    roleElement.style.color = '';
+                    roleElement.classList.remove('role-colored');
                 }
 
                 if (enableColorSwatches && finalRoleColorCandidate) {
-                    const swatchColor = settings.roleFontColorEnabled
-                        ? (getLightenedColorCached(finalRoleColorCandidate, true) || { bg: finalRoleColorCandidate })
-                        : { bg: finalRoleColorCandidate };
                     if (showColumnSwatch) {
                         swatchElement = document.createElement('span');
                         swatchElement.className = 'subtitle-color-swatch column-swatch';
-                        swatchElement.style.backgroundColor = swatchColor.bg;
                     } else if (showInlineSwatch) {
                         swatchElement = document.createElement('span');
                         swatchElement.className = 'subtitle-color-swatch inline-swatch';
-                        swatchElement.style.backgroundColor = swatchColor.bg;
                     }
+                }
+
+                const shouldColorRole = showRoleInColumn && roleDisplayIsColumnWithSwatch && enableColorSwatches && !!finalRoleColorCandidate;
+                const shouldColorColumnSwatch = !!(swatchElement && swatchElement.classList.contains('column-swatch'));
+                const shouldColorInlineSwatch = !!(swatchElement && swatchElement.classList.contains('inline-swatch'));
+
+                if (shouldColorRole || shouldColorColumnSwatch || shouldColorInlineSwatch) {
+                    subtitleColorMetadata[index] = {
+                        color: finalRoleColorCandidate,
+                        roleElement: shouldColorRole ? roleElement : null,
+                        columnSwatch: shouldColorColumnSwatch ? swatchElement : null,
+                        inlineSwatch: shouldColorInlineSwatch ? swatchElement : null
+                    };
                 }
 
                 if (separatorElement) {
