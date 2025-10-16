@@ -125,7 +125,7 @@ $(document).ready(function() {
     let subtitleElements = [];
     let subtitleContentElements = [];
     let subtitlePaintStates = [];
-    let subtitleColorMetadata = [];
+    let subtitleStyleMetadata = [];
     const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
@@ -537,9 +537,8 @@ $(document).ready(function() {
             }
             subtitleObserver.observe(el);
         });
-        // Ensure we paint at least something even before observer fires
-        visibleRangeEnd = Math.min(subtitleElements.length - 1, PAINT_BUFFER);
-        schedulePaintVisible({ immediate: true });
+        visibleRangeStart = 0;
+        visibleRangeEnd = -1;
     }
 
     function handleSubtitleIntersection(entries) {
@@ -557,8 +556,10 @@ $(document).ready(function() {
                     visibleIndices.add(idx);
                     changed = true;
                 }
+                paintLine(idx);
             } else if (visibleIndices.delete(idx)) {
                 changed = true;
+                clearLinePaint(idx);
             }
         }
         if (changed) {
@@ -568,8 +569,8 @@ $(document).ready(function() {
 
     function recomputeVisibleRangeFromVisibleSet() {
         if (!visibleIndices.size) {
-            visibleRangeStart = lastVisibleStart;
-            visibleRangeEnd = lastVisibleEnd;
+            visibleRangeStart = 0;
+            visibleRangeEnd = -1;
         } else {
             let min = Infinity;
             let max = -1;
@@ -650,15 +651,10 @@ $(document).ready(function() {
 
     function paintVisibleRange() {
         if (!subtitleElements.length) return;
-        let startIndex = visibleRangeStart;
-        let endIndex = visibleRangeEnd;
-        if (endIndex < startIndex) {
-            startIndex = 0;
-            endIndex = Math.min(subtitleElements.length - 1, PAINT_BUFFER);
-        }
-        const start = Math.max(0, startIndex - PAINT_BUFFER);
-        const end = Math.min(subtitleElements.length - 1, endIndex + PAINT_BUFFER);
-        paintRange(start, end);
+        const startIndex = visibleRangeStart;
+        const endIndex = visibleRangeEnd;
+        if (endIndex < startIndex) return;
+        paintRange(startIndex, endIndex);
         lastVisibleStart = startIndex;
         lastVisibleEnd = endIndex;
     }
@@ -675,15 +671,29 @@ $(document).ready(function() {
         if (!force && subtitlePaintStates[index] === paintGeneration) return;
         subtitlePaintStates[index] = paintGeneration;
 
-        const meta = subtitleColorMetadata[index];
-        if (!meta || !meta.color) return;
+        if (!subtitleStyleMetadata || index >= subtitleStyleMetadata.length) return;
+        const meta = subtitleStyleMetadata[index];
+        if (!meta) return;
 
-        const baseColor = meta.color;
+        const container = subtitleElements[index];
+        if (meta.checkerboardClass && container) {
+            if (force || !meta.checkerboardApplied || !container.classList.contains(meta.checkerboardClass)) {
+                container.classList.add(meta.checkerboardClass);
+            }
+            meta.checkerboardApplied = true;
+        }
+
+        const colorInfo = meta.colorInfo;
+        if (!colorInfo) return;
+
+        if (!force && meta.colorApplied) return;
+
+        const baseColor = colorInfo.color;
         const useLightened = !!settings.roleFontColorEnabled;
         const lightened = useLightened ? (getLightenedColorCached(baseColor, true) || null) : null;
 
-        if (meta.roleElement) {
-            const roleEl = meta.roleElement;
+        const roleEl = colorInfo.roleElement;
+        if (roleEl) {
             const bgColor = lightened ? lightened.bg : baseColor;
             if (roleEl.style.backgroundColor !== bgColor) {
                 roleEl.style.backgroundColor = bgColor;
@@ -699,20 +709,56 @@ $(document).ready(function() {
             }
         }
 
-        if (meta.columnSwatch) {
-            const swatchEl = meta.columnSwatch;
+        const columnSwatch = colorInfo.columnSwatch;
+        if (columnSwatch) {
             const desiredBg = lightened ? lightened.bg : baseColor;
-            if (swatchEl.style.backgroundColor !== desiredBg) {
-                swatchEl.style.backgroundColor = desiredBg;
+            if (columnSwatch.style.backgroundColor !== desiredBg) {
+                columnSwatch.style.backgroundColor = desiredBg;
             }
         }
 
-        if (meta.inlineSwatch) {
-            const swatchEl = meta.inlineSwatch;
+        const inlineSwatch = colorInfo.inlineSwatch;
+        if (inlineSwatch) {
             const desiredBg = lightened ? lightened.bg : baseColor;
-            if (swatchEl.style.backgroundColor !== desiredBg) {
-                swatchEl.style.backgroundColor = desiredBg;
+            if (inlineSwatch.style.backgroundColor !== desiredBg) {
+                inlineSwatch.style.backgroundColor = desiredBg;
             }
+        }
+
+        meta.colorApplied = true;
+    }
+
+    function clearLinePaint(index) {
+        if (index < 0 || index >= subtitlePaintStates.length) return;
+        subtitlePaintStates[index] = -1;
+        if (!subtitleStyleMetadata || index >= subtitleStyleMetadata.length) return;
+        const meta = subtitleStyleMetadata[index];
+        if (!meta) return;
+        const container = subtitleElements[index];
+        if (container && meta.checkerboardClass && container.classList.contains(meta.checkerboardClass)) {
+            container.classList.remove(meta.checkerboardClass);
+        }
+        meta.checkerboardApplied = false;
+
+        const colorInfo = meta.colorInfo;
+        if (colorInfo) {
+            const roleEl = colorInfo.roleElement;
+            if (roleEl) {
+                if (roleEl.style.backgroundColor) roleEl.style.backgroundColor = '';
+                if (roleEl.style.color) roleEl.style.color = '';
+                if (roleEl.classList.contains('role-colored')) {
+                    roleEl.classList.remove('role-colored');
+                }
+            }
+            const columnSwatch = colorInfo.columnSwatch;
+            if (columnSwatch && columnSwatch.style.backgroundColor) {
+                columnSwatch.style.backgroundColor = '';
+            }
+            const inlineSwatch = colorInfo.inlineSwatch;
+            if (inlineSwatch && inlineSwatch.style.backgroundColor) {
+                inlineSwatch.style.backgroundColor = '';
+            }
+            meta.colorApplied = false;
         }
     }
 
@@ -1880,7 +1926,7 @@ $(document).ready(function() {
             subtitleElements = new Array(total);
             subtitleContentElements = new Array(total);
             subtitlePaintStates = new Array(total);
-            subtitleColorMetadata = new Array(total);
+            subtitleStyleMetadata = new Array(total);
             if (total === 0) {
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 return;
@@ -1930,7 +1976,7 @@ $(document).ready(function() {
                 const line = subtitleData[index];
                 if (!line) continue;
 
-                subtitleColorMetadata[index] = null;
+                subtitleStyleMetadata[index] = null;
 
                 const rawText = line.text || '';
                 let role = '';
@@ -2063,13 +2109,27 @@ $(document).ready(function() {
                 const shouldColorColumnSwatch = !!(swatchElement && swatchElement.classList.contains('column-swatch'));
                 const shouldColorInlineSwatch = !!(swatchElement && swatchElement.classList.contains('inline-swatch'));
 
+                let meta = null;
+                if (checkerboardClass) {
+                    meta = { checkerboardClass, checkerboardApplied: false, colorInfo: null, colorApplied: false };
+                }
                 if (shouldColorRole || shouldColorColumnSwatch || shouldColorInlineSwatch) {
-                    subtitleColorMetadata[index] = {
+                    if (!meta) {
+                        meta = { checkerboardClass: checkerboardClass || '', checkerboardApplied: false, colorInfo: null, colorApplied: false };
+                    }
+                    meta.colorInfo = {
                         color: finalRoleColorCandidate,
                         roleElement: shouldColorRole ? roleElement : null,
                         columnSwatch: shouldColorColumnSwatch ? swatchElement : null,
                         inlineSwatch: shouldColorInlineSwatch ? swatchElement : null
                     };
+                    meta.colorApplied = false;
+                }
+                if (meta) {
+                    if (!meta.checkerboardClass && checkerboardClass) {
+                        meta.checkerboardClass = checkerboardClass;
+                    }
+                    subtitleStyleMetadata[index] = meta;
                 }
 
                 if (separatorElement) {
@@ -2078,10 +2138,6 @@ $(document).ready(function() {
                 }
 
                 container.classList.toggle('role-slot-empty', includeRoleColumn && !(showRoleInColumn || showColumnSwatch));
-
-                if (checkerboardClass) {
-                    container.classList.add(checkerboardClass);
-                }
 
                 subtitleElements[index] = container;
 
