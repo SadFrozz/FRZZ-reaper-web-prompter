@@ -38,7 +38,7 @@
 - Интеграция с транспортом REAPER (таймкод / позиция / управление).
 
 ## Скриншот / Визуал
-(Добавить позже — placeholder.)
+Будет позже. Как только, так сразу
 
 ## Архитектура и компоненты
 Проект состоит из двух основных частей:
@@ -51,12 +51,12 @@
    - `style.css` — оформление и адаптив.
    - `jquery.min.js`, `spectrum.js`, `spectrum.css` — внешние зависимости (не модифицировать).
 3. Дополнительно:
-   - `UserPlugins/` — бинарь плагина `reaper_webview` (для встроенного режима) и `WebView2Loader.dll` (Windows).
-   - `installer.py` — автоматический установщик (копирование файлов + настройка действий + опциональная настройка веб-сервера в `reaper.ini`).
+   - `UserPlugins/` — динамически подключаемая библиотека плагина `reaper_webview` (для встроенного режима) и `WebView2Loader.dll` (Windows).
+   - `installer.py` — скрипт автоматической установки (копирование файлов + настройка действий + опциональная настройка веб-сервера в `reaper.ini`).
 
 ## Установка
 ### Быстрая установка через инсталлер
-1. Скачайте релизный архив / одиночный бинарный инсталлер (`.exe` на Windows / `.command` на macOS).
+1. Скачайте релизный инсталлер (`.exe` на Windows / `.command` на macOS).
 2. Запустите.
 3. Подтвердите путь к папке ресурсов REAPER (обычно определяется автоматически).
 4. Дождитесь копирования скриптов, web-ресурсов и плагина (если присутствует в сборке).
@@ -68,7 +68,7 @@
 - `Custom: Web Prompter Launch`
 
 ### Ручная установка
-1. Скопируйте каталоги `Scripts/`, `reaper_www_root/` и (при необходимости) `UserPlugins/` в папку ресурсов REAPER:
+1. Скопируйте каталоги `Scripts/`, `reaper_www_root/` и (не нужно если запускаете только через браузер) `UserPlugins/` в папку ресурсов REAPER:
    - Windows: `%APPDATA%/REAPER`
    - macOS: `~/Library/Application Support/REAPER`
 2. Добавьте строки действий в `reaper-kb.ini` (если не хотите запускать инсталлер):
@@ -76,12 +76,12 @@
 SCR 4 0 FRZZ_WEB_NOTES_READER "Custom: Web Prompter Backend" FRZZ_web_prompter_backend.lua
 SCR 4 0 FRZZ_NOTES_READER_LAUNCH "Custom: Web Prompter Launch" FRZZ_web_prompter.lua
 ```
-3. (Опционально) Настройте веб-сервер в `reaper.ini` (параметры `csurf_cnt` и `csurf_*` с упоминанием `prompter.html`).
+3. Настройте веб-сервер в `reaper.ini` (параметры `csurf_cnt` и `csurf_*` с упоминанием `prompter.html`) либо в самом REAPER через "`Options` \ `Preferences` \ `Control/OSC/web`".
 4. Перезапустите REAPER.
 
 ## Первый запуск
 1. Выполните действие `Web Prompter Backend` (если backend не запускается автоматически из Launch).
-2. Выполните `Web Prompter Launch`.
+2. Выполните `Web Prompter Launch` или откройте в браузере адрес вида `local_ip:port` (например `192.168.0.111:8080`) указанный в настройках `Control/OSC/web`.
 3. Должно открыться окно со строками текста.
 4. Проверьте корректность отображения ролей и подсветки.
 
