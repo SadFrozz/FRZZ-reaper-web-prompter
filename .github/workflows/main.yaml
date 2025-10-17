@@ -63,6 +63,7 @@ jobs:
           --name "FRZZ-reaper-web-prompter-${{ env.PROMPTER_VERSION }}-${{ env.OS_NAME }}" \
           --onefile \
           --console \
+          --target-arch universal2 \
           --add-data "Scripts:Scripts" \
           --add-data "reaper_www_root:reaper_www_root" \
           --add-data "UserPlugins:UserPlugins" \
