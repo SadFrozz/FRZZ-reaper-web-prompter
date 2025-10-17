@@ -126,6 +126,11 @@ $(document).ready(function() {
     let subtitleContentElements = [];
     let subtitlePaintStates = [];
     let subtitleStyleMetadata = [];
+    const TRACK_FETCH_MAX_ATTEMPTS = 6;
+    const TRACK_FETCH_INTERVAL_MS = 250;
+    let trackFetchAttempts = 0;
+    let trackFetchTimerId = null;
+    let trackFetchInProgress = false;
     const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
@@ -1546,6 +1551,57 @@ $(document).ready(function() {
         }
     }
     
+    function beginTrackFetch() {
+        trackFetchAttempts = 0;
+        trackFetchInProgress = true;
+        if (trackFetchTimerId) {
+            clearTimeout(trackFetchTimerId);
+            trackFetchTimerId = null;
+        }
+    }
+
+    function finalizeTrackFetch() {
+        trackFetchInProgress = false;
+        trackFetchAttempts = 0;
+        if (trackFetchTimerId) {
+            clearTimeout(trackFetchTimerId);
+            trackFetchTimerId = null;
+        }
+    }
+
+    function requestTrackExtstate(delayMs = TRACK_FETCH_INTERVAL_MS) {
+        if (!trackFetchInProgress) return;
+        if (trackFetchTimerId) {
+            clearTimeout(trackFetchTimerId);
+            trackFetchTimerId = null;
+        }
+        trackFetchTimerId = setTimeout(() => {
+            if (!trackFetchInProgress) return;
+            console.debug('[Prompter][tracks] poll extstate', { attempt: trackFetchAttempts + 1 });
+            wwr_req(REASCRIPT_ACTION_ID);
+            setTimeout(() => {
+                if (!trackFetchInProgress) return;
+                wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/response_tracks');
+            }, 40);
+        }, delayMs);
+    }
+
+    function scheduleTrackFetchRetry(reason) {
+        if (!trackFetchInProgress) return false;
+        if (trackFetchAttempts >= TRACK_FETCH_MAX_ATTEMPTS) {
+            finalizeTrackFetch();
+            statusIndicator.text('Не удалось получить список дорожек.');
+            console.warn('[Prompter][tracks] giving up', { reason });
+            return false;
+        }
+        trackFetchAttempts += 1;
+        statusIndicator.text('Список дорожек не готов, повторяем...');
+        console.debug('[Prompter][tracks] retry', { attempt: trackFetchAttempts, reason });
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TRACKS`);
+        requestTrackExtstate(TRACK_FETCH_INTERVAL_MS);
+        return true;
+    }
+
     function initialize() {
         try {
             const t0 = performance.now();
@@ -1588,16 +1644,11 @@ $(document).ready(function() {
             updateTrackSelector([{ id: 0, name: 'Subtitles' }]);
             return;
         }
-        const t0 = performance.now();
-        console.debug('[Prompter] getTracks real');
         statusIndicator.text('Запрос списка дорожек...');
+        beginTrackFetch();
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TRACKS`);
         setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
-        setTimeout(() => { 
-            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/response_tracks');
-            const t1 = performance.now();
-            console.debug('[Prompter] getTracks request issued', { ms: Math.round(t1 - t0) });
-        }, 250);
+        requestTrackExtstate(250);
     }
 
     async function getText(trackId) {
@@ -1711,19 +1762,75 @@ $(document).ready(function() {
     };
 
     function handleTracksResponse(jsonData) {
-        if (!jsonData) return;
+        if (!jsonData) {
+            if (scheduleTrackFetchRetry('empty_payload')) return;
+            return;
+        }
+        const payload = typeof jsonData === 'string' ? jsonData.trim() : '';
+        if (!payload || payload === 'nil') {
+            if (scheduleTrackFetchRetry('not_ready')) return;
+            return;
+        }
         try {
-            console.debug('[Prompter] handleTracksResponse');
-            const tracks = JSON.parse(jsonData);
+            const tracks = JSON.parse(payload);
+            if (!Array.isArray(tracks)) {
+                if (scheduleTrackFetchRetry('not_array')) return;
+                statusIndicator.text('Получен некорректный список дорожек.');
+                return;
+            }
+            finalizeTrackFetch();
             trackSelector.empty();
-            tracks.forEach(track => { trackSelector.append(`<option value="${track.id}">${track.id + 1}: ${track.name}</option>`); });
-            statusIndicator.text('Список дорожек загружен.');
-            autoFindSubtitleTrack();
-            // Removed auto-retry to avoid double loading
+            tracks.forEach(track => {
+                const rawId = track && typeof track.id !== 'undefined' ? track.id : '';
+                let trackId = rawId;
+                if (typeof rawId === 'string' && rawId.trim() !== '') {
+                    const parsedId = parseInt(rawId, 10);
+                    if (!Number.isNaN(parsedId)) {
+                        trackId = parsedId;
+                    }
+                }
+
+                let labelPrefix = '';
+                if (typeof trackId === 'number' && Number.isFinite(trackId) && trackId >= 0) {
+                    labelPrefix = `${trackId + 1}: `;
+                } else if (typeof rawId === 'string' && rawId.trim() !== '') {
+                    labelPrefix = `${rawId}: `;
+                }
+
+                const trackName = typeof track.name === 'string' ? track.name : '';
+                const optionLabel = `${labelPrefix}${trackName}`;
+
+                trackSelector.append(`<option value="${rawId}">${optionLabel}</option>`);
+            });
+
+            if (tracks && tracks.length > 0) {
+                statusIndicator.text('Список дорожек загружен.');
+                autoFindSubtitleTrack();
+            } else {
+                statusIndicator.text('Дорожки не найдены.');
+            }
+
+            // Fail-safe: если сразу не загрузились субтитры, повторим попытку
+            if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+                setTimeout(() => {
+                    if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+                        console.debug('[Prompter][tracks] retry initial text load');
+                        if (!settings.autoFindTrack) {
+                            trackSelector.find('option:first').prop('selected', true);
+                            getText(trackSelector.val());
+                        } else {
+                            autoFindSubtitleTrack();
+                        }
+                    }
+                }, 800);
+            }
             console.debug('[Prompter] tracks parsed', { count: Array.isArray(tracks) ? tracks.length : 0 });
         } catch (e) {
-            statusIndicator.text('Ошибка обработки списка дорожек.');
-            console.error(e);
+            const retryPlanned = scheduleTrackFetchRetry('parse_error');
+            console.error('[Prompter][tracks] parse failed', e);
+            if (!retryPlanned) {
+                statusIndicator.text('Ошибка обработки списка дорожек.');
+            }
         }
     }
 
