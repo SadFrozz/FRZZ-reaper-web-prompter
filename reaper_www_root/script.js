@@ -228,11 +228,113 @@ const ACTOR_BASE_COLORS = [
     'rgba(255, 0, 160, 0.9)'      // Magenta
 ];
 // Conservative chunk size for Web Remote extstate path (shorter to avoid transport truncation)
-const SETTINGS_CHUNK_SIZE = 250; // was 700
-const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
+const SETTINGS_CHUNK_SIZE = 800;
+const ROLES_CHUNK_SIZE = 800;
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
 const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
+const PROJECT_DATA_CACHE_KEY = 'frzz_project_data_cache';
+const PROJECT_DATA_STATUS_KEY = 'getProjectDataStatus';
+const PROJECT_DATA_JSON_KEY = 'getProjectDataJson';
+const PROJECT_DATA_CHUNK_COUNT_KEY = 'getProjectDataJson_chunk_count';
+const PROJECT_DATA_CHUNK_PREFIX = 'getProjectDataJson_chunk_';
+const PROJECT_DATA_POLL_INTERVAL_MS = 100;
+const PROJECT_DATA_TIMEOUT_MS = 5000;
+
+let projectDataCache = null;
+let projectDataInFlight = null;
+
+const extStateWaiters = new Map();
+
+function resolveExtStateWaiter(key, value) {
+    const waiter = extStateWaiters.get(key);
+    if (!waiter) return false;
+    clearTimeout(waiter.timer);
+    extStateWaiters.delete(key);
+    try {
+        waiter.resolve(value);
+    } catch (err) {
+        console.error('[Prompter][extstate] waiter resolve failed', { key, err });
+    }
+    return true;
+}
+
+function requestExtStateValue(key, timeoutMs = 500) {
+    return new Promise((resolve, reject) => {
+        if (extStateWaiters.has(key)) {
+            const pending = extStateWaiters.get(key);
+            clearTimeout(pending.timer);
+            pending.reject(new Error(`Superseded request for ${key}`));
+            extStateWaiters.delete(key);
+        }
+        const timer = setTimeout(() => {
+            if (extStateWaiters.get(key) !== record) return;
+            extStateWaiters.delete(key);
+            reject(new Error(`Timeout waiting for extstate ${key}`));
+        }, timeoutMs);
+        const record = { resolve, reject, timer };
+        extStateWaiters.set(key, record);
+        wwr_req(`GET/EXTSTATE/PROMPTER_WEBUI/${key}`);
+    });
+}
+
+async function fetchProjectDataChunks() {
+    const countRaw = await requestExtStateValue(PROJECT_DATA_CHUNK_COUNT_KEY, 800);
+    const total = parseInt(countRaw, 10);
+    if (!Number.isFinite(total) || total <= 0) {
+        throw new Error(`invalid project data chunk count: ${countRaw}`);
+    }
+    const chunkPromises = [];
+    for (let i = 0; i < total; i++) {
+        const key = `${PROJECT_DATA_CHUNK_PREFIX}${i}`;
+        const promise = requestExtStateValue(key, 800)
+            .then(value => value || '')
+            .catch(err => {
+                console.error('[Prompter][projectData] failed to fetch chunk', { index: i, total }, err);
+                throw err;
+            });
+        chunkPromises.push(promise);
+    }
+    const parts = await Promise.all(chunkPromises);
+    return parts.join('');
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function clearProjectDataCache() {
+    try {
+        localStorage.removeItem(PROJECT_DATA_CACHE_KEY);
+    } catch (err) {
+        console.debug('[Prompter][projectData] clear cache failed', err);
+    }
+    projectDataCache = null;
+}
+
+function storeProjectDataCache(data) {
+    try {
+        const payload = { data, savedAt: Date.now() };
+        localStorage.setItem(PROJECT_DATA_CACHE_KEY, JSON.stringify(payload));
+    } catch (err) {
+        console.debug('[Prompter][projectData] save cache failed', err);
+    }
+    projectDataCache = data || null;
+}
+
+function loadProjectDataCache() {
+    try {
+        const raw = localStorage.getItem(PROJECT_DATA_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        const data = parsed && typeof parsed === 'object' ? parsed.data || null : null;
+        projectDataCache = data;
+        return data;
+    } catch (err) {
+        console.debug('[Prompter][projectData] load cache failed', err);
+        return null;
+    }
+}
 
 $(document).ready(function() {
     const initStartTs = performance.now();
@@ -295,11 +397,6 @@ $(document).ready(function() {
     let subtitleContentElements = [];
     let subtitlePaintStates = [];
     let subtitleStyleMetadata = [];
-    const TRACK_FETCH_MAX_ATTEMPTS = 6;
-    const TRACK_FETCH_INTERVAL_MS = 250;
-    let trackFetchAttempts = 0;
-    let trackFetchTimerId = null;
-    let trackFetchInProgress = false;
     const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
@@ -315,13 +412,6 @@ $(document).ready(function() {
     let transportWrapRaf = null;
     // When roles.json is successfully loaded, prefer actor colors over per-line color entirely
     let rolesLoaded = false;
-    let rolesLoadInFlight = false;
-    let rolesLoadRequestTs = 0;
-    let rolesLoadSeq = 0;
-    let rolesLoadActiveSeq = 0;
-    let rolesLoadTimeoutId = null;
-    let rolesLoadReason = '';
-    let rolesLoadResolvers = [];
     let rolesSaveInFlight = false;
     let rolesSaveStartedAt = 0;
     let rolesStatusPollTimer = null;
@@ -332,8 +422,6 @@ $(document).ready(function() {
     let emuRolesFetchPromise = null;
     let projectFps = DEFAULT_PROJECT_FPS;
     let projectFpsSource = 'default';
-    let projectFpsRequestToken = 0;
-    let projectFpsLastRequestAt = 0;
     let projectDropFrame = false;
     let projectFpsRaw = '';
     let activeTimecodeFormat = defaultSettings.timecodeDisplayFormat || 'frames';
@@ -757,13 +845,15 @@ $(document).ready(function() {
         return {};
     }
 
-    function migrateSettingsObject(rawSettings) {
+    function migrateSettingsObject(rawSettings, metaTarget) {
         const incoming = rawSettings && typeof rawSettings === 'object' ? { ...rawSettings } : {};
         const legacySchema = Number(incoming.settingsSchemaVersion || incoming.settings_schema_version || 1);
+        let changed = false;
         if ((!incoming.actorRoleMappingText || !incoming.actorRoleMappingText.trim()) && incoming.actorRoleMapping) {
             const legacyText = legacyActorMappingToText(incoming.actorRoleMapping);
             if (legacyText) {
                 incoming.actorRoleMappingText = legacyText;
+                changed = true;
             }
             delete incoming.actorRoleMapping;
         }
@@ -771,41 +861,62 @@ $(document).ready(function() {
             const legacyText = legacyActorMappingToText(incoming.actorRoles);
             if (legacyText) {
                 incoming.actorRoleMappingText = legacyText;
+                changed = true;
             }
             delete incoming.actorRoles;
         }
         if (incoming.actorColors) {
-            incoming.actorColors = normalizeActorColors(incoming.actorColors);
+            const normalizedColors = normalizeActorColors(incoming.actorColors);
+            if (JSON.stringify(normalizedColors) !== JSON.stringify(incoming.actorColors)) {
+                changed = true;
+            }
+            incoming.actorColors = normalizedColors;
         }
         if (typeof incoming.uiScale === 'number' && incoming.uiScale > 300) {
             incoming.uiScale = Math.round(incoming.uiScale / 2);
+            changed = true;
         } else if (typeof incoming.fontScale === 'number') {
             incoming.uiScale = Math.round(incoming.fontScale * 100);
             delete incoming.fontScale;
+            changed = true;
         }
         if (incoming.roleColumnWidth && !incoming.roleColumnScale) {
             const value = Number(incoming.roleColumnWidth);
             if (Number.isFinite(value) && value > 0) {
                 incoming.roleColumnScale = Math.round(Math.min(300, Math.max(50, value * 100)));
+                changed = true;
             }
             delete incoming.roleColumnWidth;
         }
         if (typeof incoming.frameRate === 'string') {
             const parsed = parseFloat(incoming.frameRate);
-            if (Number.isFinite(parsed)) incoming.frameRate = parsed;
+            if (Number.isFinite(parsed)) {
+                incoming.frameRate = parsed;
+                changed = true;
+            }
         }
         const base = { ...defaultSettings, ...incoming };
-        base.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
         if (!base.dataModelVersion || base.dataModelVersion < DATA_MODEL_VERSION) {
+            changed = true;
             base.dataModelVersion = DATA_MODEL_VERSION;
         }
         if (!base.timecodeDisplayFormat) {
             base.timecodeDisplayFormat = defaultSettings.timecodeDisplayFormat;
+            changed = true;
         }
+        if (legacySchema !== SETTINGS_SCHEMA_VERSION) {
+            changed = true;
+        }
+        base.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
         if (legacySchema < SETTINGS_SCHEMA_VERSION) {
             base.settingsMigratedFrom = legacySchema;
         } else {
             delete base.settingsMigratedFrom;
+        }
+        if (metaTarget && typeof metaTarget === 'object') {
+            metaTarget.changed = !!changed;
+            metaTarget.legacySchema = legacySchema;
+            metaTarget.migratedFrom = legacySchema < SETTINGS_SCHEMA_VERSION ? legacySchema : null;
         }
         return base;
     }
@@ -1472,8 +1583,8 @@ $(document).ready(function() {
         } catch (_) { return false; }
     }
 
-    function updateTitle() {
-        console.debug('[Prompter][title] updateTitle', { titleMode: settings.titleMode, currentProjectName });
+    function renderTitle() {
+        console.debug('[Prompter][title] renderTitle', { titleMode: settings.titleMode, currentProjectName });
         // Centralized title logic (window + H1). Prevent other functions from mutating document.title directly.
         $('body').removeClass('title-hidden');
         let docTitle = ORIGINAL_DOCUMENT_TITLE;
@@ -1638,7 +1749,7 @@ $(document).ready(function() {
             // After applying font/UI scale, re-evaluate navigation panel wrapping
             scheduleTransportWrapEvaluation();
             // Ensure visual title reflects authoritative settings + currentProjectName
-            updateTitle();
+            renderTitle();
             invalidateAllLinePaint({ schedule: true });
             console.debug('[Prompter][applySettings] done');
         } catch (e) { console.error("Error in applySettings:", e); }
@@ -1722,6 +1833,43 @@ $(document).ready(function() {
         updateScaleWrapperVisibility();
     }
 
+    function encodeStringToBase64Url(str) {
+        try {
+            const bytes = new TextEncoder().encode(str);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) {
+                bin += String.fromCharCode(bytes[i]);
+            }
+            return btoa(bin).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+        } catch (err) {
+            console.error('[Prompter][settings] encodeStringToBase64Url failed', err);
+            return '';
+        }
+    }
+
+    function persistSettingsToBackend(sourceSettings, options = {}) {
+        if (!sourceSettings || typeof sourceSettings !== 'object') {
+            console.warn('[Prompter][settings] persist skipped: invalid source');
+            return;
+        }
+        const reason = options.reason || 'manual';
+        const deferMs = Number.isFinite(options.deferMs) ? options.deferMs : 150;
+        const settingsForFile = { ...sourceSettings };
+        delete settingsForFile.actorRoleMappingText;
+        delete settingsForFile.actorColors;
+        delete settingsForFile.settingsMigratedFrom;
+        const settingsString = JSON.stringify(settingsForFile, null, 2);
+        const b64url = '__B64__' + encodeStringToBase64Url(settingsString);
+        const encodedChunks = chunkString(b64url, SETTINGS_CHUNK_SIZE);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_decoded_len/${settingsString.length}`);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${encodedChunks.length}`);
+        encodedChunks.forEach((ch, idx) => wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${idx}/${ch}`));
+        wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_SETTINGS');
+        setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, deferMs);
+        console.info('[Prompter][settings] persisted', { reason, chunks: encodedChunks.length, encodedLen: b64url.length });
+    }
+
     async function loadSettings() {
         const t0 = performance.now();
         console.info('[Prompter][loadSettings] start', { emu: isEmuMode() });
@@ -1757,25 +1905,49 @@ $(document).ready(function() {
             if (fileSettings) {
                 settings = { ...defaultSettings, ...fileSettings };
             } else {
-                // fallback purely to defaults (do NOT pull stale localStorage if file missing per current spec)
                 settings = { ...defaultSettings };
             }
-            settings = migrateSettingsObject(settings);
+            const migrationMeta = {};
+            settings = migrateSettingsObject(settings, migrationMeta);
             activeTimecodeFormat = settings.timecodeDisplayFormat;
             setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
-            // Migration: previous stored values may have baseline misunderstanding.
-            // If value still reflects legacy domain (<=150 interpreted as old 100-base wanting doubling) AND > default.
+
             if (settings.uiScale > 150) {
-                settings.uiScale = Math.round(settings.uiScale / 2);
-            }
-                // Sanitize click highlight duration
-                if (typeof settings.highlightClickDuration !== 'number' || settings.highlightClickDuration <= 0 || settings.highlightClickDuration > 60000) {
-                    settings.highlightClickDuration = defaultSettings.highlightClickDuration;
+                const adjusted = Math.round(settings.uiScale / 2);
+                if (adjusted !== settings.uiScale) {
+                    settings.uiScale = adjusted;
+                    migrationMeta.changed = true;
                 }
-            // Enforce new bounds & snap
-            settings.uiScale = Math.min(300, Math.max(50, settings.uiScale));
-            settings.uiScale = Math.round((settings.uiScale - 50)/25)*25 + 50;
-            if (settings.uiScale > 300) settings.uiScale = 300;
+            }
+            const boundedUiScale = Math.min(300, Math.max(50, settings.uiScale));
+            if (boundedUiScale !== settings.uiScale) {
+                settings.uiScale = boundedUiScale;
+                migrationMeta.changed = true;
+            }
+            const snappedUiScale = Math.round((settings.uiScale - 50) / 25) * 25 + 50;
+            if (snappedUiScale !== settings.uiScale) {
+                settings.uiScale = Math.min(300, snappedUiScale);
+                migrationMeta.changed = true;
+            }
+            if (typeof settings.highlightClickDuration !== 'number' || settings.highlightClickDuration <= 0 || settings.highlightClickDuration > 60000) {
+                settings.highlightClickDuration = defaultSettings.highlightClickDuration;
+                migrationMeta.changed = true;
+            }
+
+            try {
+                localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
+            } catch (storageErr) {
+                console.debug('[Prompter][loadSettings] localStorage persist failed', storageErr);
+            }
+
+            if (fileSettings && migrationMeta.changed) {
+                persistSettingsToBackend(settings, { reason: 'migration', deferMs: 200 });
+                console.info('[Prompter][loadSettings] migrated legacy settings', {
+                    fromSchema: migrationMeta.migratedFrom,
+                    legacySchema: migrationMeta.legacySchema
+                });
+                delete settings.settingsMigratedFrom;
+            }
         } catch(e) {
             console.warn('[Prompter][loadSettings] Error during parse/migration, reverting to defaults:', e);
             settings = migrateSettingsObject({ ...defaultSettings });
@@ -1787,6 +1959,11 @@ $(document).ready(function() {
     initializeColorPickers();
         updateUIFromSettings();
         applySettings();
+        try {
+            localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
+        } catch (persistErr) {
+            console.debug('[Prompter][loadSettings] final localStorage sync failed', persistErr);
+        }
         console.debug('[Prompter][loadSettings] Effective settings:', JSON.parse(JSON.stringify(settings)));
         const t1 = performance.now();
         console.info('[Prompter][loadSettings] done', { ms: Math.round(t1 - t0) });
@@ -1865,30 +2042,7 @@ $(document).ready(function() {
                 }
             }
             
-            const settingsForFile = { ...settings };
-            delete settingsForFile.actorRoleMappingText;
-            delete settingsForFile.actorColors;
-            const settingsString = JSON.stringify(settingsForFile, null, 2);
-            // Pretty JSON for human readability in settings.json (indent=2)
-            function toBase64Url(str){
-                try {
-                    const bytes = new TextEncoder().encode(str);
-                    let bin = '';
-                    for (let b of bytes) bin += String.fromCharCode(b);
-                    const b64 = btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
-                    return b64;
-                } catch(err){ console.error('toBase64Url failed', err); return ''; }
-            }
-            function chunk(str, size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
-            const b64url = '__B64__'+toBase64Url(settingsString);
-            const encodedChunks = chunk(b64url, SETTINGS_CHUNK_SIZE);
-            // Диагностические метаданные для backend
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_decoded_len/${settingsString.length}`);
-            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${encodedChunks.length}`);
-            encodedChunks.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${idx}/${ch}`));
-            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_SETTINGS');
-            setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 150);
+            persistSettingsToBackend(settings, { reason: 'save' });
         } catch (e) { console.error("Error in saveSettings:", e); }
         finally { $('#settings-modal').hide(); }
     }
@@ -1896,7 +2050,7 @@ $(document).ready(function() {
     function resetSettings() {
         try {
             if (confirm("Вы уверены, что хотите сбросить все настройки к значениям по умолчанию? Это действие нельзя будет отменить.")) {
-                settings = { ...defaultSettings };
+                settings = migrateSettingsObject({ ...defaultSettings });
                 localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
                 console.debug('[Prompter][resetSettings] Reset to defaults');
                 
@@ -1904,29 +2058,7 @@ $(document).ready(function() {
                 applySettings();
                 if (subtitleData.length > 0) handleTextResponse(subtitleData);
 
-                const settingsForFile = { ...settings };
-                delete settingsForFile.actorRoleMappingText;
-                delete settingsForFile.actorColors;
-                // Pretty JSON for human readability in settings.json (indent=2)
-                const settingsString = JSON.stringify(settingsForFile, null, 2);
-                function toBase64Url(str){
-                    try {
-                        const bytes = new TextEncoder().encode(str);
-                        let bin='';
-                        for (let b of bytes) bin += String.fromCharCode(b);
-                        const b64 = btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
-                        return b64;
-                    } catch(err){ console.error('toBase64Url reset failed', err); return ''; }
-                }
-                function chunk(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
-                const b64url='__B64__'+toBase64Url(settingsString);
-                const encodedChunks = chunk(b64url, SETTINGS_CHUNK_SIZE);
-                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
-                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_decoded_len/${settingsString.length}`);
-                wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_chunks/${encodedChunks.length}`);
-                encodedChunks.forEach((ch, idx)=> wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_data_${idx}/${ch}`));
-                wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/SAVE_SETTINGS');
-                setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 150);
+                persistSettingsToBackend(settings, { reason: 'reset' });
             }
         } catch(e) { console.error("Error resetting settings:", e); }
     }
@@ -1941,10 +2073,7 @@ $(document).ready(function() {
 
     function rolesToBase64Url(str){
         try {
-            const bytes = new TextEncoder().encode(str);
-            let bin='';
-            for (let b of bytes) bin += String.fromCharCode(b);
-            return btoa(bin).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+            return encodeStringToBase64Url(str);
         } catch(err){ console.error('[Prompter][roles] rolesToBase64Url failed', err); return ''; }
     }
     function rolesFromBase64Url(b64){
@@ -1975,16 +2104,7 @@ $(document).ready(function() {
         return interval * Math.max(0, requests.length - 1);
     }
     function invalidateRolesCache(reason = 'manual') {
-        if (rolesLoadTimeoutId) {
-            clearTimeout(rolesLoadTimeoutId);
-            rolesLoadTimeoutId = null;
-        }
-        rolesLoadInFlight = false;
-        rolesLoadRequestTs = 0;
-        rolesLoadReason = '';
-        rolesLoadResolvers = [];
         rolesLoaded = false;
-        rolesLoadActiveSeq = ++rolesLoadSeq;
         console.debug('[Prompter][roles] cache invalidated', { reason });
         settings.actorRoleMappingText = '';
         settings.actorColors = {};
@@ -2032,29 +2152,12 @@ $(document).ready(function() {
     }
 
     function finalizeRolesLoad(status, extra = {}) {
-        if (rolesLoadTimeoutId) {
-            clearTimeout(rolesLoadTimeoutId);
-            rolesLoadTimeoutId = null;
-        }
-        const elapsed = rolesLoadRequestTs ? Math.round(performance.now() - rolesLoadRequestTs) : null;
         const info = {
             status,
-            seq: extra.seq != null ? extra.seq : rolesLoadActiveSeq,
-            reason: extra.reason || rolesLoadReason || 'unspecified',
-            durationMs: elapsed,
             ...extra
         };
         console.info('[Prompter][roles][request] complete', info);
-        rolesLoadInFlight = false;
-        rolesLoadRequestTs = 0;
-        rolesLoadReason = '';
-        const pending = rolesLoadResolvers.slice();
-        rolesLoadResolvers = [];
-        pending.forEach(fn => {
-            try { fn(info); } catch (err) {
-                console.warn('[Prompter][roles][ensure] resolver callback failed', err);
-            }
-        });
+        return info;
     }
 
     function saveRoles(){
@@ -2117,52 +2220,321 @@ $(document).ready(function() {
         }
     }
 
-    function requestRoles(reason = 'manual'){
-        if (rolesLoadInFlight) {
-            console.debug('[Prompter][roles][request] already in flight', { seq: rolesLoadActiveSeq, reason });
-            return;
+    function applyProjectName(nameCandidate, meta = {}) {
+        const raw = typeof nameCandidate === 'string' ? nameCandidate : '';
+        const normalized = raw.trim();
+        const previous = currentProjectName || '';
+        if (previous === normalized) {
+            return { changed: false, value: normalized };
         }
-        rolesLoadInFlight = true;
-        rolesLoadRequestTs = performance.now();
-        rolesLoadActiveSeq = ++rolesLoadSeq;
-        rolesLoadReason = reason;
-        console.info('[Prompter][roles][request] start', { seq: rolesLoadActiveSeq, reason });
-        try {
-            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_ROLES');
-            setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 60);
-            // backend после обработки выставит roles_json_b64 -> запросим его чуть позже
-            setTimeout(()=> { wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/roles_json_b64'); }, 260);
-        } catch(err){
-            console.error('[Prompter][roles] requestRoles failed', err);
-            finalizeRolesLoad('error', { error: err.message, reason });
-            return;
+        currentProjectName = normalized;
+        renderTitle();
+        if (normalized) {
+            console.debug('[Prompter][projectData] project name applied', { name: normalized, source: meta.source || 'unknown' });
+        } else {
+            console.debug('[Prompter][projectData] project name cleared', { source: meta.source || 'unknown' });
         }
-        if (rolesLoadTimeoutId) {
-            clearTimeout(rolesLoadTimeoutId);
-            rolesLoadTimeoutId = null;
-        }
-        rolesLoadTimeoutId = setTimeout(() => {
-            if (rolesLoadInFlight && rolesLoadActiveSeq === rolesLoadSeq) {
-                finalizeRolesLoad('timeout', { reason: 'no_backend_response', seq: rolesLoadActiveSeq });
-            }
-        }, 2000);
+        return { changed: true, value: normalized };
     }
 
-    function ensureRolesLoaded(options = {}) {
+    function applyProjectFpsPayload(payload, meta = {}) {
+        if (payload == null) {
+            console.debug('[Prompter][projectData] fps payload missing', { source: meta.source || 'unknown' });
+            return { applied: false, reason: 'empty' };
+        }
+        let numeric = NaN;
+        let raw = '';
+        let dropFrame;
+        if (typeof payload === 'number') {
+            numeric = payload;
+            raw = String(payload);
+        } else if (typeof payload === 'string') {
+            raw = payload;
+            const parsed = Number(payload);
+            if (Number.isFinite(parsed)) {
+                numeric = parsed;
+            }
+        } else if (typeof payload === 'object') {
+            if (typeof payload.normalized === 'number') {
+                numeric = payload.normalized;
+            } else if (typeof payload.value === 'number') {
+                numeric = payload.value;
+            } else if (typeof payload.value === 'string') {
+                const parsed = Number(payload.value);
+                if (Number.isFinite(parsed)) {
+                    numeric = parsed;
+                }
+            }
+            if (typeof payload.dropFrame === 'boolean') {
+                dropFrame = payload.dropFrame;
+            } else if (typeof payload.drop_frame === 'boolean') {
+                dropFrame = payload.drop_frame;
+            }
+            if (typeof payload.raw === 'string') {
+                raw = payload.raw;
+            } else if (typeof payload.raw === 'number') {
+                raw = String(payload.raw);
+            }
+        }
+        if (!Number.isFinite(numeric)) {
+            console.warn('[Prompter][projectData] fps payload without numeric value', { payload, source: meta.source || 'unknown' });
+            return { applied: false, reason: 'invalid_numeric' };
+        }
+        setProjectFps(numeric, {
+            source: meta.source || 'project_data',
+            dropFrame,
+            raw,
+            reason: meta.reason || 'project_data'
+        });
+        return { applied: true, value: numeric, dropFrame };
+    }
+
+    function applyRolesPayload(payload, meta = {}) {
+        const baseSource = meta.source || 'project_data';
+        let payloadSource = baseSource;
+        let encoding = '';
+        if (payload == null) {
+            console.debug('[Prompter][projectData] roles payload missing', { source: baseSource });
+            integrateLoadedRoles('', { ...meta, source: baseSource, reason: 'empty_payload' });
+            return { applied: false, reason: 'empty' };
+        }
+        let jsonText = '';
+        if (typeof payload === 'string') {
+            jsonText = payload;
+        } else if (typeof payload === 'object') {
+            if (typeof payload.encoding === 'string') {
+                encoding = payload.encoding.toLowerCase().trim();
+            }
+            if (typeof payload.json === 'string') {
+                jsonText = payload.json;
+            } else if (typeof payload.data === 'string') {
+                jsonText = payload.data;
+            }
+            if (typeof payload.source === 'string' && payload.source.trim()) {
+                payloadSource = payload.source.trim();
+            }
+        }
+        if (!jsonText || !jsonText.trim()) {
+            integrateLoadedRoles('', { ...meta, source: payloadSource, reason: 'empty_payload' });
+            return { applied: false, reason: 'empty_json' };
+        }
+        if (encoding === 'base64url' || encoding === 'base64') {
+            const decoded = rolesFromBase64Url(jsonText);
+            if (!decoded) {
+                console.warn('[Prompter][projectData] failed to decode roles payload', { encoding, source: payloadSource });
+                integrateLoadedRoles('', { ...meta, source: payloadSource, reason: 'decode_failed' });
+                return { applied: false, reason: 'decode_failed' };
+            }
+            jsonText = decoded;
+        }
+        integrateLoadedRoles(jsonText, { ...meta, source: payloadSource, encoding: encoding || 'plain' });
+        return { applied: true, encoding: encoding || 'plain' };
+    }
+
+    function applyProjectDataSnapshot(snapshot, meta = {}) {
+        if (!snapshot || typeof snapshot !== 'object') {
+            console.warn('[Prompter][projectData] invalid snapshot', { snapshot, meta });
+            return { status: 'invalid' };
+        }
+        const applied = {
+            projectName: false,
+            tracks: false,
+            tracksCount: 0,
+            fps: false,
+            roles: false
+        };
+        if (Object.prototype.hasOwnProperty.call(snapshot, 'project_name')) {
+            const nameResult = applyProjectName(snapshot.project_name, meta);
+            applied.projectName = nameResult.changed;
+        }
+        if (Object.prototype.hasOwnProperty.call(snapshot, 'tracks')) {
+            if (Array.isArray(snapshot.tracks)) {
+                applyTracks(snapshot.tracks, meta);
+                applied.tracks = true;
+                applied.tracksCount = snapshot.tracks.length;
+            } else if (snapshot.tracks === null) {
+                applyTracks([], meta);
+                applied.tracks = true;
+                applied.tracksCount = 0;
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(snapshot, 'fps')) {
+            const fpsResult = applyProjectFpsPayload(snapshot.fps, meta);
+            applied.fps = fpsResult.applied;
+        }
+        if (Object.prototype.hasOwnProperty.call(snapshot, 'roles')) {
+            const rolesResult = applyRolesPayload(snapshot.roles, meta);
+            applied.roles = rolesResult.applied;
+        }
+        projectDataCache = snapshot;
+        return { status: 'applied', applied };
+    }
+
+    async function getProjectData(reason = 'manual', options = {}) {
+        const opts = {
+            allowCache: true,
+            forceReload: false,
+            clearCache: false,
+            ...options
+        };
+        if (opts.clearCache) {
+            clearProjectDataCache();
+        }
+        const startedAt = performance.now();
+        const cachedSource = opts.allowCache ? (projectDataCache || loadProjectDataCache()) : null;
+        if (!opts.forceReload && cachedSource) {
+            const applyResult = applyProjectDataSnapshot(cachedSource, { source: 'cache', reason });
+            statusIndicator.text('Данные проекта загружены из кэша.');
+            const result = {
+                status: 'cache',
+                applied: applyResult.applied,
+                data: cachedSource,
+                durationMs: Math.round(performance.now() - startedAt)
+            };
+            console.debug('[Prompter][projectData] served from cache', { reason, durationMs: result.durationMs, applied: result.applied });
+            return result;
+        }
+        if (projectDataInFlight) {
+            console.debug('[Prompter][projectData] awaiting in-flight request', { reason });
+            return projectDataInFlight;
+        }
+        if (isEmuMode()) {
+            const sp = new URLSearchParams(window.location.search);
+            let subtitlePath = normalizeReferencePath(sp.get('subtitle'), 'emu/subtitles');
+            if (subtitlePath.toLowerCase().endsWith('.json')) subtitlePath = subtitlePath.slice(0, -5);
+            const datasetDir = subtitlePath.includes('/') ? subtitlePath.slice(0, subtitlePath.lastIndexOf('/')) : '';
+            let projectPath = normalizeReferencePath(sp.get('emuproject'), datasetDir ? `${datasetDir}/project-data` : 'emu/project-data');
+            if (projectPath.toLowerCase().endsWith('.json')) projectPath = projectPath.slice(0, -5);
+            const projectUrl = `reference/${projectPath}.json?_ts=${Date.now()}`;
+            try {
+                const projectResponse = await fetch(projectUrl);
+                if (projectResponse.ok) {
+                    const snapshot = await projectResponse.json();
+                    storeProjectDataCache(snapshot);
+                    const applyResult = applyProjectDataSnapshot(snapshot, { source: 'emu_reference_reload', reason: 'emu:project_reload' });
+                    statusIndicator.text('Эмуляция: данные проекта обновлены.');
+                    return {
+                        status: 'emu_reference',
+                        applied: applyResult.applied,
+                        data: snapshot,
+                        durationMs: Math.round(performance.now() - startedAt)
+                    };
+                }
+                console.warn('[Prompter][projectData][emu] reference snapshot unavailable', { status: projectResponse.status, url: projectUrl });
+            } catch (emuErr) {
+                console.error('[Prompter][projectData][emu] snapshot fetch failed', emuErr);
+            }
+            const fallback = {
+                project_name: 'EMU Project',
+                tracks: [{ id: 0, name: 'Subtitles' }],
+                fps: { value: DEFAULT_PROJECT_FPS, raw: String(DEFAULT_PROJECT_FPS), dropFrame: false },
+                roles: null
+            };
+            storeProjectDataCache(fallback);
+            const applyResult = applyProjectDataSnapshot(fallback, { source: 'emu_fallback', reason: 'emu:project' });
+            statusIndicator.text('Эмуляция: данные проекта обновлены.');
+            return {
+                status: 'emu_fallback',
+                applied: applyResult.applied,
+                data: fallback,
+                durationMs: Math.round(performance.now() - startedAt)
+            };
+        }
+
+        statusIndicator.text('Обновляем данные проекта...');
+        const pendingPromise = (async () => {
+            const deadline = startedAt + PROJECT_DATA_TIMEOUT_MS;
+            try {
+                wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
+                setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
+
+                let statusValue = 'PENDING';
+                while (true) {
+                    if (performance.now() > deadline) {
+                        throw new Error('timeout waiting project data status');
+                    }
+                    try {
+                        const statusRaw = await requestExtStateValue(PROJECT_DATA_STATUS_KEY, Math.min(400, PROJECT_DATA_POLL_INTERVAL_MS + 200));
+                        statusValue = (statusRaw || '').trim();
+                    } catch (statusErr) {
+                        console.debug('[Prompter][projectData] status poll failed, retrying', statusErr.message);
+                        statusValue = 'PENDING';
+                    }
+                    if (!statusValue || /pending/i.test(statusValue)) {
+                        await delay(PROJECT_DATA_POLL_INTERVAL_MS);
+                        continue;
+                    }
+                    break;
+                }
+
+                if (!/^ok$/i.test(statusValue)) {
+                    throw new Error(`project data status: ${statusValue}`);
+                }
+
+                let jsonRaw = await requestExtStateValue(PROJECT_DATA_JSON_KEY, 800);
+                if ((jsonRaw || '').trim() === '__CHUNKED__') {
+                    console.debug('[Prompter][projectData] chunked payload detected');
+                    jsonRaw = await fetchProjectDataChunks();
+                }
+                if (!jsonRaw || !jsonRaw.trim()) {
+                    throw new Error('empty project data payload');
+                }
+
+                let parsed;
+                try {
+                    parsed = JSON.parse(jsonRaw);
+                } catch (parseErr) {
+                    throw new Error(`invalid project data json: ${parseErr.message}`);
+                }
+
+                storeProjectDataCache(parsed);
+                const applyResult = applyProjectDataSnapshot(parsed, { source: 'backend', reason });
+                statusIndicator.text('Данные проекта обновлены.');
+                const result = {
+                    status: 'ok',
+                    applied: applyResult.applied,
+                    data: parsed,
+                    durationMs: Math.round(performance.now() - startedAt)
+                };
+                console.info('[Prompter][projectData] backend update', {
+                    reason,
+                    durationMs: result.durationMs,
+                    tracks: Array.isArray(parsed && parsed.tracks) ? parsed.tracks.length : undefined,
+                    hasRoles: !!(parsed && parsed.roles)
+                });
+                return result;
+            } catch (err) {
+                statusIndicator.text('Не удалось обновить данные проекта.');
+                console.error('[Prompter][projectData] failed', err);
+                throw err;
+            }
+        })();
+
+        projectDataInFlight = pendingPromise.finally(() => {
+            projectDataInFlight = null;
+        });
+        return projectDataInFlight;
+    }
+
+    async function ensureRolesLoaded(options = {}) {
         const reason = options.reason || 'unspecified';
         if (rolesLoaded) {
-            const info = { status: 'cached', seq: rolesLoadActiveSeq, reason, durationMs: 0 };
-            console.debug('[Prompter][roles][ensure] using cached roles', info);
-            return Promise.resolve(info);
+            const cachedInfo = { status: 'cached', reason, durationMs: 0 };
+            console.debug('[Prompter][roles][ensure] using cached roles', cachedInfo);
+            return cachedInfo;
         }
-        return new Promise(resolve => {
-            rolesLoadResolvers.push(resolve);
-            if (!rolesLoadInFlight) {
-                requestRoles(reason);
-            } else {
-                console.debug('[Prompter][roles][ensure] awaiting active load', { seq: rolesLoadActiveSeq, reason });
+        const startedAt = performance.now();
+        try {
+            const result = await getProjectData(`roles:${reason}`, { allowCache: true });
+            const durationMs = Math.round(performance.now() - startedAt);
+            if (rolesLoaded) {
+                return { status: 'loaded', reason, durationMs, source: result && result.status ? result.status : 'unknown' };
             }
-        });
+            return { status: 'empty', reason, durationMs, source: result && result.status ? result.status : 'unknown' };
+        } catch (err) {
+            console.error('[Prompter][roles][ensure] failed', err);
+            return { status: 'error', reason, error: err.message };
+        }
     }
 
     function integrateLoadedRoles(jsonText, meta = {}){
@@ -2239,57 +2611,6 @@ $(document).ready(function() {
         }
     }
     
-    function beginTrackFetch() {
-        trackFetchAttempts = 0;
-        trackFetchInProgress = true;
-        if (trackFetchTimerId) {
-            clearTimeout(trackFetchTimerId);
-            trackFetchTimerId = null;
-        }
-    }
-
-    function finalizeTrackFetch() {
-        trackFetchInProgress = false;
-        trackFetchAttempts = 0;
-        if (trackFetchTimerId) {
-            clearTimeout(trackFetchTimerId);
-            trackFetchTimerId = null;
-        }
-    }
-
-    function requestTrackExtstate(delayMs = TRACK_FETCH_INTERVAL_MS) {
-        if (!trackFetchInProgress) return;
-        if (trackFetchTimerId) {
-            clearTimeout(trackFetchTimerId);
-            trackFetchTimerId = null;
-        }
-        trackFetchTimerId = setTimeout(() => {
-            if (!trackFetchInProgress) return;
-            console.debug('[Prompter][tracks] poll extstate', { attempt: trackFetchAttempts + 1 });
-            wwr_req(REASCRIPT_ACTION_ID);
-            setTimeout(() => {
-                if (!trackFetchInProgress) return;
-                wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/response_tracks');
-            }, 40);
-        }, delayMs);
-    }
-
-    function scheduleTrackFetchRetry(reason) {
-        if (!trackFetchInProgress) return false;
-        if (trackFetchAttempts >= TRACK_FETCH_MAX_ATTEMPTS) {
-            finalizeTrackFetch();
-            statusIndicator.text('Не удалось получить список дорожек.');
-            console.warn('[Prompter][tracks] giving up', { reason });
-            return false;
-        }
-        trackFetchAttempts += 1;
-        statusIndicator.text('Список дорожек не готов, повторяем...');
-        console.debug('[Prompter][tracks] retry', { attempt: trackFetchAttempts, reason });
-        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TRACKS`);
-        requestTrackExtstate(TRACK_FETCH_INTERVAL_MS);
-        return true;
-    }
-
     function initialize() {
         try {
             const t0 = performance.now();
@@ -2297,111 +2618,20 @@ $(document).ready(function() {
             statusIndicator.text('Подключение к REAPER...');
             wwr_start();
             eventBus.start();
-            requestProjectData('initialize');
+            const cachedSnapshot = loadProjectDataCache();
+            if (cachedSnapshot) {
+                applyProjectDataSnapshot(cachedSnapshot, { source: 'cache', reason: 'initialize' });
+                statusIndicator.text('Данные проекта загружены из кэша, обновляем...');
+            }
+            getProjectData('initialize', { allowCache: false, forceReload: true }).catch(err => {
+                console.error('[Prompter] failed to refresh project data on init', err);
+            });
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
             const t1 = performance.now();
             console.info('[Prompter] initialize done', { ms: Math.round(t1 - t0) });
         } catch(e) { console.error("Error in initialize:", e); }
-    }
-
-    function getProjectName(retry=0) {
-        const MAX_RETRIES = 6;
-        const BASE_DELAY = 160; // ms
-        console.debug('[Prompter][projectName] request');
-        wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_NAME');
-        setTimeout(()=> { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry*15);
-        setTimeout(()=> {
-            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_name');
-            setTimeout(()=> {
-                if(!currentProjectName && retry < MAX_RETRIES) {
-                    console.debug('[Prompter][projectName] retry', retry+1);
-                    getProjectName(retry+1);
-                }
-            }, 60 + retry*35);
-        }, BASE_DELAY + retry*70);
-    }
-
-    function requestProjectFps(retry = 0) {
-        if (isEmuMode()) {
-            setProjectFps(DEFAULT_PROJECT_FPS, { source: 'emu' });
-            return;
-        }
-        const MAX_RETRIES = 5;
-        const BASE_DELAY = 140;
-        const requestToken = ++projectFpsRequestToken;
-        const previousSource = projectFpsSource;
-        projectFpsLastRequestAt = Date.now();
-        wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_FPS');
-        setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry * 15);
-        setTimeout(() => {
-            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_fps');
-            const followUpDelay = 90 + retry * 40;
-            setTimeout(() => {
-                const newerRequestIssued = projectFpsRequestToken !== requestToken;
-                if (newerRequestIssued) return;
-                if (projectFpsSource === 'backend') return;
-                const elapsedMs = Date.now() - projectFpsLastRequestAt;
-                if (retry < MAX_RETRIES) {
-                    console.debug('[Prompter][fps] retry request', retry + 1, { requestToken, elapsedMs });
-                    requestProjectFps(retry + 1);
-                    return;
-                }
-                console.warn('[Prompter][fps] fallback to default FPS after retries', { requestToken, previousSource, elapsedMs, retryCount: retry });
-                setProjectFps(DEFAULT_PROJECT_FPS, {
-                    source: 'fallback',
-                    reason: 'backend_timeout',
-                    requestToken,
-                    elapsedMs,
-                    retryCount: retry,
-                    raw: 'fallback:timeout',
-                    forceEmit: projectFpsSource !== 'fallback' && previousSource !== 'fallback'
-                });
-            }, followUpDelay);
-        }, BASE_DELAY + retry * 60);
-    }
-
-    function requestProjectData(reason = 'unknown', options = {}) {
-        const plan = {
-            tracks: true,
-            projectName: true,
-            roles: true,
-            fps: true,
-            ...options
-        };
-        console.info('[Prompter][projectData] start', { reason, plan });
-        if (plan.tracks) {
-            console.debug('[Prompter][projectData] request tracks', { reason });
-            getTracks();
-        }
-        if (plan.projectName) {
-            console.debug('[Prompter][projectData] request project_name', { reason });
-            getProjectName();
-        }
-        if (plan.fps) {
-            console.debug('[Prompter][projectData] request project_fps', { reason });
-            requestProjectFps();
-        }
-        if (plan.roles) {
-            console.debug('[Prompter][projectData] request roles', { reason });
-            requestRoles(plan.rolesReason || reason || 'project_data');
-        }
-    }
-
-    function getTracks() {
-        if (isEmuMode()) {
-            // In emu, just refresh mock tracks list
-            console.info('[Prompter][EMU] getTracks mock');
-            statusIndicator.text('Эмуляция: загрузка списка дорожек...');
-            updateTrackSelector([{ id: 0, name: 'Subtitles' }]);
-            return;
-        }
-        statusIndicator.text('Запрос списка дорожек...');
-        beginTrackFetch();
-        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_TRACKS`);
-        setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
-        requestTrackExtstate(250);
     }
 
     async function getText(trackId) {
@@ -2492,137 +2722,80 @@ $(document).ready(function() {
             if (!line.trim()) continue;
             const parts = line.split('\t');
             if (parts[0] === 'EXTSTATE' && parts[1] === 'PROMPTER_WEBUI') {
-                if (parts[2] === 'response_tracks') handleTracksResponse(parts.slice(3).join('\t'));
-                else if (parts[2] === 'project_name') {
-                    currentProjectName = parts.slice(3).join('\t');
-                    updateTitle();
-                }
-                else if (parts[2] === 'project_fps') {
-                    const fpsRaw = parts.slice(3).join('\t');
-                    const rawPayload = typeof fpsRaw === 'string' ? fpsRaw.trim() : '';
-                    let descriptor = parseFpsDescriptor(rawPayload);
-                    if (rawPayload.includes('|')) {
-                        const partsRaw = rawPayload.split('|');
-                        const flag = partsRaw[1] || '';
-                        if (flag.toUpperCase() === 'DF') {
-                            descriptor.dropFrame = true;
-                        } else if (flag.toUpperCase() === 'ND' || flag.toUpperCase() === 'NDF') {
-                            descriptor.dropFrame = false;
-                        }
-                        if (!descriptor.raw && partsRaw[0]) {
-                            descriptor.raw = partsRaw[0];
-                        }
-                        if (!Number.isFinite(descriptor.numeric) || descriptor.numeric <= 0) {
-                            const numericDescriptor = parseFpsDescriptor(partsRaw[0]);
-                            if (Number.isFinite(numericDescriptor.numeric)) {
-                                descriptor.numeric = numericDescriptor.numeric;
-                            }
-                            if (descriptor.dropFrame === null && numericDescriptor.dropFrame !== null) {
-                                descriptor.dropFrame = numericDescriptor.dropFrame;
-                            }
-                        }
-                    }
-                    if (Number.isFinite(descriptor.numeric) && descriptor.numeric > 0) {
-                        setProjectFps(descriptor.numeric, {
-                            source: 'backend',
-                            dropFrame: descriptor.dropFrame === null ? undefined : descriptor.dropFrame,
-                            raw: rawPayload
-                        });
-                    } else {
-                        console.warn('[Prompter][fps] invalid backend payload', { rawPayload });
-                    }
-                }
-                else if (parts[2] === 'roles_json_b64') {
-                    const payload = parts.slice(3).join('\t');
-                    const encodedLength = payload ? payload.length : 0;
-                    console.debug('[Prompter][roles][onreply] received roles_json_b64', { encodedLength });
-                    const decoded = rolesFromBase64Url(payload);
-                    integrateLoadedRoles(decoded, {
-                        encodedLength,
-                        decodedLength: decoded ? decoded.length : 0
-                    });
-                } else if (parts[2] === 'roles_status') {
+                const key = parts[2];
+                const value = parts.slice(3).join('\t');
+                resolveExtStateWaiter(key, value);
+                if (key === 'roles_status') {
                     const status = parts.slice(3).join('\t');
                     handleRolesStatusMessage(status);
-                } else if (parts[2] === 'event_queue') {
-                    const payload = parts.slice(3).join('\t');
-                    eventBus.ingestBackendQueue(payload);
+                } else if (key === 'event_queue') {
+                    eventBus.ingestBackendQueue(value);
                 }
             } else if (parts[0] === 'TRANSPORT') handleTransportResponse(parts);
         }
     };
 
-    function handleTracksResponse(jsonData) {
-        if (!jsonData) {
-            if (scheduleTrackFetchRetry('empty_payload')) return;
-            return;
-        }
-        const payload = typeof jsonData === 'string' ? jsonData.trim() : '';
-        if (!payload || payload === 'nil') {
-            if (scheduleTrackFetchRetry('not_ready')) return;
-            return;
-        }
-        try {
-            const tracks = JSON.parse(payload);
-            if (!Array.isArray(tracks)) {
-                if (scheduleTrackFetchRetry('not_array')) return;
-                statusIndicator.text('Получен некорректный список дорожек.');
-                return;
+    function applyTracks(tracks, meta = {}) {
+        const list = Array.isArray(tracks) ? tracks : [];
+        const reason = typeof meta.reason === 'string' ? meta.reason : '';
+        const skipAutoFind = reason.startsWith('roles:') || reason.startsWith('emu:');
+        const previousSelection = trackSelector.val();
+        trackSelector.empty();
+        list.forEach(track => {
+            const rawId = track && typeof track.id !== 'undefined' ? track.id : '';
+            let trackId = rawId;
+            if (typeof rawId === 'string' && rawId.trim() !== '') {
+                const parsedId = parseInt(rawId, 10);
+                if (!Number.isNaN(parsedId)) trackId = parsedId;
             }
-            finalizeTrackFetch();
-            trackSelector.empty();
-            tracks.forEach(track => {
-                const rawId = track && typeof track.id !== 'undefined' ? track.id : '';
-                let trackId = rawId;
-                if (typeof rawId === 'string' && rawId.trim() !== '') {
-                    const parsedId = parseInt(rawId, 10);
-                    if (!Number.isNaN(parsedId)) {
-                        trackId = parsedId;
-                    }
+            let labelPrefix = '';
+            if (typeof trackId === 'number' && Number.isFinite(trackId) && trackId >= 0) {
+                labelPrefix = `${trackId + 1}: `;
+            } else if (typeof rawId === 'string' && rawId.trim() !== '') {
+                labelPrefix = `${rawId}: `;
+            }
+            const trackName = typeof track.name === 'string' ? track.name : '';
+            const optionLabel = `${labelPrefix}${trackName}`;
+            trackSelector.append(`<option value="${rawId}">${optionLabel}</option>`);
+        });
+
+        let selectionRestored = false;
+        if (previousSelection !== undefined && previousSelection !== null && previousSelection !== '') {
+            trackSelector.val(String(previousSelection));
+            const restoredValue = trackSelector.val();
+            selectionRestored = restoredValue !== null && String(restoredValue) === String(previousSelection);
+        }
+
+        if (list.length > 0) {
+            statusIndicator.text('Список дорожек загружен.');
+            if (skipAutoFind) {
+                if (!selectionRestored && !trackSelector.val()) {
+                    trackSelector.find('option:first').prop('selected', true);
                 }
-
-                let labelPrefix = '';
-                if (typeof trackId === 'number' && Number.isFinite(trackId) && trackId >= 0) {
-                    labelPrefix = `${trackId + 1}: `;
-                } else if (typeof rawId === 'string' && rawId.trim() !== '') {
-                    labelPrefix = `${rawId}: `;
-                }
-
-                const trackName = typeof track.name === 'string' ? track.name : '';
-                const optionLabel = `${labelPrefix}${trackName}`;
-
-                trackSelector.append(`<option value="${rawId}">${optionLabel}</option>`);
-            });
-
-            if (tracks && tracks.length > 0) {
-                statusIndicator.text('Список дорожек загружен.');
-                autoFindSubtitleTrack();
+                console.debug('[Prompter][tracks] auto selection skipped', { reason, restored: selectionRestored, options: trackSelector.find('option').length });
             } else {
-                statusIndicator.text('Дорожки не найдены.');
+                autoFindSubtitleTrack();
             }
-
-            // Fail-safe: если сразу не загрузились субтитры, повторим попытку
-            if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
-                setTimeout(() => {
-                    if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
-                        console.debug('[Prompter][tracks] retry initial text load');
-                        if (!settings.autoFindTrack) {
-                            trackSelector.find('option:first').prop('selected', true);
-                            getText(trackSelector.val());
-                        } else {
-                            autoFindSubtitleTrack();
-                        }
-                    }
-                }, 800);
-            }
-            console.debug('[Prompter] tracks parsed', { count: Array.isArray(tracks) ? tracks.length : 0 });
-        } catch (e) {
-            const retryPlanned = scheduleTrackFetchRetry('parse_error');
-            console.error('[Prompter][tracks] parse failed', e);
-            if (!retryPlanned) {
-                statusIndicator.text('Ошибка обработки списка дорожек.');
-            }
+        } else {
+            statusIndicator.text('Дорожки не найдены.');
         }
+
+        if (!skipAutoFind && (!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+            setTimeout(() => {
+                if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+                    console.debug('[Prompter][tracks] retry initial text load');
+                    if (!settings.autoFindTrack) {
+                        trackSelector.find('option:first').prop('selected', true);
+                        getText(trackSelector.val());
+                    } else {
+                        autoFindSubtitleTrack();
+                    }
+                }
+            }, 800);
+        } else if (skipAutoFind) {
+            console.debug('[Prompter][tracks] retry initial text load skipped', { reason, restored: selectionRestored });
+        }
+        console.debug('[Prompter] tracks applied', { count: list.length });
     }
 
     function renderLoop() {
@@ -2664,6 +2837,12 @@ $(document).ready(function() {
             if (Number.isFinite(st)) return st; // 1 play, 0 stop, 5 rec
         } catch (_) {}
         return 1;
+    }
+    function normalizeReferencePath(value, fallback) {
+        const raw = (typeof value === 'string' && value.trim() !== '') ? value.trim() : fallback;
+        const normalized = raw.replace(/\\/g, '/').replace(/^\/+/, '');
+        const safeParts = normalized.split('/').filter(part => part && part !== '.' && part !== '..');
+        return safeParts.join('/');
     }
     let transportEmuTimer = null;
     function startTransportEmu(intervalMs = 50) {
@@ -2751,26 +2930,60 @@ $(document).ready(function() {
                     console.debug('[EMU] settings.json not found', { status: rs.status, ms: Math.round(s1 - s0) });
                 }
             } catch (e) { console.debug('[EMU] settings.json not loaded', e); }
-            // Tracks + project (mock)
-            const tracks = [{ id: 0, name: 'Subtitles' }];
-            updateTrackSelector(tracks);
-            currentProjectName = currentProjectName || 'EMU Project';
-            updateTitle();
-            // Subtitles
             const sp = new URLSearchParams(window.location.search);
-            const subtitleName = sp.get('subtitle') || 'subtitles';
-            const url = `reference/${subtitleName}.json?_ts=${Date.now()}`;
+            let subtitlePath = normalizeReferencePath(sp.get('subtitle'), 'emu/subtitles');
+            if (subtitlePath.toLowerCase().endsWith('.json')) subtitlePath = subtitlePath.slice(0, -5);
+            const subtitleDatasetDir = subtitlePath.includes('/') ? subtitlePath.slice(0, subtitlePath.lastIndexOf('/')) : '';
+            let projectPath = normalizeReferencePath(sp.get('emuproject'), subtitleDatasetDir ? `${subtitleDatasetDir}/project-data` : 'emu/project-data');
+            if (projectPath.toLowerCase().endsWith('.json')) projectPath = projectPath.slice(0, -5);
+            const projectUrl = `reference/${projectPath}.json?_ts=${Date.now()}`;
+            let projectApplied = false;
+            const p0 = performance.now();
+            try {
+                console.info('[EMU] loading project data', { url: projectUrl });
+                const projectResp = await fetch(projectUrl);
+                if (projectResp.ok) {
+                    const projectSnapshot = await projectResp.json();
+                    storeProjectDataCache(projectSnapshot);
+                    const applyInfo = applyProjectDataSnapshot(projectSnapshot, { source: 'emu_reference', reason: 'emu:project' });
+                    statusIndicator.text('(EMU) Данные проекта загружены.');
+                    console.info('[EMU] project data applied', {
+                        ms: Math.round(performance.now() - p0),
+                        tracks: applyInfo.applied.tracksCount,
+                        project: projectSnapshot.project_name || 'n/a'
+                    });
+                    projectApplied = true;
+                } else {
+                    console.warn('[EMU] project data not found', { status: projectResp.status, url: projectUrl });
+                }
+            } catch (projectErr) {
+                console.error('[EMU] project data load failed', projectErr);
+            }
+
+            if (!projectApplied) {
+                const fallbackSnapshot = {
+                    project_name: 'EMU Project',
+                    tracks: [{ id: 0, name: 'Subtitles' }],
+                    fps: { value: DEFAULT_PROJECT_FPS, raw: String(DEFAULT_PROJECT_FPS), dropFrame: false },
+                    roles: null
+                };
+                storeProjectDataCache(fallbackSnapshot);
+                applyProjectDataSnapshot(fallbackSnapshot, { source: 'emu_fallback', reason: 'emu:project_fallback' });
+                statusIndicator.text('(EMU) Используется базовый набор данных проекта.');
+            }
+
+            const subtitleUrl = `reference/${subtitlePath}.json?_ts=${Date.now()}`;
             const f0 = performance.now();
-            console.info('[EMU] loading subtitles', { url });
+            console.info('[EMU] loading subtitles', { url: subtitleUrl });
             statusIndicator.text('(EMU) Загрузка субтитров...');
-            const resp = await fetch(url);
+            const resp = await fetch(subtitleUrl);
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const data = await resp.json();
             await handleTextResponse(data);
             statusIndicator.text(`(EMU) Текст получен, всего ${Array.isArray(data) ? data.length : 0} реплик`);
             const f1 = performance.now();
             const T1 = performance.now();
-            console.info('[EMU] subtitles loaded + rendered', { fetchAndRenderMs: Math.round(f1 - f0), totalMs: Math.round(T1 - T0), count: Array.isArray(data) ? data.length : 0 });
+            console.info('[EMU] subtitles loaded + rendered', { fetchAndRenderMs: Math.round(f1 - f0), totalMs: Math.round(T1 - T0), count: Array.isArray(data) ? data.length : 0, url: subtitleUrl });
         } catch (err) {
             console.error('[EMU] loadEmuData failed', err);
             statusIndicator.text('Ошибка эмуляции данных');
@@ -3752,9 +3965,13 @@ $(document).ready(function() {
     trackSelector.on('change', function() { getText($(this).val()); });
     refreshButton.on('click', () => {
         invalidateRolesCache('refresh_button');
-        currentProjectName = '';
-        updateTitle();
-        requestProjectData('refresh_button');
+    clearProjectDataCache();
+    currentProjectName = '';
+    renderTitle();
+        statusIndicator.text('Обновление данных проекта...');
+        getProjectData('refresh_button', { allowCache: false, forceReload: true }).catch(err => {
+            console.error('[Prompter] refresh project data failed', err);
+        });
     });
     $('#settings-button').on('click', function() {
         // Refresh form fields from authoritative settings before showing

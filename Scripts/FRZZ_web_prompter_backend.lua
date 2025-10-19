@@ -2,28 +2,79 @@
 
 local sep = package.config:sub(1,1)
 
+local JSON_NULL = {}
+
+local PROJECT_DATA_SECTION = "PROMPTER_WEBUI"
+-- Chunking guards extstate length limits when project payload grows large.
+local PROJECT_DATA_JSON_KEY = "getProjectDataJson"
+local PROJECT_DATA_STATUS_KEY = "getProjectDataStatus"
+local PROJECT_DATA_CHUNK_COUNT_KEY = "getProjectDataJson_chunk_count"
+local PROJECT_DATA_CHUNK_KEY_PREFIX = "getProjectDataJson_chunk_"
+local PROJECT_DATA_CHUNK_SIZE = 1200
+local PROJECT_DATA_CHUNK_THRESHOLD = 3600
+
+local function json_escape_string(str)
+  local replacements = {
+    ['"'] = '\\"',
+    ['\\'] = '\\\\',
+    [string.char(8)] = '\\b',
+    [string.char(12)] = '\\f',
+    ['\n'] = '\\n',
+    ['\r'] = '\\r',
+    ['\t'] = '\\t'
+  }
+  return str:gsub('[%z\1-\31\\"]', function(char)
+    local repl = replacements[char]
+    if repl then return repl end
+    return string.format('\\u%04X', char:byte())
+  end)
+end
+
 local function json_encode(val)
+  if val == JSON_NULL then
+    return "null"
+  end
   local json_type = type(val)
   if json_type == "string" then
-    return '"' .. val:gsub('[\\"]', {['\\'] = '\\\\', ['"'] = '\\"'}):gsub('[\b]', '\\b'):gsub('[\f]', '\\f'):gsub('[\n]', '\\n'):gsub('[\r]', '\\r'):gsub('[\t]', '\\t') .. '"'
-  elseif json_type == "number" or json_type == "boolean" then
-    return tostring(val)
+    return '"' .. json_escape_string(val) .. '"'
+  elseif json_type == "number" then
+    if val ~= val or val == math.huge or val == -math.huge then
+      return "null"
+    end
+    return string.format('%.14g', val)
+  elseif json_type == "boolean" then
+    return val and "true" or "false"
   elseif json_type == "table" then
-    local is_array = (val[1] ~= nil)
+    local is_array = true
+    local max_index = 0
+    for k, _ in pairs(val) do
+      if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+        is_array = false
+        break
+      end
+      if k > max_index then max_index = k end
+    end
     local parts = {}
     if is_array then
-      for i = 1, #val do table.insert(parts, json_encode(val[i])) end
+      for i = 1, max_index do
+        local encoded_item, encode_err = json_encode(val[i])
+        if not encoded_item then return nil, encode_err end
+        parts[#parts + 1] = encoded_item
+      end
       return "[" .. table.concat(parts, ",") .. "]"
-    else -- is object
+    else
       for k, v in pairs(val) do
         if type(k) ~= "string" then return nil, "table key must be a string" end
-        table.insert(parts, json_encode(k) .. ":" .. json_encode(v))
+        local encoded_value, encode_err = json_encode(v)
+        if not encoded_value then return nil, encode_err end
+        parts[#parts + 1] = '"' .. json_escape_string(k) .. '":' .. encoded_value
       end
       return "{" .. table.concat(parts, ",") .. "}"
     end
-  elseif json_type == "nil" then return "null"
-  else return nil, "unsupported type"
+  elseif json_type == "nil" then
+    return "null"
   end
+  return nil, "unsupported type"
 end
 
 -- Base64url encode (no padding) helper
@@ -59,6 +110,46 @@ local function b64url_encode(data)
   return out
 end
 
+local function clear_project_data_chunks()
+  local count_str = reaper.GetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_COUNT_KEY)
+  local count = tonumber(count_str) or 0
+  if count > 0 then
+    for i = 0, count - 1 do
+      local key = PROJECT_DATA_CHUNK_KEY_PREFIX .. i
+      reaper.DeleteExtState(PROJECT_DATA_SECTION, key, true)
+    end
+  end
+  reaper.DeleteExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_COUNT_KEY, true)
+end
+
+local function store_project_data_payload(encoded)
+  if not encoded or encoded == '' then
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_JSON_KEY, '', false)
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_COUNT_KEY, '0', false)
+    clear_project_data_chunks()
+    return
+  end
+
+  clear_project_data_chunks()
+
+  if #encoded <= PROJECT_DATA_CHUNK_THRESHOLD then
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_JSON_KEY, encoded, false)
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_COUNT_KEY, '0', false)
+    return
+  end
+
+  local total_chunks = math.ceil(#encoded / PROJECT_DATA_CHUNK_SIZE)
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_JSON_KEY, '__CHUNKED__', false)
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_COUNT_KEY, tostring(total_chunks), false)
+
+  local start_idx = 1
+  for i = 0, total_chunks - 1 do
+    local chunk = encoded:sub(start_idx, start_idx + PROJECT_DATA_CHUNK_SIZE - 1)
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_CHUNK_KEY_PREFIX .. i, chunk or '', false)
+    start_idx = start_idx + PROJECT_DATA_CHUNK_SIZE
+  end
+end
+
 -- Resolve current project full path and base name
 local function get_project_dir_and_base()
   local proj, projfn = reaper.EnumProjects(-1)
@@ -67,6 +158,126 @@ local function get_project_dir_and_base()
   if not file or not dir then return nil, nil end
   local base = file:gsub("%.[Rr][Pp][Pp]$", "")
   return dir, base
+end
+
+local function collect_tracks()
+  local tracks_table = {}
+  local track_count = reaper.CountTracks(0)
+  for i = 0, track_count - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+      local _, track_name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+      table.insert(tracks_table, { id = i, name = track_name })
+    end
+  end
+  return tracks_table
+end
+
+local function collect_project_name()
+  local proj_name_full = reaper.GetProjectName(0)
+  if not proj_name_full or proj_name_full == '' then
+    return nil
+  end
+  return proj_name_full:gsub("%.[Rr][Pp][Pp]$", "")
+end
+
+local function collect_project_fps()
+  local proj = select(1, reaper.EnumProjects(-1))
+  if not proj then
+    return nil
+  end
+  local fps, dropFrame = reaper.TimeMap_curFrameRate(proj)
+  if (not fps) or fps <= 0 then
+    fps = reaper.GetSetProjectInfo(proj, "projvideofps", 0, false)
+  end
+  if not fps or fps <= 0 then
+    return nil
+  end
+  if dropFrame == nil then dropFrame = false end
+  local payload = string.format("%.6f", fps)
+  payload = payload .. (dropFrame and "|DF" or "|ND")
+  return {
+    value = fps,
+    normalized = fps,
+    raw = payload,
+    drop_frame = dropFrame
+  }
+end
+
+local function collect_roles_json()
+  local dir, base = get_project_dir_and_base()
+  local source = 'missing'
+  local file_path
+  if dir and base then
+    file_path = dir .. sep .. base .. "-roles.json"
+    source = 'project'
+  else
+    file_path = reaper.GetResourcePath() .. sep .. "reaper_www_root" .. sep .. "unsaved-project-roles.json"
+    source = 'unsaved_fallback'
+  end
+  local f = io.open(file_path, 'r')
+  if not f then
+    return nil, 'missing'
+  end
+  local content = f:read('*a') or ''
+  f:close()
+  return content, source
+end
+
+local function build_project_data()
+  local tracks = collect_tracks()
+  local project_name = collect_project_name()
+  local fps_info = collect_project_fps()
+  local roles_json, roles_source = collect_roles_json()
+  local project_dir, project_base = get_project_dir_and_base()
+  local roles_payload = JSON_NULL
+  if roles_json and roles_json ~= '' then
+    local encoded_roles = '__B64__' .. b64url_encode(roles_json)
+    roles_payload = {
+      source = roles_source or 'file',
+      encoding = 'base64url',
+      json = encoded_roles,
+      decoded_len = #roles_json
+    }
+  end
+  local meta = {
+    version = 1,
+    generated_at = os.time(),
+    generated_at_ms = math.floor(reaper.time_precise() * 1000 + 0.5),
+    tracks_count = #tracks,
+    roles_source = roles_source or (roles_json and "file" or "missing"),
+    drop_frame = fps_info and fps_info.drop_frame or nil,
+    has_project = project_name ~= nil,
+    project_dir = project_dir or JSON_NULL,
+    project_base = project_base or JSON_NULL
+  }
+  return {
+    version = 1,
+    project_name = project_name or JSON_NULL,
+    tracks = tracks,
+    fps = fps_info or JSON_NULL,
+    roles = roles_payload,
+    meta = meta
+  }
+end
+
+local function handle_get_project_data()
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "PENDING", false)
+  local ok, payload_or_err = pcall(build_project_data)
+  if not ok then
+    store_project_data_payload('')
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "ERROR:" .. tostring(payload_or_err), false)
+    return
+  end
+  local payload = payload_or_err
+  local encoded, encode_err = json_encode(payload)
+  if not encoded then
+    store_project_data_payload('')
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "ERROR:" .. tostring(encode_err), false)
+    return
+  end
+  store_project_data_payload(encoded)
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "OK", false)
 end
 
 local function save_roles()
@@ -142,24 +353,6 @@ local function save_roles()
   end
 end
 
-local function get_roles()
-  local dir, base = get_project_dir_and_base()
-  if not dir or not base then
-    reaper.SetExtState("PROMPTER_WEBUI", "roles_json_b64", "", false)
-    return
-  end
-  local file_path = dir .. sep .. base .. "-roles.json"
-  local f = io.open(file_path, 'r')
-  if not f then
-    reaper.SetExtState("PROMPTER_WEBUI", "roles_json_b64", "", false)
-    return
-  end
-  local content = f:read('*a')
-  f:close()
-  local b64 = '__B64__' .. b64url_encode(content)
-  reaper.SetExtState("PROMPTER_WEBUI", "roles_json_b64", b64, false)
-end
-
 -- --- НОВАЯ ФУНКЦИЯ ---
 -- Функция для декодирования URL-строки
 function url_decode(str)
@@ -169,21 +362,6 @@ function url_decode(str)
   return str
 end
 -- ---------------------
-
-function get_and_serialize_tracks()
-  local tracks_table = {}
-  local track_count = reaper.CountTracks(0)
-  for i = 0, track_count - 1 do
-    local track = reaper.GetTrack(0, i)
-    if track then
-      local _, track_name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
-      table.insert(tracks_table, {id = i, name = track_name})
-    end
-  end
-  local encoded, err = json_encode(tracks_table)
-  if not encoded then encoded = '[]' end
-  reaper.SetExtState("PROMPTER_WEBUI", "response_tracks", encoded, false)
-end
 
 function get_text_and_save_to_file(track_id_str)
   local track_id = tonumber(track_id_str)
@@ -300,43 +478,10 @@ function save_settings()
 end
 -- ---------------------------
 
-function get_project_name()
-    local proj = 0
-  local proj_name_full = reaper.GetProjectName(proj)
-    local proj_name = proj_name_full:gsub("%.[Rr][Pp][Pp]$", "")
-    reaper.SetExtState("PROMPTER_WEBUI", "project_name", proj_name, false)
-end
-
-local function get_project_fps()
-  local proj = select(1, reaper.EnumProjects(-1))
-  local fps, dropFrame = reaper.TimeMap_curFrameRate(proj)
-  if not fps or fps <= 0 then
-    fps = reaper.GetSetProjectInfo(proj, "projvideofps", 0, false)
-    if dropFrame == nil then dropFrame = false end
-  end
-  if not fps or fps <= 0 then
-    fps = 0
-  end
-  if fps and fps > 0 then
-    local payload = string.format("%.6f", fps)
-    if dropFrame == nil then
-      dropFrame = false
-    end
-    if dropFrame then
-      payload = payload .. "|DF"
-    else
-      payload = payload .. "|ND"
-    end
-    reaper.SetExtState("PROMPTER_WEBUI", "project_fps", payload, false)
-  else
-    reaper.SetExtState("PROMPTER_WEBUI", "project_fps", "", false)
-  end
-end
-
 function main()
   local command, _ = reaper.GetExtState("PROMPTER_WEBUI", "command")
-  if command == "GET_TRACKS" then
-    get_and_serialize_tracks()
+  if command == "GET_PROJECT_DATA" then
+    handle_get_project_data()
   elseif command == "GET_TEXT" then
     local param, _ = reaper.GetExtState("PROMPTER_WEBUI", "command_param")
     get_text_and_save_to_file(param)
@@ -344,12 +489,6 @@ function main()
     save_settings()
   elseif command == "SAVE_ROLES" then
     save_roles()
-  elseif command == "GET_ROLES" then
-    get_roles()
-  elseif command == "GET_PROJECT_NAME" then
-    get_project_name()
-  elseif command == "GET_PROJECT_FPS" then
-    get_project_fps()
   end
 end
 
