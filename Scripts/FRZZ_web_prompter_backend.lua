@@ -307,6 +307,32 @@ function get_project_name()
     reaper.SetExtState("PROMPTER_WEBUI", "project_name", proj_name, false)
 end
 
+local function get_project_fps()
+  local proj = select(1, reaper.EnumProjects(-1))
+  local fps, dropFrame = reaper.TimeMap_curFrameRate(proj)
+  if not fps or fps <= 0 then
+    fps = reaper.GetSetProjectInfo(proj, "projvideofps", 0, false)
+    if dropFrame == nil then dropFrame = false end
+  end
+  if not fps or fps <= 0 then
+    fps = 0
+  end
+  if fps and fps > 0 then
+    local payload = string.format("%.6f", fps)
+    if dropFrame == nil then
+      dropFrame = false
+    end
+    if dropFrame then
+      payload = payload .. "|DF"
+    else
+      payload = payload .. "|ND"
+    end
+    reaper.SetExtState("PROMPTER_WEBUI", "project_fps", payload, false)
+  else
+    reaper.SetExtState("PROMPTER_WEBUI", "project_fps", "", false)
+  end
+end
+
 function main()
   local command, _ = reaper.GetExtState("PROMPTER_WEBUI", "command")
   if command == "GET_TRACKS" then
@@ -322,6 +348,8 @@ function main()
     get_roles()
   elseif command == "GET_PROJECT_NAME" then
     get_project_name()
+  elseif command == "GET_PROJECT_FPS" then
+    get_project_fps()
   end
 end
 

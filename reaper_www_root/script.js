@@ -62,17 +62,105 @@ const PrompterTime = (() => {
         return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}.${paddedMs}`;
     }
 
+    function parseHmsFrames(input, fps) {
+        if (typeof input !== 'string') return null;
+        const trimmed = input.trim();
+        if (!trimmed) return null;
+        const match = trimmed.match(/^(\d{1,2}):(\d{2}):(\d{2})[:;](\d{2})$/);
+        if (!match) return null;
+        const [, hh, mm, ss, ff] = match;
+        const hours = Number(hh);
+        const minutes = Number(mm);
+        const seconds = Number(ss);
+        const frames = Number(ff);
+        if ([hours, minutes, seconds, frames].some(n => Number.isNaN(n))) return null;
+        if (minutes > 59 || seconds > 59) return null;
+        const safeFps = sanitizeFps(fps);
+        const totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
+        const frameMs = Math.round((frames / safeFps) * 1000);
+        return (totalSeconds * 1000) + frameMs;
+    }
+
+    function parseHmsMillis(input) {
+        if (typeof input !== 'string') return null;
+        const trimmed = input.trim();
+        if (!trimmed) return null;
+        const match = trimmed.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+        if (!match) return null;
+        const [, hh, mm, ss, frac] = match;
+        const hours = Number(hh);
+        const minutes = Number(mm);
+        const seconds = Number(ss);
+        if ([hours, minutes, seconds].some(n => Number.isNaN(n))) return null;
+        if (minutes > 59 || seconds > 59) return null;
+        let millis = 0;
+        if (typeof frac === 'string' && frac.length) {
+            const fracMs = Number(frac.padEnd(3, '0').substring(0, 3));
+            if (Number.isNaN(fracMs)) return null;
+            millis = fracMs;
+        }
+        const totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
+        return (totalSeconds * 1000) + millis;
+    }
+
+    function runSelfTests() {
+        const fpsCases = [23.976, 24, 25, 29.97];
+        const msCases = [0, 1000, 12345, 61234, 3600000 + 1234];
+        const prefix = '[PrompterTime][selftest]';
+        let failures = 0;
+        fpsCases.forEach(fps => {
+            msCases.forEach(ms => {
+                const formattedFrames = formatHmsFrames(ms, fps);
+                const normalizedFrames = formattedFrames.replace(/\.(\d{2})$/, ':$1');
+                const parsedMs = parseHmsFrames(normalizedFrames, fps);
+                if (parsedMs === null) {
+                    console.warn(prefix, 'parseHmsFrames returned null', { formattedFrames, normalizedFrames, fps });
+                    failures += 1;
+                    return;
+                }
+                const delta = Math.abs(parsedMs - ms);
+                const allowed = Math.max(1, Math.round(1000 / sanitizeFps(fps)));
+                if (delta > allowed) {
+                    console.warn(prefix, 'format/parse frames mismatch', { fps, ms, formattedFrames, parsedMs, delta, allowed });
+                    failures += 1;
+                }
+
+                const formattedMillis = formatHmsMillis(ms);
+                const parsedMillis = parseHmsMillis(formattedMillis);
+                if (parsedMillis === null) {
+                    console.warn(prefix, 'parseHmsMillis returned null', { formattedMillis });
+                    failures += 1;
+                } else if (Math.abs(parsedMillis - ms) > 1) {
+                    console.warn(prefix, 'format/parse millis mismatch', { ms, formattedMillis, parsedMillis });
+                    failures += 1;
+                }
+            });
+        });
+        if (failures === 0) {
+            console.info(prefix, 'passed', { cases: fpsCases.length * msCases.length });
+        }
+        return failures === 0;
+    }
+
     return {
         sanitizeFps,
         msToFrames,
         framesToMs,
         formatHmsFrames,
-        formatHmsMillis
+        formatHmsMillis,
+        parseHmsFrames,
+        parseHmsMillis,
+        runSelfTests
     };
 })();
 
 if (typeof window !== 'undefined') {
     window.PrompterTime = PrompterTime;
+    try {
+        PrompterTime.runSelfTests();
+    } catch (err) {
+        console.warn('[PrompterTime] self-test threw', err);
+    }
 }
 
 // --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
@@ -243,6 +331,11 @@ $(document).ready(function() {
     let emuRolesFetchAttempted = false;
     let emuRolesFetchPromise = null;
     let projectFps = DEFAULT_PROJECT_FPS;
+    let projectFpsSource = 'default';
+    let projectFpsRequestToken = 0;
+    let projectFpsLastRequestAt = 0;
+    let projectDropFrame = false;
+    let projectFpsRaw = '';
     let activeTimecodeFormat = defaultSettings.timecodeDisplayFormat || 'frames';
     let dataModel = createEmptyDataModel();
     const eventBus = createEventBus();
@@ -479,6 +572,45 @@ $(document).ready(function() {
         } catch (_) { /* storage may be unavailable */ }
     }
     
+    function parseFpsDescriptor(value) {
+        const result = {
+            numeric: NaN,
+            dropFrame: null,
+            raw: ''
+        };
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            result.numeric = value;
+            result.raw = String(value);
+            return result;
+        }
+        if (typeof value !== 'string') {
+            return result;
+        }
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return result;
+        }
+        result.raw = trimmed;
+        const normalized = trimmed.replace(',', '.');
+        const suffixMatch = normalized.match(/(df|ndf|nd)\s*$/i);
+        if (suffixMatch) {
+            const suffix = suffixMatch[1].toUpperCase();
+            if (suffix === 'DF') {
+                result.dropFrame = true;
+            } else {
+                result.dropFrame = false;
+            }
+        }
+        const numericMatch = normalized.match(/-?\d+(?:\.\d+)?/);
+        if (numericMatch) {
+            const parsed = Number(numericMatch[0]);
+            if (Number.isFinite(parsed)) {
+                result.numeric = parsed;
+            }
+        }
+        return result;
+    }
+
     function getActiveFrameRate() {
         return PrompterTime.sanitizeFps(projectFps || settings.frameRate || DEFAULT_PROJECT_FPS);
     }
@@ -490,16 +622,178 @@ $(document).ready(function() {
     }
 
     function setProjectFps(newFps, meta = {}) {
-        const sanitized = PrompterTime.sanitizeFps(newFps);
-        if (Math.abs(sanitized - projectFps) < 1e-3) return;
+        const { forceEmit = false, source: metaSource, dropFrame, raw, ...restMeta } = meta;
+        const descriptor = parseFpsDescriptor(newFps);
+        let numericInput = descriptor.numeric;
+        let descriptorDropFrame = descriptor.dropFrame;
+        let descriptorRaw = descriptor.raw;
+        let fallbackDescriptor = null;
+        if (!Number.isFinite(numericInput) || numericInput <= 0) {
+            console.warn('[Prompter][fps] invalid fps candidate, falling back', { newFps, meta });
+            fallbackDescriptor = parseFpsDescriptor(projectFps);
+            numericInput = fallbackDescriptor.numeric;
+            if (!Number.isFinite(numericInput) || numericInput <= 0) {
+                numericInput = DEFAULT_PROJECT_FPS;
+            }
+            if (descriptorDropFrame === null && fallbackDescriptor.dropFrame !== null) {
+                descriptorDropFrame = fallbackDescriptor.dropFrame;
+            }
+            if (!descriptorRaw && fallbackDescriptor.raw) {
+                descriptorRaw = fallbackDescriptor.raw;
+            }
+        }
+        const sanitized = PrompterTime.sanitizeFps(numericInput);
+        const source = metaSource || projectFpsSource || 'unknown';
+        const previousFps = projectFps;
+        const sameValue = Math.abs(sanitized - previousFps) < 1e-3;
+        const previousDrop = projectDropFrame;
+        const previousRaw = projectFpsRaw;
+        projectFpsSource = source;
+        let rawString = '';
+        if (typeof raw === 'string' && raw.trim()) {
+            rawString = raw.trim();
+        } else if (descriptorRaw) {
+            rawString = descriptorRaw;
+        } else if (typeof newFps === 'string' && newFps.trim()) {
+            rawString = newFps.trim();
+        } else if (fallbackDescriptor && fallbackDescriptor.raw) {
+            rawString = fallbackDescriptor.raw;
+        } else if (Number.isFinite(newFps)) {
+            rawString = String(newFps);
+        } else {
+            rawString = String(sanitized);
+        }
+        let dropToApply = projectDropFrame;
+        if (typeof dropFrame === 'boolean') {
+            dropToApply = dropFrame;
+        } else if (descriptorDropFrame !== null) {
+            dropToApply = descriptorDropFrame;
+        } else if (rawString) {
+            const rawDescriptor = parseFpsDescriptor(rawString);
+            if (rawDescriptor.dropFrame !== null) {
+                dropToApply = rawDescriptor.dropFrame;
+            }
+        }
+        projectDropFrame = dropToApply;
+        projectFpsRaw = rawString;
         projectFps = sanitized;
         settings.frameRate = sanitized;
-        eventBus.emit('project:fps', { fps: sanitized, ...meta });
-        console.info('[Prompter][fps] updated', { fps: sanitized, meta });
+        const metaUnchanged = projectDropFrame === previousDrop && projectFpsRaw === previousRaw;
+        if (sameValue && metaUnchanged && !forceEmit) {
+            return;
+        }
+        const payload = { fps: sanitized, source, dropFrame: projectDropFrame, raw: projectFpsRaw, ...restMeta };
+        eventBus.emit('project:fps', payload);
+        console.info('[Prompter][fps] updated', payload);
+    }
+
+    function legacyActorMappingToText(source) {
+        if (!source || typeof source !== 'object') return '';
+        const lines = [];
+        Object.keys(source).forEach(actorRaw => {
+            if (!actorRaw) return;
+            const actor = String(actorRaw).trim();
+            if (!actor) return;
+            const value = source[actorRaw];
+            let roles = [];
+            if (Array.isArray(value)) {
+                roles = value
+                    .map(r => typeof r === 'string' ? r.trim() : '')
+                    .filter(Boolean);
+            } else if (typeof value === 'string') {
+                roles = value
+                    .split(/[;,\n]+/)
+                    .map(r => r.trim())
+                    .filter(Boolean);
+            } else if (value && typeof value === 'object') {
+                roles = Object.keys(value)
+                    .filter(key => {
+                        const val = value[key];
+                        if (typeof val === 'boolean') return val;
+                        if (typeof val === 'number') return Number.isFinite(val) ? val !== 0 : false;
+                        if (typeof val === 'string') return val.trim().length > 0;
+                        return false;
+                    })
+                    .map(key => key.trim())
+                    .filter(Boolean);
+            }
+            if (roles.length) {
+                lines.push(`${actor} ${roles.join(', ')}`);
+            }
+        });
+        return lines.join('\n');
+    }
+
+    function normalizeActorColors(input) {
+        if (!input) return {};
+        if (Array.isArray(input)) {
+            const normalized = {};
+            input.forEach(entry => {
+                if (!entry) return;
+                if (Array.isArray(entry) && entry.length >= 2) {
+                    const actor = String(entry[0] || '').trim();
+                    const color = String(entry[1] || '').trim();
+                    if (actor && color) normalized[actor] = color;
+                } else if (typeof entry === 'object') {
+                    const actor = String(entry.actor || entry.name || '').trim();
+                    const color = String(entry.color || entry.value || '').trim();
+                    if (actor && color) normalized[actor] = color;
+                }
+            });
+            return normalized;
+        }
+        if (typeof input === 'object') {
+            const normalized = {};
+            Object.keys(input).forEach(key => {
+                const actor = String(key || '').trim();
+                const color = input[key];
+                if (!actor) return;
+                if (typeof color === 'string' && color.trim()) {
+                    normalized[actor] = color.trim();
+                }
+            });
+            return normalized;
+        }
+        return {};
     }
 
     function migrateSettingsObject(rawSettings) {
-        const incoming = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
+        const incoming = rawSettings && typeof rawSettings === 'object' ? { ...rawSettings } : {};
+        const legacySchema = Number(incoming.settingsSchemaVersion || incoming.settings_schema_version || 1);
+        if ((!incoming.actorRoleMappingText || !incoming.actorRoleMappingText.trim()) && incoming.actorRoleMapping) {
+            const legacyText = legacyActorMappingToText(incoming.actorRoleMapping);
+            if (legacyText) {
+                incoming.actorRoleMappingText = legacyText;
+            }
+            delete incoming.actorRoleMapping;
+        }
+        if ((!incoming.actorRoleMappingText || !incoming.actorRoleMappingText.trim()) && incoming.actorRoles) {
+            const legacyText = legacyActorMappingToText(incoming.actorRoles);
+            if (legacyText) {
+                incoming.actorRoleMappingText = legacyText;
+            }
+            delete incoming.actorRoles;
+        }
+        if (incoming.actorColors) {
+            incoming.actorColors = normalizeActorColors(incoming.actorColors);
+        }
+        if (typeof incoming.uiScale === 'number' && incoming.uiScale > 300) {
+            incoming.uiScale = Math.round(incoming.uiScale / 2);
+        } else if (typeof incoming.fontScale === 'number') {
+            incoming.uiScale = Math.round(incoming.fontScale * 100);
+            delete incoming.fontScale;
+        }
+        if (incoming.roleColumnWidth && !incoming.roleColumnScale) {
+            const value = Number(incoming.roleColumnWidth);
+            if (Number.isFinite(value) && value > 0) {
+                incoming.roleColumnScale = Math.round(Math.min(300, Math.max(50, value * 100)));
+            }
+            delete incoming.roleColumnWidth;
+        }
+        if (typeof incoming.frameRate === 'string') {
+            const parsed = parseFloat(incoming.frameRate);
+            if (Number.isFinite(parsed)) incoming.frameRate = parsed;
+        }
         const base = { ...defaultSettings, ...incoming };
         base.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
         if (!base.dataModelVersion || base.dataModelVersion < DATA_MODEL_VERSION) {
@@ -507,6 +801,11 @@ $(document).ready(function() {
         }
         if (!base.timecodeDisplayFormat) {
             base.timecodeDisplayFormat = defaultSettings.timecodeDisplayFormat;
+        }
+        if (legacySchema < SETTINGS_SCHEMA_VERSION) {
+            base.settingsMigratedFrom = legacySchema;
+        } else {
+            delete base.settingsMigratedFrom;
         }
         return base;
     }
@@ -602,6 +901,20 @@ $(document).ready(function() {
         const HISTORY_LIMIT = 50;
         const history = [];
         let pollTimerId = null;
+        let watchdogTimerId = null;
+        const diagState = {
+            startedAt: Date.now(),
+            lastPollAt: 0,
+            lastIngestAt: 0,
+            lastEmitOutAt: 0,
+            lastEmitLocalAt: 0,
+            consecutivePollMisses: 0,
+            consecutiveIngestMisses: 0,
+            watchdogFired: 0
+        };
+        const WATCHDOG_INTERVAL = 2000;
+        const POLL_STALL_THRESHOLD = 4500;
+        const INGEST_STALL_THRESHOLD = 7000;
 
         function appendHistory(entry) {
             history.push({ ...entry, timestamp: Date.now() });
@@ -622,13 +935,59 @@ $(document).ready(function() {
 
         function requestBackendEvents() {
             if (!wwr_is_enabled) return;
+            diagState.lastPollAt = Date.now();
             wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/event_queue');
+        }
+
+        function logDiagnostic(kind, details) {
+            const payload = { kind, ...(details || {}) };
+            appendHistory({ direction: 'diag', name: kind, payload });
+            console.warn('[Prompter][eventBus][diag]', kind, payload);
+        }
+
+        function ensureWatchdog() {
+            if (watchdogTimerId) return;
+            watchdogTimerId = setInterval(() => {
+                const now = Date.now();
+                if (diagState.lastPollAt && (now - diagState.lastPollAt) > POLL_STALL_THRESHOLD) {
+                    diagState.consecutivePollMisses += 1;
+                    diagState.watchdogFired += 1;
+                    logDiagnostic('poll_stall', {
+                        sinceMs: now - diagState.lastPollAt,
+                        consecutive: diagState.consecutivePollMisses
+                    });
+                    requestBackendEvents();
+                } else {
+                    diagState.consecutivePollMisses = 0;
+                }
+                if (diagState.lastIngestAt && (now - diagState.lastIngestAt) > INGEST_STALL_THRESHOLD) {
+                    diagState.consecutiveIngestMisses += 1;
+                    diagState.watchdogFired += 1;
+                    logDiagnostic('ingest_stall', {
+                        sinceMs: now - diagState.lastIngestAt,
+                        consecutive: diagState.consecutiveIngestMisses
+                    });
+                    requestBackendEvents();
+                } else {
+                    diagState.consecutiveIngestMisses = 0;
+                }
+            }, WATCHDOG_INTERVAL);
+        }
+
+        function stopWatchdog() {
+            if (watchdogTimerId) {
+                clearInterval(watchdogTimerId);
+                watchdogTimerId = null;
+            }
+            diagState.consecutivePollMisses = 0;
+            diagState.consecutiveIngestMisses = 0;
         }
 
         function startPolling() {
             if (pollTimerId) return;
             pollTimerId = setInterval(requestBackendEvents, 180);
             requestBackendEvents();
+            ensureWatchdog();
         }
 
         function stopPolling() {
@@ -636,13 +995,18 @@ $(document).ready(function() {
                 clearInterval(pollTimerId);
                 pollTimerId = null;
             }
+            stopWatchdog();
         }
 
         function ingestBackendQueue(raw) {
             const trimmed = typeof raw === 'string' ? raw.trim() : '';
-            if (!trimmed) return;
+            if (!trimmed) {
+                diagState.lastIngestAt = Date.now();
+                return;
+            }
             const lines = trimmed.split('\n').map(s => s.trim()).filter(Boolean);
             if (!lines.length) return;
+            diagState.lastIngestAt = Date.now();
             lines.forEach(line => {
                 try {
                     const evt = JSON.parse(line);
@@ -679,6 +1043,7 @@ $(document).ready(function() {
 
         function emitLocal(name, payload = {}, meta = { source: 'local' }) {
             appendHistory({ direction: 'local', name, payload });
+            diagState.lastEmitLocalAt = Date.now();
             dispatch(name, payload, meta);
         }
 
@@ -690,6 +1055,7 @@ $(document).ready(function() {
             wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/PROCESS_EVENT');
             setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 25);
             appendHistory({ direction: 'out', name, payload });
+            diagState.lastEmitOutAt = Date.now();
         }
 
         return {
@@ -701,7 +1067,21 @@ $(document).ready(function() {
             ingestBackendQueue,
             start: startPolling,
             stop: stopPolling,
-            history: () => [...history]
+            history: () => [...history],
+            diagnostics: () => ({
+                ...diagState,
+                pollTimerActive: Boolean(pollTimerId),
+                watchdogActive: Boolean(watchdogTimerId)
+            }),
+            resetDiagnostics: () => {
+                diagState.lastPollAt = 0;
+                diagState.lastIngestAt = 0;
+                diagState.lastEmitOutAt = 0;
+                diagState.lastEmitLocalAt = 0;
+                diagState.consecutivePollMisses = 0;
+                diagState.consecutiveIngestMisses = 0;
+                diagState.watchdogFired = 0;
+            }
         };
     }
 
@@ -1349,7 +1729,7 @@ $(document).ready(function() {
             // In EMU mode we do NOT fetch root settings.json, rely on defaults; reference/settings.json will be applied in loadEmuData
             settings = migrateSettingsObject({ ...defaultSettings });
             activeTimecodeFormat = settings.timecodeDisplayFormat;
-            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
+            setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
             $('#ui-scale').attr({ min:50, max:300, step:25 });
             initializeColorPickers();
             updateUIFromSettings();
@@ -1382,11 +1762,11 @@ $(document).ready(function() {
             }
             settings = migrateSettingsObject(settings);
             activeTimecodeFormat = settings.timecodeDisplayFormat;
-            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
+            setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
             // Migration: previous stored values may have baseline misunderstanding.
             // If value still reflects legacy domain (<=150 interpreted as old 100-base wanting doubling) AND > default.
-                if (settings.uiScale > 150) {
-                    settings.uiScale = Math.round(settings.uiScale / 2);
+            if (settings.uiScale > 150) {
+                settings.uiScale = Math.round(settings.uiScale / 2);
             }
                 // Sanitize click highlight duration
                 if (typeof settings.highlightClickDuration !== 'number' || settings.highlightClickDuration <= 0 || settings.highlightClickDuration > 60000) {
@@ -1400,7 +1780,7 @@ $(document).ready(function() {
             console.warn('[Prompter][loadSettings] Error during parse/migration, reverting to defaults:', e);
             settings = migrateSettingsObject({ ...defaultSettings });
             activeTimecodeFormat = settings.timecodeDisplayFormat;
-            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
+            setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
         }
         // Reflect slider attributes
     $('#ui-scale').attr({ min:50, max:300, step:25 });
@@ -1917,10 +2297,7 @@ $(document).ready(function() {
             statusIndicator.text('Подключение к REAPER...');
             wwr_start();
             eventBus.start();
-            getTracks();
-            getProjectName();
-            requestProjectFps();
-            requestRoles('initialize'); // запрос отдельного файла ролей
+            requestProjectData('initialize');
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
@@ -1953,19 +2330,63 @@ $(document).ready(function() {
         }
         const MAX_RETRIES = 5;
         const BASE_DELAY = 140;
+        const requestToken = ++projectFpsRequestToken;
+        const previousSource = projectFpsSource;
+        projectFpsLastRequestAt = Date.now();
         wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_FPS');
         setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry * 15);
         setTimeout(() => {
             wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_fps');
-            if (retry < MAX_RETRIES) {
-                setTimeout(() => {
-                    if (!projectFps || projectFps <= 0) {
-                        console.debug('[Prompter][fps] retry request', retry + 1);
-                        requestProjectFps(retry + 1);
-                    }
-                }, 80 + retry * 35);
-            }
+            const followUpDelay = 90 + retry * 40;
+            setTimeout(() => {
+                const newerRequestIssued = projectFpsRequestToken !== requestToken;
+                if (newerRequestIssued) return;
+                if (projectFpsSource === 'backend') return;
+                const elapsedMs = Date.now() - projectFpsLastRequestAt;
+                if (retry < MAX_RETRIES) {
+                    console.debug('[Prompter][fps] retry request', retry + 1, { requestToken, elapsedMs });
+                    requestProjectFps(retry + 1);
+                    return;
+                }
+                console.warn('[Prompter][fps] fallback to default FPS after retries', { requestToken, previousSource, elapsedMs, retryCount: retry });
+                setProjectFps(DEFAULT_PROJECT_FPS, {
+                    source: 'fallback',
+                    reason: 'backend_timeout',
+                    requestToken,
+                    elapsedMs,
+                    retryCount: retry,
+                    raw: 'fallback:timeout',
+                    forceEmit: projectFpsSource !== 'fallback' && previousSource !== 'fallback'
+                });
+            }, followUpDelay);
         }, BASE_DELAY + retry * 60);
+    }
+
+    function requestProjectData(reason = 'unknown', options = {}) {
+        const plan = {
+            tracks: true,
+            projectName: true,
+            roles: true,
+            fps: true,
+            ...options
+        };
+        console.info('[Prompter][projectData] start', { reason, plan });
+        if (plan.tracks) {
+            console.debug('[Prompter][projectData] request tracks', { reason });
+            getTracks();
+        }
+        if (plan.projectName) {
+            console.debug('[Prompter][projectData] request project_name', { reason });
+            getProjectName();
+        }
+        if (plan.fps) {
+            console.debug('[Prompter][projectData] request project_fps', { reason });
+            requestProjectFps();
+        }
+        if (plan.roles) {
+            console.debug('[Prompter][projectData] request roles', { reason });
+            requestRoles(plan.rolesReason || reason || 'project_data');
+        }
     }
 
     function getTracks() {
@@ -2078,9 +2499,37 @@ $(document).ready(function() {
                 }
                 else if (parts[2] === 'project_fps') {
                     const fpsRaw = parts.slice(3).join('\t');
-                    const numeric = parseFloat(fpsRaw);
-                    if (Number.isFinite(numeric) && numeric > 0) {
-                        setProjectFps(numeric, { source: 'backend' });
+                    const rawPayload = typeof fpsRaw === 'string' ? fpsRaw.trim() : '';
+                    let descriptor = parseFpsDescriptor(rawPayload);
+                    if (rawPayload.includes('|')) {
+                        const partsRaw = rawPayload.split('|');
+                        const flag = partsRaw[1] || '';
+                        if (flag.toUpperCase() === 'DF') {
+                            descriptor.dropFrame = true;
+                        } else if (flag.toUpperCase() === 'ND' || flag.toUpperCase() === 'NDF') {
+                            descriptor.dropFrame = false;
+                        }
+                        if (!descriptor.raw && partsRaw[0]) {
+                            descriptor.raw = partsRaw[0];
+                        }
+                        if (!Number.isFinite(descriptor.numeric) || descriptor.numeric <= 0) {
+                            const numericDescriptor = parseFpsDescriptor(partsRaw[0]);
+                            if (Number.isFinite(numericDescriptor.numeric)) {
+                                descriptor.numeric = numericDescriptor.numeric;
+                            }
+                            if (descriptor.dropFrame === null && numericDescriptor.dropFrame !== null) {
+                                descriptor.dropFrame = numericDescriptor.dropFrame;
+                            }
+                        }
+                    }
+                    if (Number.isFinite(descriptor.numeric) && descriptor.numeric > 0) {
+                        setProjectFps(descriptor.numeric, {
+                            source: 'backend',
+                            dropFrame: descriptor.dropFrame === null ? undefined : descriptor.dropFrame,
+                            raw: rawPayload
+                        });
+                    } else {
+                        console.warn('[Prompter][fps] invalid backend payload', { rawPayload });
                     }
                 }
                 else if (parts[2] === 'roles_json_b64') {
@@ -3305,9 +3754,7 @@ $(document).ready(function() {
         invalidateRolesCache('refresh_button');
         currentProjectName = '';
         updateTitle();
-        getTracks();
-        getProjectName();
-        requestRoles('refresh_button');
+        requestProjectData('refresh_button');
     });
     $('#settings-button').on('click', function() {
         // Refresh form fields from authoritative settings before showing
