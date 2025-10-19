@@ -1,5 +1,83 @@
+const SETTINGS_SCHEMA_VERSION = 2;
+const DATA_MODEL_VERSION = 2;
+const DEFAULT_PROJECT_FPS = 24;
+
+// --- ВСПОМОГАТЕЛЬНЫЕ МОДУЛИ ---
+const PrompterTime = (() => {
+    const EPSILON = 1e-6;
+
+    function sanitizeFps(fps) {
+        const numeric = Number(fps);
+        if (!Number.isFinite(numeric) || numeric <= 0) return DEFAULT_PROJECT_FPS;
+        return numeric;
+    }
+
+    function msToFrames(ms, fps) {
+        const safeFps = sanitizeFps(fps);
+        return Math.floor((Number(ms) * safeFps) / 1000 + EPSILON);
+    }
+
+    function framesToMs(frames, fps) {
+        const safeFps = sanitizeFps(fps);
+        return Math.round((Number(frames) * 1000) / safeFps);
+    }
+
+    function pad2(num) {
+        return num < 10 ? '0' + num : '' + num;
+    }
+
+    function formatHmsFrames(ms, fps) {
+        const totalMs = Math.max(0, Number(ms) || 0);
+        const safeFps = sanitizeFps(fps);
+        const totalSeconds = totalMs / 1000;
+        let remaining = totalSeconds;
+        const hours = remaining >= 3600 ? Math.floor(remaining / 3600) : 0;
+        remaining -= hours * 3600;
+        const minutes = remaining >= 60 ? Math.floor(remaining / 60) : 0;
+        remaining -= minutes * 60;
+        const seconds = remaining >= 1 ? Math.floor(remaining) : 0;
+        const fractional = remaining - seconds;
+        let frames = Math.floor(fractional * safeFps + EPSILON);
+        if (frames >= safeFps) {
+            frames = 0;
+        }
+        return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}:${pad2(frames)}`;
+    }
+
+    function formatHmsMillis(ms, decimals = 3) {
+        const totalMs = Math.max(0, Number(ms) || 0);
+        const totalSeconds = totalMs / 1000;
+        let remaining = totalSeconds;
+        const hours = remaining >= 3600 ? Math.floor(remaining / 3600) : 0;
+        remaining -= hours * 3600;
+        const minutes = remaining >= 60 ? Math.floor(remaining / 60) : 0;
+        remaining -= minutes * 60;
+        const seconds = remaining >= 1 ? Math.floor(remaining) : 0;
+        const fractionalMs = Math.round(totalMs - Math.floor(totalSeconds) * 1000);
+        if (decimals <= 0) {
+            return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
+        }
+        const clampedDecimals = Math.min(decimals, 3);
+        const paddedMs = String(fractionalMs).padStart(3, '0').substring(0, clampedDecimals);
+        return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}.${paddedMs}`;
+    }
+
+    return {
+        sanitizeFps,
+        msToFrames,
+        framesToMs,
+        formatHmsFrames,
+        formatHmsMillis
+    };
+})();
+
+if (typeof window !== 'undefined') {
+    window.PrompterTime = PrompterTime;
+}
+
 // --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
 const defaultSettings = {
+    settingsSchemaVersion: 2,
     fontSize: 2,
     lineHeight: 1.4,
     navigationPanelPosition: 'bottom',
@@ -40,7 +118,9 @@ const defaultSettings = {
     progressBarColor: 'rgba(255, 193, 7, 1)',
     // Actors coloring
     actorRoleMappingText: '', // Raw multiline text user enters
-    actorColors: {} // { actorName: colorString }
+    actorColors: {}, // { actorName: colorString }
+    dataModelVersion: 2,
+    timecodeDisplayFormat: 'frames'
 };
 let settings = {};
 let currentProjectName = '';
@@ -64,6 +144,7 @@ const SETTINGS_CHUNK_SIZE = 250; // was 700
 const ROLES_CHUNK_SIZE = 250; // chunk size for roles.json transfer
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
+const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
 
 $(document).ready(function() {
     const initStartTs = performance.now();
@@ -161,6 +242,14 @@ $(document).ready(function() {
     let emuDataLoadedOnce = false;
     let emuRolesFetchAttempted = false;
     let emuRolesFetchPromise = null;
+    let projectFps = DEFAULT_PROJECT_FPS;
+    let activeTimecodeFormat = defaultSettings.timecodeDisplayFormat || 'frames';
+    let dataModel = createEmptyDataModel();
+    const eventBus = createEventBus();
+    if (typeof window !== 'undefined') {
+        window.PrompterEventBus = eventBus;
+        window.PrompterDataModel = () => dataModel;
+    }
     // Guards to avoid duplicate loads
     let subtitleLoadInFlight = false;
     let subtitleLoadTrackId = null;
@@ -291,6 +380,7 @@ $(document).ready(function() {
     let actorToRoles = {}; // actor -> Set(roles)
     let cachedActorRoleMappingText = null;
     let cachedMappedRolesCount = 0;
+    let actorRoleDelimiterWarning = '';
     const speedSteps = [1];
     for (let i = 10; i <= 200; i += 10) { speedSteps.push(i); }
     speedSteps.push(500);
@@ -389,25 +479,230 @@ $(document).ready(function() {
         } catch (_) { /* storage may be unavailable */ }
     }
     
-    function pad2(num) {
-        return num < 10 ? '0' + num : '' + num;
+    function getActiveFrameRate() {
+        return PrompterTime.sanitizeFps(projectFps || settings.frameRate || DEFAULT_PROJECT_FPS);
     }
 
-    function formatTimecode(totalSeconds, frameRate = settings.frameRate) {
-        if (!isFinite(totalSeconds) || totalSeconds < 0) totalSeconds = 0;
-        let remaining = totalSeconds;
-        const hours = remaining >= 3600 ? Math.floor(remaining / 3600) : 0;
-        remaining -= hours * 3600;
-        const minutes = remaining >= 60 ? Math.floor(remaining / 60) : 0;
-        remaining -= minutes * 60;
-        const seconds = remaining >= 1 ? Math.floor(remaining) : 0;
-        const fraction = remaining - seconds;
-        const effectiveFrameRate = (frameRate && frameRate > 0) ? frameRate : 24;
-        let frames = Math.floor(fraction * effectiveFrameRate);
-        if (frames >= effectiveFrameRate) {
-            frames = 0;
+    function formatTimecode(totalSeconds, frameRate = null) {
+        const fps = PrompterTime.sanitizeFps(frameRate || getActiveFrameRate());
+        const ms = Math.max(0, Number(totalSeconds) || 0) * 1000;
+        return PrompterTime.formatHmsFrames(ms, fps);
+    }
+
+    function setProjectFps(newFps, meta = {}) {
+        const sanitized = PrompterTime.sanitizeFps(newFps);
+        if (Math.abs(sanitized - projectFps) < 1e-3) return;
+        projectFps = sanitized;
+        settings.frameRate = sanitized;
+        eventBus.emit('project:fps', { fps: sanitized, ...meta });
+        console.info('[Prompter][fps] updated', { fps: sanitized, meta });
+    }
+
+    function migrateSettingsObject(rawSettings) {
+        const incoming = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
+        const base = { ...defaultSettings, ...incoming };
+        base.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
+        if (!base.dataModelVersion || base.dataModelVersion < DATA_MODEL_VERSION) {
+            base.dataModelVersion = DATA_MODEL_VERSION;
         }
-        return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}:${pad2(frames)}`;
+        if (!base.timecodeDisplayFormat) {
+            base.timecodeDisplayFormat = defaultSettings.timecodeDisplayFormat;
+        }
+        return base;
+    }
+
+    function createEmptyDataModel() {
+        return {
+            version: DATA_MODEL_VERSION,
+            roles: new Map(),
+            actors: new Map(),
+            bindings: new Map(),
+            lines: new Map(),
+            order: [],
+            meta: { generatedAt: Date.now() }
+        };
+    }
+
+    function resetDataModel() {
+        dataModel = createEmptyDataModel();
+    }
+
+    function resolveDataModelLineId(line, fallbackIndex) {
+        if (line && typeof line === 'object') {
+            const { id, guid, uuid, uid, unique_id: uniqueId } = line;
+            if (typeof id === 'string' && id.trim()) return id.trim();
+            if (typeof guid === 'string' && guid.trim()) return guid.trim();
+            if (Number.isFinite(guid)) return `guid_${guid}`;
+            if (typeof uuid === 'string' && uuid.trim()) return uuid.trim();
+            if (typeof uid === 'string' && uid.trim()) return uid.trim();
+            if (typeof uniqueId === 'string' && uniqueId.trim()) return uniqueId.trim();
+            if (Number.isFinite(id)) return `id_${id}`;
+            if (typeof line.__dataModelId === 'string' && line.__dataModelId) return line.__dataModelId;
+        }
+        const safeIndex = Number.isFinite(fallbackIndex) ? fallbackIndex : 0;
+        const timePart = line && Number.isFinite(line.start_time) ? Math.round(line.start_time * 1000) : safeIndex;
+        const generated = `line_${timePart}_${safeIndex}`;
+        if (line && typeof line === 'object') {
+            try {
+                line.__dataModelId = generated;
+            } catch (err) {
+                /* ignore inability to assign */
+            }
+        }
+        return generated;
+    }
+
+    function recordDataModelLine(record) {
+        if (!record || !record.id) return;
+        dataModel.lines.set(record.id, record);
+        dataModel.order.push(record.id);
+        if (record.roleId) {
+            if (!dataModel.roles.has(record.roleId)) {
+                dataModel.roles.set(record.roleId, {
+                    id: record.roleId,
+                    name: record.roleId,
+                    baseColor: record.roleBaseColor || null,
+                    lineIds: []
+                });
+            }
+            dataModel.roles.get(record.roleId).lineIds.push(record.id);
+        }
+        if (record.actorId) {
+            if (!dataModel.actors.has(record.actorId)) {
+                dataModel.actors.set(record.actorId, {
+                    id: record.actorId,
+                    name: record.actorId,
+                    color: (settings.actorColors && settings.actorColors[record.actorId]) || null,
+                    lineIds: []
+                });
+            }
+            dataModel.actors.get(record.actorId).lineIds.push(record.id);
+            if (record.roleId) {
+                dataModel.bindings.set(record.roleId, record.actorId);
+            }
+        }
+    }
+
+    function finalizeDataModelUpdate() {
+        dataModel.meta.generatedAt = Date.now();
+        eventBus.emit('data:model:update', {
+            lines: dataModel.order.length,
+            roles: dataModel.roles.size,
+            actors: dataModel.actors.size
+        });
+    }
+
+    function encodeEventPayload(payload) {
+        if (!payload || typeof payload !== 'object') return '';
+        return Object.keys(payload).map(key => `${encodeURIComponent(key)}=${encodeURIComponent(String(payload[key]))}`).join('&');
+    }
+
+    function createEventBus() {
+        const handlerMap = new Map();
+        const HISTORY_LIMIT = 50;
+        const history = [];
+        let pollTimerId = null;
+
+        function appendHistory(entry) {
+            history.push({ ...entry, timestamp: Date.now() });
+            if (history.length > HISTORY_LIMIT) history.shift();
+        }
+
+        function dispatch(name, payload, meta) {
+            const handlers = handlerMap.get(name);
+            if (!handlers || handlers.size === 0) return;
+            handlers.forEach(fn => {
+                try {
+                    fn(payload, meta || {});
+                } catch (err) {
+                    console.error('[Prompter][eventBus] handler error', err);
+                }
+            });
+        }
+
+        function requestBackendEvents() {
+            if (!wwr_is_enabled) return;
+            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/event_queue');
+        }
+
+        function startPolling() {
+            if (pollTimerId) return;
+            pollTimerId = setInterval(requestBackendEvents, 180);
+            requestBackendEvents();
+        }
+
+        function stopPolling() {
+            if (pollTimerId) {
+                clearInterval(pollTimerId);
+                pollTimerId = null;
+            }
+        }
+
+        function ingestBackendQueue(raw) {
+            const trimmed = typeof raw === 'string' ? raw.trim() : '';
+            if (!trimmed) return;
+            const lines = trimmed.split('\n').map(s => s.trim()).filter(Boolean);
+            if (!lines.length) return;
+            lines.forEach(line => {
+                try {
+                    const evt = JSON.parse(line);
+                    appendHistory({ direction: 'in', name: evt.name, payload: evt.payload || null });
+                    dispatch(evt.name, evt.payload || {}, { source: 'backend', ts: evt.ts });
+                } catch (err) {
+                    console.warn('[Prompter][eventBus] failed to parse backend event', line, err);
+                }
+            });
+            // clear queue
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/event_queue/');
+        }
+
+        function on(name, handler) {
+            if (!handlerMap.has(name)) handlerMap.set(name, new Set());
+            handlerMap.get(name).add(handler);
+            return () => off(name, handler);
+        }
+
+        function once(name, handler) {
+            const wrapper = (payload, meta) => {
+                off(name, wrapper);
+                handler(payload, meta);
+            };
+            return on(name, wrapper);
+        }
+
+        function off(name, handler) {
+            const set = handlerMap.get(name);
+            if (!set) return;
+            set.delete(handler);
+            if (set.size === 0) handlerMap.delete(name);
+        }
+
+        function emitLocal(name, payload = {}, meta = { source: 'local' }) {
+            appendHistory({ direction: 'local', name, payload });
+            dispatch(name, payload, meta);
+        }
+
+        function emitToBackend(name, payload = {}) {
+            const safeName = encodeURIComponent(name);
+            const encodedPayload = encodeURIComponent(encodeEventPayload(payload));
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/event_name/${safeName}`);
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/event_payload/${encodedPayload}`);
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/PROCESS_EVENT');
+            setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 25);
+            appendHistory({ direction: 'out', name, payload });
+        }
+
+        return {
+            on,
+            once,
+            off,
+            emit: emitLocal,
+            emitToBackend,
+            ingestBackendQueue,
+            start: startPolling,
+            stop: stopPolling,
+            history: () => [...history]
+        };
     }
 
     function smoothScrollWrapperTo(targetTop) {
@@ -1052,7 +1347,9 @@ $(document).ready(function() {
         console.info('[Prompter][loadSettings] start', { emu: isEmuMode() });
         if (isEmuMode()) {
             // In EMU mode we do NOT fetch root settings.json, rely on defaults; reference/settings.json will be applied in loadEmuData
-            settings = { ...defaultSettings };
+            settings = migrateSettingsObject({ ...defaultSettings });
+            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
             $('#ui-scale').attr({ min:50, max:300, step:25 });
             initializeColorPickers();
             updateUIFromSettings();
@@ -1083,6 +1380,9 @@ $(document).ready(function() {
                 // fallback purely to defaults (do NOT pull stale localStorage if file missing per current spec)
                 settings = { ...defaultSettings };
             }
+            settings = migrateSettingsObject(settings);
+            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
             // Migration: previous stored values may have baseline misunderstanding.
             // If value still reflects legacy domain (<=150 interpreted as old 100-base wanting doubling) AND > default.
                 if (settings.uiScale > 150) {
@@ -1098,7 +1398,9 @@ $(document).ready(function() {
             if (settings.uiScale > 300) settings.uiScale = 300;
         } catch(e) {
             console.warn('[Prompter][loadSettings] Error during parse/migration, reverting to defaults:', e);
-            settings = { ...defaultSettings };
+            settings = migrateSettingsObject({ ...defaultSettings });
+            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            projectFps = PrompterTime.sanitizeFps(settings.frameRate);
         }
         // Reflect slider attributes
     $('#ui-scale').attr({ min:50, max:300, step:25 });
@@ -1116,6 +1418,9 @@ $(document).ready(function() {
             // Snapshot actor-related data to preserve across visual settings rebuild
             const actorMappingSnapshot = settings.actorRoleMappingText;
             const actorColorsSnapshot = settings.actorColors;
+            settings.timecodeDisplayFormat = activeTimecodeFormat;
+            settings.dataModelVersion = DATA_MODEL_VERSION;
+            settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
             const settingsToSave = {};
             Object.keys(defaultSettings).forEach(key => {
                 const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
@@ -1155,6 +1460,9 @@ $(document).ready(function() {
             // Track previous role mapping size to detect sudden loss (diagnostic)
             const prevRoleMapSize = Object.keys(roleToActor || {}).length;
             settings = settingsToSave;
+            settings.timecodeDisplayFormat = activeTimecodeFormat;
+            settings.dataModelVersion = DATA_MODEL_VERSION;
+            settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
             localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
             console.debug('[Prompter][saveSettings] Saved settings:', JSON.parse(JSON.stringify(settings)));
             applySettings();
@@ -1608,8 +1916,10 @@ $(document).ready(function() {
             console.info('[Prompter] initialize (REAPER mode)');
             statusIndicator.text('Подключение к REAPER...');
             wwr_start();
+            eventBus.start();
             getTracks();
             getProjectName();
+            requestProjectFps();
             requestRoles('initialize'); // запрос отдельного файла ролей
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
@@ -1634,6 +1944,28 @@ $(document).ready(function() {
                 }
             }, 60 + retry*35);
         }, BASE_DELAY + retry*70);
+    }
+
+    function requestProjectFps(retry = 0) {
+        if (isEmuMode()) {
+            setProjectFps(DEFAULT_PROJECT_FPS, { source: 'emu' });
+            return;
+        }
+        const MAX_RETRIES = 5;
+        const BASE_DELAY = 140;
+        wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_FPS');
+        setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 40 + retry * 15);
+        setTimeout(() => {
+            wwr_req('GET/EXTSTATE/PROMPTER_WEBUI/project_fps');
+            if (retry < MAX_RETRIES) {
+                setTimeout(() => {
+                    if (!projectFps || projectFps <= 0) {
+                        console.debug('[Prompter][fps] retry request', retry + 1);
+                        requestProjectFps(retry + 1);
+                    }
+                }, 80 + retry * 35);
+            }
+        }, BASE_DELAY + retry * 60);
     }
 
     function getTracks() {
@@ -1744,6 +2076,13 @@ $(document).ready(function() {
                     currentProjectName = parts.slice(3).join('\t');
                     updateTitle();
                 }
+                else if (parts[2] === 'project_fps') {
+                    const fpsRaw = parts.slice(3).join('\t');
+                    const numeric = parseFloat(fpsRaw);
+                    if (Number.isFinite(numeric) && numeric > 0) {
+                        setProjectFps(numeric, { source: 'backend' });
+                    }
+                }
                 else if (parts[2] === 'roles_json_b64') {
                     const payload = parts.slice(3).join('\t');
                     const encodedLength = payload ? payload.length : 0;
@@ -1756,6 +2095,9 @@ $(document).ready(function() {
                 } else if (parts[2] === 'roles_status') {
                     const status = parts.slice(3).join('\t');
                     handleRolesStatusMessage(status);
+                } else if (parts[2] === 'event_queue') {
+                    const payload = parts.slice(3).join('\t');
+                    eventBus.ingestBackendQueue(payload);
                 }
             } else if (parts[0] === 'TRANSPORT') handleTransportResponse(parts);
         }
@@ -2020,6 +2362,7 @@ $(document).ready(function() {
             const t0 = performance.now();
             console.info('[Prompter] handleTextResponse start', { type: Array.isArray(subtitles)? 'array':'invalid', count: Array.isArray(subtitles)? subtitles.length : 0 });
             if (!Array.isArray(subtitles)) { throw new Error('Полученные данные не являются массивом субтитров.'); }
+            resetDataModel();
             subtitleData = subtitles;
             subtitlesLoadedOnce = true;
             currentLineIndex = -1;
@@ -2036,6 +2379,7 @@ $(document).ready(function() {
             subtitleStyleMetadata = new Array(total);
             if (total === 0) {
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
+                finalizeDataModelUpdate();
                 return;
             }
             // After loading subtitles we may need to refresh stats button visibility
@@ -2078,6 +2422,7 @@ $(document).ready(function() {
 
             // Build skeleton rows first, paint later
             const tBuild0 = performance.now();
+            const dataModelFrameRate = PrompterTime.sanitizeFps(frameRate);
             const fragment = document.createDocumentFragment();
             for (let index = 0; index < total; index++) {
                 const line = subtitleData[index];
@@ -2104,6 +2449,12 @@ $(document).ready(function() {
                 const bodyElement = document.createElement('div');
                 bodyElement.className = 'subtitle-body';
                 contentElement.appendChild(bodyElement);
+
+                let roleAreaElement = null;
+                if (includeRoleColumn) {
+                    roleAreaElement = document.createElement('div');
+                    roleAreaElement.className = 'role-area';
+                }
 
                 const textElement = document.createElement('span');
                 textElement.className = 'subtitle-text';
@@ -2245,21 +2596,57 @@ $(document).ready(function() {
                 }
 
                 container.classList.toggle('role-slot-empty', includeRoleColumn && !(showRoleInColumn || showColumnSwatch));
+                if (roleAreaElement) {
+                    const roleAreaIsEmpty = !(showRoleInColumn || showColumnSwatch);
+                    roleAreaElement.classList.toggle('role-area-is-empty', roleAreaIsEmpty);
+                }
 
                 subtitleElements[index] = container;
 
+                const startSecondsRaw = Number(line.start_time);
+                const startSeconds = Number.isFinite(startSecondsRaw) ? startSecondsRaw : 0;
+                const endSecondsRaw = Number(line.end_time);
+                const endSeconds = Number.isFinite(endSecondsRaw) ? endSecondsRaw : startSeconds;
+                const durationSeconds = Math.max(0, endSeconds - startSeconds);
+                const startMs = Math.max(0, Math.round(startSeconds * 1000));
+                const endMs = Math.max(startMs, Math.round(endSeconds * 1000));
+                recordDataModelLine({
+                    id: resolveDataModelLineId(line, index),
+                    index,
+                    startSeconds,
+                    endSeconds,
+                    durationSeconds,
+                    startFrame: PrompterTime.msToFrames(startMs, dataModelFrameRate),
+                    endFrame: PrompterTime.msToFrames(endMs, dataModelFrameRate),
+                    frameRate: dataModelFrameRate,
+                    timecode: timeString,
+                    rawText,
+                    displayText,
+                    html: line.textHtml || null,
+                    roleId: role || null,
+                    actorId: actor || null,
+                    roleBaseColor: finalRoleColorCandidate || null,
+                    actorColor,
+                    lineColor,
+                    resolvedColor: finalRoleColorCandidate || null
+                });
+
                 container.appendChild(timeElement);
 
-                if (swatchElement && swatchElement.classList.contains('column-swatch')) {
-                    container.appendChild(swatchElement);
-                }
+                if (roleAreaElement) {
+                    if (swatchElement && swatchElement.classList.contains('column-swatch')) {
+                        roleAreaElement.appendChild(swatchElement);
+                    }
 
-                if (roleElement && roleElement.classList.contains('column-role')) {
-                    container.appendChild(roleElement);
-                }
+                    if (roleElement && roleElement.classList.contains('column-role')) {
+                        roleAreaElement.appendChild(roleElement);
+                    }
 
-                if (separatorElement) {
-                    container.appendChild(separatorElement);
+                    if (separatorElement) {
+                        roleAreaElement.appendChild(separatorElement);
+                    }
+
+                    container.appendChild(roleAreaElement);
                 }
 
                 if (roleElement && roleElement.classList.contains('inline-role')) {
@@ -2275,6 +2662,7 @@ $(document).ready(function() {
                 fragment.appendChild(container);
             }
             const tBuild1 = performance.now();
+            finalizeDataModelUpdate();
             const tAppend0 = performance.now();
             displayNode.appendChild(fragment);
             const tAppend1 = performance.now();
@@ -2312,24 +2700,256 @@ $(document).ready(function() {
     // removed unused createSubtitleElement (legacy from virtualization)
 
     // === Actor Coloring Utilities ===
-    function parseActorRoleMapping(rawText) {
-        // Each line: ACTOR (space|comma|colon) ROLE1, ROLE2, ROLE3
-        const map = {}; // actor -> Set(roles)
-        const lines = (rawText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-        for (const line of lines) {
-            const m = line.match(/^([^:,]+?)\s*(?:[:\-,])\s*(.+)$/);
-            if (m) {
-                const actor = m[1].trim();
-                const rolesPart = m[2].trim();
-                const roles = rolesPart.split(/[,;]+|\s+/).map(r => r.trim()).filter(Boolean);
-                if (actor && roles.length) {
-                    if (!map[actor]) map[actor] = new Set();
-                    roles.forEach(r => map[actor].add(r));
+    function normalizeTokenForLengthCheck(token) {
+        const stripped = token.replace(/["'`«»“”„‚\[\]{}()<>]/g, '')
+            .replace(/[.,;:!?]+$/g, '')
+            .replace(/^[-—–]+|[-—–]+$/g, '');
+        return stripped;
+    }
+
+    function splitActorAndPromotedRoles(actorRaw, rolesPartRaw, options = {}) {
+        const {
+            keepShortTokens = false,
+            allowLongUppercaseActorTokens = false
+        } = options;
+        const tokens = (actorRaw || '').split(/\s+/).filter(Boolean);
+        if (!tokens.length) return { actor: '', rolesPart: rolesPartRaw || '' };
+        const actorTokens = [tokens[0]];
+        const promotableShortTokens = [];
+        const promotedRoleTokens = [];
+        for (let i = 1; i < tokens.length; i += 1) {
+            const token = tokens[i];
+            const normalized = normalizeTokenForLengthCheck(token).replace(/\./g, '');
+            if (!normalized) continue;
+            const hasLowercase = /[a-zа-яё]/.test(token);
+            const isShort = normalized.length <= 2;
+            const hasDot = token.includes('.');
+            const isLongUppercase = !hasLowercase && !hasDot && normalized.length > 2;
+            if (hasLowercase || hasDot || (normalized.length > 2 && (!isLongUppercase || allowLongUppercaseActorTokens))) {
+                actorTokens.push(token);
+                continue;
+            }
+            if (isLongUppercase && !allowLongUppercaseActorTokens) {
+                const cleanRole = token.replace(/[.,;:]+$/g, '');
+                promotedRoleTokens.push(cleanRole);
+                continue;
+            }
+            if (isShort && !keepShortTokens) {
+                promotableShortTokens.push(token);
+                continue;
+            }
+            if (isShort && keepShortTokens) {
+                actorTokens.push(token);
+                continue;
+            }
+            const cleanRole = token.replace(/[.,;:]+$/g, '');
+            promotedRoleTokens.push(cleanRole);
+        }
+
+        if (promotableShortTokens.length) {
+            if (keepShortTokens) {
+                actorTokens.push(...promotableShortTokens);
+            } else {
+                if (promotableShortTokens.length >= 2) {
+                    actorTokens.push(promotableShortTokens.shift());
                 }
+                promotableShortTokens.forEach(token => {
+                    const cleanRole = token.replace(/[.,;:]+$/g, '');
+                    promotedRoleTokens.push(cleanRole);
+                });
             }
         }
+
+
+        const finalActor = actorTokens.join(' ').trim();
+        let rolesPart = rolesPartRaw ? rolesPartRaw.trim() : '';
+        if (promotedRoleTokens.length) {
+            const promoted = promotedRoleTokens.join(', ');
+            rolesPart = rolesPart ? `${promoted}, ${rolesPart}` : promoted;
+        }
+        return { actor: finalActor, rolesPart };
+    }
+
+    function shouldPreferAutoDelimiter(beforeTokens, fullTokens) {
+        const count = beforeTokens.length;
+        if (count <= 1) return false;
+        if (count >= 3) return true;
+        const firstToken = beforeTokens[0] || '';
+        const secondToken = beforeTokens[1] || '';
+        const firstHasLowercase = /[a-zа-яё]/.test(firstToken);
+        const secondHasLowercase = /[a-zа-яё]/.test(secondToken);
+        const secondHasDot = secondToken.includes('.');
+        if (count >= 2 && firstHasLowercase && !secondHasLowercase && !secondHasDot) {
+            return true;
+        }
+        const lastToken = normalizeTokenForLengthCheck(beforeTokens[count - 1]);
+        if (!lastToken) return false;
+        if (lastToken.length <= 2) return true;
+        if (/\d/.test(lastToken)) return true;
+        return false;
+    }
+
+    function deriveAutoActorRoles(tokens, options = {}) {
+        if (!Array.isArray(tokens) || !tokens.length) {
+            return { actor: '', rolesPart: '' };
+        }
+        const beforeCount = Array.isArray(options.beforeTokens) ? options.beforeTokens.length : null;
+        const allowShortSecond = typeof options.allowShortSecond === 'boolean' ? options.allowShortSecond : true;
+        const actorTokens = [];
+        let idx = 0;
+        let shortUpperTokensAdded = 0;
+        while (idx < tokens.length) {
+            const token = tokens[idx];
+            if (!token) { idx += 1; continue; }
+            const stripped = token.replace(/[.,;:]+$/g, '');
+            const hadTrailingDelimiter = stripped.length !== token.length;
+            const hasLowercase = /[a-zа-яё]/.test(stripped);
+            const hasDot = token.includes('.');
+            const len = stripped.length;
+            const isShortUpper = len > 0 && len <= 2 && !hasLowercase && !hasDot;
+            let allow = false;
+            if (actorTokens.length === 0) {
+                allow = true;
+            } else if (actorTokens.length === 1) {
+                if (hasLowercase || hasDot) {
+                    allow = true;
+                } else if (allowShortSecond && isShortUpper && shortUpperTokensAdded === 0 && !hadTrailingDelimiter) {
+                    allow = true;
+                }
+            } else if (actorTokens.length === 2) {
+                if (hasLowercase || hasDot) {
+                    allow = true;
+                }
+            }
+            if (!allow) break;
+            actorTokens.push(stripped);
+            if (isShortUpper) {
+                shortUpperTokensAdded += 1;
+            }
+            idx += 1;
+            if (hadTrailingDelimiter) break;
+        }
+        const actorRaw = actorTokens.join(' ').trim();
+        const rolesPartRaw = tokens.slice(idx).join(' ').trim();
+        return { actor: actorRaw, rolesPart: rolesPartRaw };
+    }
+
+    function parseActorRoleMapping(rawText) {
+        const lines = (rawText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        const delimiterFrequency = new Map();
+        const parsedLines = [];
+        let validEntryCount = 0;
+        let autoValidCount = 0;
+        for (const line of lines) {
+            const tokens = line.split(/\s+/).filter(Boolean);
+            if (!tokens.length) {
+                parsedLines.push({ actor: '', roles: [], delimiter: 'auto' });
+                continue;
+            }
+
+            let actor = '';
+            let rolesPart = '';
+            let delimiter = 'auto';
+
+            const colonMatch = line.match(/^(.+?)\:\s*(.+)$/);
+            if (colonMatch) {
+                const processed = splitActorAndPromotedRoles((colonMatch[1] || '').trim(), (colonMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
+                actor = processed.actor;
+                rolesPart = processed.rolesPart;
+                delimiter = ':';
+            } else {
+                const dashMatch = line.match(/^(.+?)\s*[-–]\s*(.+)$/);
+                if (dashMatch) {
+                    const processed = splitActorAndPromotedRoles((dashMatch[1] || '').trim(), (dashMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
+                    actor = processed.actor;
+                    rolesPart = processed.rolesPart;
+                    delimiter = '-';
+                } else {
+                    const commaMatch = line.match(/^(.+?),\s*(.+)$/);
+                    if (commaMatch) {
+                        const before = (commaMatch[1] || '').trim();
+                        const after = (commaMatch[2] || '').trim();
+                        const beforeTokens = before.split(/\s+/).filter(Boolean);
+                        if (shouldPreferAutoDelimiter(beforeTokens, tokens)) {
+                            const processed = deriveAutoActorRoles(tokens, { beforeTokens, allowShortSecond: true });
+                            actor = processed.actor;
+                            rolesPart = processed.rolesPart;
+                            delimiter = 'auto';
+                        } else {
+                            const processed = splitActorAndPromotedRoles(before, after, { keepShortTokens: false });
+                            actor = processed.actor;
+                            rolesPart = processed.rolesPart;
+                            delimiter = ',';
+                        }
+                    } else {
+                        const processed = deriveAutoActorRoles(tokens);
+                        actor = processed.actor;
+                        rolesPart = processed.rolesPart;
+                        delimiter = 'auto';
+                    }
+                }
+            }
+
+            if (!actor || !rolesPart) {
+                parsedLines.push({ actor: '', roles: [], delimiter });
+                continue;
+            }
+
+            const roles = rolesPart.split(/[,;]+/).map(r => r.trim()).filter(Boolean);
+            if (!roles.length) {
+                parsedLines.push({ actor: '', roles: [], delimiter });
+                continue;
+            }
+
+            parsedLines.push({ actor, roles, delimiter });
+            validEntryCount += 1;
+            if (delimiter === 'auto') {
+                autoValidCount += 1;
+            } else {
+                delimiterFrequency.set(delimiter, (delimiterFrequency.get(delimiter) || 0) + 1);
+            }
+        }
+
+        let chosenDelimiter = null;
+        if (autoValidCount > 0 && autoValidCount >= validEntryCount - autoValidCount) {
+            chosenDelimiter = 'auto';
+        } else if (delimiterFrequency.size === 1) {
+            chosenDelimiter = Array.from(delimiterFrequency.keys())[0];
+        } else if (delimiterFrequency.size > 1) {
+            const sorted = Array.from(delimiterFrequency.entries()).sort((a, b) => b[1] - a[1]);
+            if (sorted[0][1] > sorted[1][1]) {
+                chosenDelimiter = sorted[0][0];
+            }
+        }
+
+        if (!validEntryCount) {
+            actorRoleDelimiterWarning = '';
+        } else if (!chosenDelimiter) {
+            actorRoleDelimiterWarning = ACTOR_ROLE_DELIMITER_WARNING_TEXT;
+        } else if (chosenDelimiter === 'auto' && delimiterFrequency.size > 0) {
+            actorRoleDelimiterWarning = ACTOR_ROLE_DELIMITER_WARNING_TEXT;
+        } else {
+            actorRoleDelimiterWarning = '';
+        }
+
         const result = {};
-        Object.keys(map).forEach(a => { result[a] = Array.from(map[a]); });
+        for (const entry of parsedLines) {
+            const { actor, roles, delimiter } = entry;
+            if (!actor || !roles || !roles.length) continue;
+            if (chosenDelimiter) {
+                if (chosenDelimiter === 'auto') {
+                    if (delimiter !== 'auto') continue;
+                } else {
+                    if (delimiter !== chosenDelimiter) continue;
+                }
+            }
+            if (!result[actor]) result[actor] = [];
+            roles.forEach(role => {
+                if (!result[actor].includes(role)) {
+                    result[actor].push(role);
+                }
+            });
+        }
         return result;
     }
 
@@ -2396,6 +3016,24 @@ $(document).ready(function() {
         });
         updateUnassignedRolesUI();
         scheduleStatsButtonEvaluation();
+        updateActorRoleWarningBanner();
+    }
+
+    function updateActorRoleWarningBanner() {
+        const warningBanner = $('#actor-role-warning');
+        if (!warningBanner.length) return;
+        if (actorRoleDelimiterWarning) {
+            warningBanner.text(actorRoleDelimiterWarning);
+            warningBanner.show();
+            return;
+        }
+        if (subtitlesContainRoles()) {
+            warningBanner.hide();
+            warningBanner.text('');
+        } else {
+            warningBanner.html('Дорожка субтитров не содержит ролей, загрузите корректный файл и убедитесь, что реплики записаны в формате <code>[РОЛЬ] Реплика</code>.');
+            warningBanner.show();
+        }
     }
 
     // Compute roles present in subtitleData but not mapped to any actor
@@ -2427,6 +3065,16 @@ $(document).ready(function() {
         roles.forEach(r => {
             list.append(`<span class="unassigned-role-chip" data-role="${r}">${r}</span>`);
         });
+    }
+
+    function subtitlesContainRoles() {
+        if (!Array.isArray(subtitleData) || subtitleData.length === 0) return false;
+        for (const line of subtitleData) {
+            if (!line || typeof line.text !== 'string') continue;
+            const extracted = extractLeadingRole(line.text, false);
+            if (extracted && extracted.role) return true;
+        }
+        return false;
     }
 
     function saveActorsFromUI() {
@@ -2466,6 +3114,7 @@ $(document).ready(function() {
         saveRoles();
         // Перепарсим и перерисуем текст если уже загружен
         if (subtitleData.length > 0) handleTextResponse(subtitleData);
+        updateActorRoleWarningBanner();
     }
     
     function handleTransportResponse(transportData) {
@@ -2672,6 +3321,7 @@ $(document).ready(function() {
         // Заполнить textarea текущим mapping
         $('#actor-role-mapping-text').val(settings.actorRoleMappingText || '');
         regenerateActorColorListUI();
+        updateActorRoleWarningBanner();
         $('#actors-modal').show();
     });
     $('#stats-button').on('click', function(){ buildAndShowStats(); });

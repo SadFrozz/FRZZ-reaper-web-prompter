@@ -185,6 +185,8 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .modal-footer-buttons { display: flex; gap: 1rem; margin-top: 1.25rem; }
 /* ++ ИЗМЕНЕНО: Добавлено box-sizing для выравнивания высоты кнопок ++ */
 .modal-footer-buttons button { flex: 1; padding: 0.625rem; font-size: 1.1em; border-radius: 0.25rem; border: none; cursor: pointer; transition: background-color 0.2s, color 0.2s; box-sizing: border-box; }
+#actors-modal .modal-warning { background-color: rgba(255, 193, 7, 0.15); border: 1px solid rgba(255, 193, 7, 0.6); color: #ffca28; padding: 0.75rem; border-radius: 0.375rem; font-size: 0.95em; margin-bottom: 0.75rem; display: block; width: 100%; box-sizing: border-box; }
+#actors-modal .modal-warning code { background: rgba(255, 193, 7, 0.12); color: #ffe082; padding: 0 0.35rem; border-radius: 0.25rem; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; font-size: 0.95em; }
 #save-settings-button { background-color: #007acc; color: white; }
 #save-settings-button:hover { background-color: #006bb3; }
 .button-danger { background-color: #5a5a5a; color: #eee; }
