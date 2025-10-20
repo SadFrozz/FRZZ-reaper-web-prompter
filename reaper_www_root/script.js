@@ -1,6 +1,116 @@
-const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION = 4;
 const DATA_MODEL_VERSION = 2;
 const DEFAULT_PROJECT_FPS = 24;
+const MAX_JUMP_PRE_ROLL_SECONDS = 10;
+const MAX_AUTO_SCROLL_LOOKAHEAD_MS = 5000;
+const MIN_AUTO_SCROLL_WINDOW_GAP = 5;
+const MAX_AUTO_SCROLL_EASING_PER_PIXEL = 10;
+const MAX_AUTO_SCROLL_ANIMATION_MS = 3000;
+
+function clampNumber(value, min, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return min;
+    }
+    if (numeric < min) return min;
+    if (numeric > max) return max;
+    return numeric;
+}
+
+function normalizeTimecodeDisplayFormatValue(value, fallback = 'auto') {
+    const fallbackNormalized = typeof fallback === 'string' ? fallback.trim().toLowerCase() : 'auto';
+    const fallbackValue = fallbackNormalized === 'milliseconds' ? 'milliseconds'
+        : fallbackNormalized === 'frames' ? 'frames'
+        : 'auto';
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'milliseconds' || normalized === 'millisecond' || normalized === 'millis' || normalized === 'ms') {
+            return 'milliseconds';
+        }
+        if (normalized === 'frames' || normalized === 'frame' || normalized === 'ff') {
+            return 'frames';
+        }
+        if (normalized === 'auto') {
+            return 'auto';
+        }
+    }
+    return fallbackValue;
+}
+
+function sanitizeJumpPreRollSeconds(value, fallback = 0) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return Math.max(0, Number(fallback) || 0);
+    }
+    const clamped = Math.min(MAX_JUMP_PRE_ROLL_SECONDS, numeric);
+    // Normalize to 3 decimal places to avoid FP noise in settings persistence.
+    return Math.round(clamped * 1000) / 1000;
+}
+
+function sanitizeAutoScrollMode(value, fallback = 'page') {
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'line') return 'line';
+        if (normalized === 'page') return 'page';
+    }
+    return typeof fallback === 'string' ? fallback : 'page';
+}
+
+function sanitizeAutoScrollLookaheadMs(value, fallback = 0) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return clampNumber(fallback, 0, MAX_AUTO_SCROLL_LOOKAHEAD_MS);
+    }
+    return clampNumber(Math.round(numeric), 0, MAX_AUTO_SCROLL_LOOKAHEAD_MS);
+}
+
+function sanitizeAutoScrollPercent(value, fallback, min = 0, max = 100) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return clampNumber(fallback, min, max);
+    }
+    return clampNumber(numeric, min, max);
+}
+
+function sanitizeAutoScrollLineEasingBaseMs(value, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return clampNumber(fallback, 50, MAX_AUTO_SCROLL_ANIMATION_MS);
+    }
+    return clampNumber(Math.round(numeric), 50, MAX_AUTO_SCROLL_ANIMATION_MS);
+}
+
+function sanitizeAutoScrollLineEasingPerPixel(value, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return clampNumber(fallback, 0, MAX_AUTO_SCROLL_EASING_PER_PIXEL);
+    }
+    const rounded = Math.round(numeric * 100) / 100;
+    return clampNumber(rounded, 0, MAX_AUTO_SCROLL_EASING_PER_PIXEL);
+}
+
+function sanitizeAutoScrollLineEasingMaxMs(value, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return clampNumber(fallback, 100, MAX_AUTO_SCROLL_ANIMATION_MS);
+    }
+    return clampNumber(Math.round(numeric), 100, MAX_AUTO_SCROLL_ANIMATION_MS);
+}
+
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+const easeInOutCubic = t => (t < 0.5)
+    ? 4 * t * t * t
+    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+function isPlayingState(playState) {
+    const state = Number(playState) | 0;
+    return (state & 1) === 1;
+}
+
+function isRecordingState(playState) {
+    const state = Number(playState) | 0;
+    return (state & 4) === 4;
+}
 
 // --- ВСПОМОГАТЕЛЬНЫЕ МОДУЛИ ---
 const PrompterTime = (() => {
@@ -165,13 +275,21 @@ if (typeof window !== 'undefined') {
 
 // --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
 const defaultSettings = {
-    settingsSchemaVersion: 2,
+    settingsSchemaVersion: 4,
     fontSize: 2,
     lineHeight: 1.4,
     navigationPanelPosition: 'bottom',
     frameRate: 24,
     autoScroll: true,
     scrollSpeed: 60,
+    autoScrollMode: 'page',
+    autoScrollLookaheadMs: 0,
+    autoScrollWindowTopPercent: 10,
+    autoScrollWindowBottomPercent: 85,
+    autoScrollLineAnchorPercent: 35,
+    autoScrollLineEasingBaseMs: 220,
+    autoScrollLineEasingPerPixel: 1.2,
+    autoScrollLineEasingMaxMs: 1200,
     theme: 'dark',
     lineSpacing: 50,
     fontFamily: "'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
@@ -204,11 +322,15 @@ const defaultSettings = {
     highlightClickBg: 'rgba(120, 0, 120, 0.4)',
     highlightClickDuration: 800,
     progressBarColor: 'rgba(255, 193, 7, 1)',
+    jumpOnClickEnabled: false,
+    jumpPreventWhilePlaying: true,
+    jumpPreventWhileRecording: true,
+    jumpPreRollSeconds: 0,
     // Actors coloring
     actorRoleMappingText: '', // Raw multiline text user enters
     actorColors: {}, // { actorName: colorString }
     dataModelVersion: 2,
-    timecodeDisplayFormat: 'frames'
+    timecodeDisplayFormat: 'auto'
 };
 let settings = {};
 let currentProjectName = '';
@@ -240,9 +362,11 @@ const PROJECT_DATA_CHUNK_COUNT_KEY = 'getProjectDataJson_chunk_count';
 const PROJECT_DATA_CHUNK_PREFIX = 'getProjectDataJson_chunk_';
 const PROJECT_DATA_POLL_INTERVAL_MS = 100;
 const PROJECT_DATA_TIMEOUT_MS = 5000;
+const PROJECT_DATA_STATUS_TOLERANCE_MS = 20;
 
 let projectDataCache = null;
 let projectDataInFlight = null;
+let lastProjectDataTimestamp = 0;
 
 const extStateWaiters = new Map();
 
@@ -278,6 +402,11 @@ function requestExtStateValue(key, timeoutMs = 500) {
     });
 }
 
+function delay(ms) {
+    const duration = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+    return new Promise(resolve => setTimeout(resolve, duration));
+}
+
 async function fetchProjectDataChunks() {
     const countRaw = await requestExtStateValue(PROJECT_DATA_CHUNK_COUNT_KEY, 800);
     const total = parseInt(countRaw, 10);
@@ -299,40 +428,86 @@ async function fetchProjectDataChunks() {
     return parts.join('');
 }
 
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+function parseProjectDataStatus(raw) {
+    const result = {
+        raw: typeof raw === 'string' ? raw : '',
+        normalized: 'unknown',
+        state: typeof raw === 'string' ? raw : '',
+        timestamp: null,
+        detail: ''
+    };
+
+    if (typeof raw !== 'string') {
+        return result;
+    }
+
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        result.state = '';
+        return result;
+    }
+
+    const [statePart = '', timestampPart = '', ...detailParts] = trimmed.split('|');
+    result.state = statePart;
+    result.detail = detailParts.join('|');
+
+    const normalizedState = statePart.toLowerCase();
+    if (normalizedState.startsWith('pending') || normalizedState.startsWith('working') || normalizedState.startsWith('processing')) {
+        result.normalized = 'pending';
+    } else if (normalizedState.startsWith('ok')) {
+        result.normalized = 'ok';
+    } else if (normalizedState.startsWith('error') || normalizedState.startsWith('fail')) {
+        result.normalized = 'error';
+    } else if (normalizedState.length) {
+        result.normalized = 'other';
+    }
+
+    const timestampValue = Number(timestampPart);
+    if (Number.isFinite(timestampValue)) {
+        result.timestamp = timestampValue;
+    }
+
+    return result;
 }
 
 function clearProjectDataCache() {
+    projectDataCache = null;
+    lastProjectDataTimestamp = 0;
     try {
         localStorage.removeItem(PROJECT_DATA_CACHE_KEY);
     } catch (err) {
-        console.debug('[Prompter][projectData] clear cache failed', err);
+        console.warn('[Prompter][projectData] failed to clear cache', err);
     }
-    projectDataCache = null;
-}
-
-function storeProjectDataCache(data) {
-    try {
-        const payload = { data, savedAt: Date.now() };
-        localStorage.setItem(PROJECT_DATA_CACHE_KEY, JSON.stringify(payload));
-    } catch (err) {
-        console.debug('[Prompter][projectData] save cache failed', err);
-    }
-    projectDataCache = data || null;
 }
 
 function loadProjectDataCache() {
+    if (projectDataCache) {
+        return projectDataCache;
+    }
     try {
         const raw = localStorage.getItem(PROJECT_DATA_CACHE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
-        const data = parsed && typeof parsed === 'object' ? parsed.data || null : null;
-        projectDataCache = data;
-        return data;
+        const snapshot = parsed && typeof parsed === 'object' ? parsed.data || null : null;
+        projectDataCache = snapshot && typeof snapshot === 'object' ? snapshot : null;
+        return projectDataCache;
     } catch (err) {
-        console.debug('[Prompter][projectData] load cache failed', err);
+        console.warn('[Prompter][projectData] failed to load cache', err);
         return null;
+    }
+}
+
+function storeProjectDataCache(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+        clearProjectDataCache();
+        return;
+    }
+    projectDataCache = snapshot;
+    try {
+        const payload = { data: snapshot, savedAt: Date.now() };
+        localStorage.setItem(PROJECT_DATA_CACHE_KEY, JSON.stringify(payload));
+    } catch (err) {
+        console.warn('[Prompter][projectData] failed to persist cache', err);
     }
 }
 
@@ -354,6 +529,7 @@ $(document).ready(function() {
     const sharedProgressBar = document.createElement('div');
     sharedProgressBar.className = 'subtitle-progress-bar';
     sharedProgressContainer.appendChild(sharedProgressBar);
+    const JUMP_REQUEST_DEBOUNCE_MS = 150;
     let sharedProgressHost = null;
     let sharedProgressIndex = -1;
     let sharedProgressValue = 0;
@@ -374,6 +550,19 @@ $(document).ready(function() {
     const scrollSpeedSlider = $('#scroll-speed');
     const scrollSpeedValue = $('#scroll-speed-value');
     const scrollSpeedCaption = $('#scroll-speed-caption');
+    const scrollSpeedWrapper = $('#scroll-speed-wrapper');
+    const autoScrollSettingsWrapper = $('#auto-scroll-settings-wrapper');
+    const autoScrollModeSelect = $('#auto-scroll-mode');
+    const autoScrollLookaheadInput = $('#auto-scroll-lookahead-ms');
+    const autoScrollWindowWrapper = $('#auto-scroll-window-wrapper');
+    const autoScrollWindowTrack = $('#auto-scroll-window-track');
+    const autoScrollWindowTopInput = $('#auto-scroll-window-top-percent');
+    const autoScrollWindowBottomInput = $('#auto-scroll-window-bottom-percent');
+    const autoScrollWindowTopValue = $('#auto-scroll-window-top-value');
+    const autoScrollWindowBottomValue = $('#auto-scroll-window-bottom-value');
+    const autoScrollLineAnchorWrapper = $('#auto-scroll-line-anchor-wrapper');
+    const autoScrollLineAnchorInput = $('#auto-scroll-line-anchor-percent');
+    const autoScrollLineAnchorValue = $('#auto-scroll-line-anchor-value');
     const lineSpacingSlider = $('#line-spacing');
     const lineSpacingValue = $('#line-spacing-value');
     const autoFindTrackCheckbox = $('#auto-find-track');
@@ -392,6 +581,12 @@ $(document).ready(function() {
     const highlightClickOptionsWrapper = $('#highlight-click-options-wrapper');
     const highlightRoleColorWrapper = $('#highlight-role-color-wrapper');
     const roleFontColorEnabledCheckbox = $('#role-font-color-enabled');
+    const jumpOnClickCheckbox = $('#jump-on-click-enabled');
+    const jumpSettingsWrapper = $('#jump-settings-wrapper');
+    const jumpPreRollInput = $('#jump-pre-roll-seconds');
+    const jumpPreventWhilePlayingCheckbox = $('#jump-prevent-while-playing');
+    const jumpPreventWhileRecordingCheckbox = $('#jump-prevent-while-recording');
+    const timecodeDisplayFormatSelect = $('#timecode-display-format');
     let subtitleData = [];
     let subtitleElements = [];
     let subtitleContentElements = [];
@@ -424,7 +619,8 @@ $(document).ready(function() {
     let projectFpsSource = 'default';
     let projectDropFrame = false;
     let projectFpsRaw = '';
-    let activeTimecodeFormat = defaultSettings.timecodeDisplayFormat || 'frames';
+    let activeTimecodeFormat = normalizeTimecodeDisplayFormatValue(defaultSettings.timecodeDisplayFormat, 'auto');
+    let effectiveTimecodeFormat = activeTimecodeFormat;
     let dataModel = createEmptyDataModel();
     const eventBus = createEventBus();
     if (typeof window !== 'undefined') {
@@ -443,6 +639,92 @@ $(document).ready(function() {
     let transportPlayState = 0;
     let transportLastUpdateAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     let transportLastTimecode = 0;
+    let lastJumpRequestAt = 0;
+    let scrollAnimationFrame = null;
+    let lastLookaheadTargetIndex = -1;
+
+    function hasReliableFrameRateForAuto() {
+        if (!Number.isFinite(projectFps) || projectFps <= 0) return false;
+        const source = (projectFpsSource || '').toLowerCase();
+        if (!source || source === 'default' || source === 'unknown') return false;
+        return true;
+    }
+
+    function computeEffectiveTimecodeFormat(formatCandidate) {
+        const normalized = normalizeTimecodeDisplayFormatValue(formatCandidate, defaultSettings.timecodeDisplayFormat);
+        if (normalized === 'auto') {
+            return hasReliableFrameRateForAuto() ? 'frames' : 'milliseconds';
+        }
+        return normalized;
+    }
+
+    function getEffectiveTimecodeFormat() {
+        return effectiveTimecodeFormat;
+    }
+
+    function refreshDisplayedTimecodes(context = {}) {
+        if (transportTimecode && transportTimecode.length) {
+            transportTimecode.text(formatTimecode(latestTimecode));
+        }
+        if (!Array.isArray(subtitleData) || !subtitleData.length) return;
+        const frameRate = getActiveFrameRate();
+        const effectiveFormat = getEffectiveTimecodeFormat();
+        for (let i = 0; i < subtitleData.length; i++) {
+            const line = subtitleData[i];
+            if (!line) continue;
+            const container = subtitleElements[i];
+            if (!container) continue;
+            const timeNode = container.querySelector('.subtitle-time');
+            if (!timeNode) continue;
+            const timeString = formatTimecode(line.start_time, frameRate);
+            timeNode.textContent = timeString;
+            line.__cachedTimecode = timeString;
+            line.__cachedFrameRate = frameRate;
+            line.__cachedTimecodeFormat = effectiveFormat;
+        }
+        if (context.log) {
+            console.debug('[Prompter][timecode] display refreshed', context);
+        }
+    }
+
+    function setActiveTimecodeFormat(formatCandidate, options = {}) {
+        const normalized = normalizeTimecodeDisplayFormatValue(formatCandidate, defaultSettings.timecodeDisplayFormat);
+        const previousActive = activeTimecodeFormat;
+        const previousEffective = effectiveTimecodeFormat;
+        activeTimecodeFormat = normalized;
+        effectiveTimecodeFormat = computeEffectiveTimecodeFormat(normalized);
+        if (options.updateUI !== false && timecodeDisplayFormatSelect && timecodeDisplayFormatSelect.length) {
+            timecodeDisplayFormatSelect.val(normalized);
+        }
+        const effectiveChanged = effectiveTimecodeFormat !== previousEffective;
+        if (options.refresh !== false && (effectiveChanged || options.forceRefresh)) {
+            refreshDisplayedTimecodes({ reason: options.reason || 'format_update' });
+        }
+        if (options.log) {
+            console.debug('[Prompter][timecode] format set', {
+                active: activeTimecodeFormat,
+                effective: effectiveTimecodeFormat,
+                reason: options.reason || 'manual',
+                effectiveChanged
+            });
+        }
+        return {
+            activeChanged: normalized !== previousActive,
+            effectiveChanged
+        };
+    }
+
+    function updateEffectiveTimecodeFormat(reason) {
+        const previousEffective = effectiveTimecodeFormat;
+        effectiveTimecodeFormat = computeEffectiveTimecodeFormat(activeTimecodeFormat);
+        if (effectiveTimecodeFormat !== previousEffective) {
+            console.debug('[Prompter][timecode] auto adjustment', { reason, format: effectiveTimecodeFormat });
+            refreshDisplayedTimecodes({ reason: reason || 'auto_adjust' });
+        }
+    }
+
+    setActiveTimecodeFormat(activeTimecodeFormat, { updateUI: false, refresh: false, reason: 'init' });
+
     // Configure event listener optimizations (passive scroll + skip touch on non-touch devices)
     (function configureInputEventOptimizations($root){
         try {
@@ -704,8 +986,12 @@ $(document).ready(function() {
     }
 
     function formatTimecode(totalSeconds, frameRate = null) {
-        const fps = PrompterTime.sanitizeFps(frameRate || getActiveFrameRate());
         const ms = Math.max(0, Number(totalSeconds) || 0) * 1000;
+        const effectiveFormat = getEffectiveTimecodeFormat();
+        if (effectiveFormat === 'milliseconds') {
+            return PrompterTime.formatHmsMillis(ms, 2);
+        }
+        const fps = PrompterTime.sanitizeFps(frameRate || getActiveFrameRate());
         return PrompterTime.formatHmsFrames(ms, fps);
     }
 
@@ -773,6 +1059,7 @@ $(document).ready(function() {
         const payload = { fps: sanitized, source, dropFrame: projectDropFrame, raw: projectFpsRaw, ...restMeta };
         eventBus.emit('project:fps', payload);
         console.info('[Prompter][fps] updated', payload);
+        updateEffectiveTimecodeFormat(meta.reason || source || 'fps_update');
     }
 
     function legacyActorMappingToText(source) {
@@ -895,6 +1182,34 @@ $(document).ready(function() {
                 changed = true;
             }
         }
+        if (incoming.jumpPreRollSeconds !== undefined) {
+            const sanitizedPreRoll = sanitizeJumpPreRollSeconds(incoming.jumpPreRollSeconds, defaultSettings.jumpPreRollSeconds);
+            if (sanitizedPreRoll !== incoming.jumpPreRollSeconds) {
+                incoming.jumpPreRollSeconds = sanitizedPreRoll;
+                changed = true;
+            }
+        }
+        if (incoming.jumpOnClickEnabled !== undefined && typeof incoming.jumpOnClickEnabled !== 'boolean') {
+            const normalized = Boolean(incoming.jumpOnClickEnabled);
+            if (normalized !== incoming.jumpOnClickEnabled) {
+                incoming.jumpOnClickEnabled = normalized;
+                changed = true;
+            }
+        }
+        if (incoming.jumpPreventWhilePlaying !== undefined && typeof incoming.jumpPreventWhilePlaying !== 'boolean') {
+            const normalized = Boolean(incoming.jumpPreventWhilePlaying);
+            if (normalized !== incoming.jumpPreventWhilePlaying) {
+                incoming.jumpPreventWhilePlaying = normalized;
+                changed = true;
+            }
+        }
+        if (incoming.jumpPreventWhileRecording !== undefined && typeof incoming.jumpPreventWhileRecording !== 'boolean') {
+            const normalized = Boolean(incoming.jumpPreventWhileRecording);
+            if (normalized !== incoming.jumpPreventWhileRecording) {
+                incoming.jumpPreventWhileRecording = normalized;
+                changed = true;
+            }
+        }
         const base = { ...defaultSettings, ...incoming };
         if (!base.dataModelVersion || base.dataModelVersion < DATA_MODEL_VERSION) {
             changed = true;
@@ -902,6 +1217,11 @@ $(document).ready(function() {
         }
         if (!base.timecodeDisplayFormat) {
             base.timecodeDisplayFormat = defaultSettings.timecodeDisplayFormat;
+            changed = true;
+        }
+        const normalizedFormat = normalizeTimecodeDisplayFormatValue(base.timecodeDisplayFormat, defaultSettings.timecodeDisplayFormat);
+        if (normalizedFormat !== base.timecodeDisplayFormat) {
+            base.timecodeDisplayFormat = normalizedFormat;
             changed = true;
         }
         if (legacySchema !== SETTINGS_SCHEMA_VERSION) {
@@ -912,6 +1232,84 @@ $(document).ready(function() {
             base.settingsMigratedFrom = legacySchema;
         } else {
             delete base.settingsMigratedFrom;
+        }
+
+        const sanitizedMode = sanitizeAutoScrollMode(base.autoScrollMode, defaultSettings.autoScrollMode);
+        if (sanitizedMode !== base.autoScrollMode) {
+            base.autoScrollMode = sanitizedMode;
+            changed = true;
+        }
+        const sanitizedLookahead = sanitizeAutoScrollLookaheadMs(
+            base.autoScrollLookaheadMs,
+            defaultSettings.autoScrollLookaheadMs
+        );
+        if (sanitizedLookahead !== base.autoScrollLookaheadMs) {
+            base.autoScrollLookaheadMs = sanitizedLookahead;
+            changed = true;
+        }
+        const sanitizedWindowTop = sanitizeAutoScrollPercent(
+            base.autoScrollWindowTopPercent,
+            defaultSettings.autoScrollWindowTopPercent,
+            0,
+            90
+        );
+        let sanitizedWindowBottom = sanitizeAutoScrollPercent(
+            base.autoScrollWindowBottomPercent,
+            defaultSettings.autoScrollWindowBottomPercent,
+            sanitizedWindowTop + MIN_AUTO_SCROLL_WINDOW_GAP,
+            100
+        );
+        if (sanitizedWindowBottom - sanitizedWindowTop < MIN_AUTO_SCROLL_WINDOW_GAP) {
+            sanitizedWindowBottom = Math.min(100, sanitizedWindowTop + MIN_AUTO_SCROLL_WINDOW_GAP);
+        }
+        if (sanitizedWindowTop !== base.autoScrollWindowTopPercent) {
+            base.autoScrollWindowTopPercent = sanitizedWindowTop;
+            changed = true;
+        }
+        if (sanitizedWindowBottom !== base.autoScrollWindowBottomPercent) {
+            base.autoScrollWindowBottomPercent = sanitizedWindowBottom;
+            changed = true;
+        }
+        if (Object.prototype.hasOwnProperty.call(base, 'autoScrollPageAnchorPercent')) {
+            delete base.autoScrollPageAnchorPercent;
+            changed = true;
+        }
+        const sanitizedLineAnchor = sanitizeAutoScrollPercent(
+            base.autoScrollLineAnchorPercent,
+            defaultSettings.autoScrollLineAnchorPercent,
+            0,
+            100
+        );
+        if (sanitizedLineAnchor !== base.autoScrollLineAnchorPercent) {
+            base.autoScrollLineAnchorPercent = sanitizedLineAnchor;
+            changed = true;
+        }
+        const sanitizedLineBase = sanitizeAutoScrollLineEasingBaseMs(
+            base.autoScrollLineEasingBaseMs,
+            defaultSettings.autoScrollLineEasingBaseMs
+        );
+        if (sanitizedLineBase !== base.autoScrollLineEasingBaseMs) {
+            base.autoScrollLineEasingBaseMs = sanitizedLineBase;
+            changed = true;
+        }
+        const sanitizedLinePerPixel = sanitizeAutoScrollLineEasingPerPixel(
+            base.autoScrollLineEasingPerPixel,
+            defaultSettings.autoScrollLineEasingPerPixel
+        );
+        if (sanitizedLinePerPixel !== base.autoScrollLineEasingPerPixel) {
+            base.autoScrollLineEasingPerPixel = sanitizedLinePerPixel;
+            changed = true;
+        }
+        let sanitizedLineMax = sanitizeAutoScrollLineEasingMaxMs(
+            base.autoScrollLineEasingMaxMs,
+            defaultSettings.autoScrollLineEasingMaxMs
+        );
+        if (sanitizedLineMax < base.autoScrollLineEasingBaseMs) {
+            sanitizedLineMax = base.autoScrollLineEasingBaseMs;
+        }
+        if (sanitizedLineMax !== base.autoScrollLineEasingMaxMs) {
+            base.autoScrollLineEasingMaxMs = sanitizedLineMax;
+            changed = true;
         }
         if (metaTarget && typeof metaTarget === 'object') {
             metaTarget.changed = !!changed;
@@ -1196,20 +1594,234 @@ $(document).ready(function() {
         };
     }
 
-    function smoothScrollWrapperTo(targetTop) {
+    function smoothScrollWrapperTo(targetTop, options = {}) {
         const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
         if (!wrapper) return;
-        const clampedTarget = Math.max(targetTop, 0);
-        const canSmoothScroll = typeof wrapper.scrollTo === 'function';
-        if (canSmoothScroll) {
+        const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight);
+        const clampedTarget = clampNumber(targetTop, 0, maxScrollTop);
+        const currentScrollTop = wrapper.scrollTop;
+        const distance = clampedTarget - currentScrollTop;
+        if (Math.abs(distance) < 0.5) {
+            wrapper.scrollTop = clampedTarget;
+            return;
+        }
+        if (scrollAnimationFrame) {
+            cancelAnimationFrame(scrollAnimationFrame);
+            scrollAnimationFrame = null;
+        }
+        const defaultDuration = Math.max(240, Math.min(900, Math.abs(distance) * 0.65));
+        const desiredDuration = Number(options.durationMs);
+        const durationMs = clampNumber(
+            Number.isFinite(desiredDuration) && desiredDuration > 0 ? desiredDuration : defaultDuration,
+            60,
+            options.maxDurationMs ? clampNumber(options.maxDurationMs, 120, MAX_AUTO_SCROLL_ANIMATION_MS) : MAX_AUTO_SCROLL_ANIMATION_MS
+        );
+        const easingFn = typeof options.easing === 'function' ? options.easing : easeOutCubic;
+        const startTime = (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+        const startTop = currentScrollTop;
+
+        const step = (timestamp) => {
+            const nowTs = typeof timestamp === 'number' ? timestamp : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+            const elapsed = nowTs - startTime;
+            const t = elapsed >= durationMs ? 1 : Math.max(0, elapsed / durationMs);
+            const eased = easingFn(t);
+            wrapper.scrollTop = startTop + distance * eased;
+            if (t < 1) {
+                scrollAnimationFrame = requestAnimationFrame(step);
+            } else {
+                scrollAnimationFrame = null;
+                wrapper.scrollTop = clampedTarget;
+            }
+        };
+
+        scrollAnimationFrame = requestAnimationFrame(step);
+    }
+
+    function applyClickHighlight(element, options = {}) {
+        if (!element || !settings.highlightClickEnabled) return;
+        const durationCandidate = options.duration !== undefined ? options.duration : settings.highlightClickDuration;
+        const duration = (typeof durationCandidate === 'number' && durationCandidate > 0 && durationCandidate <= 60000)
+            ? durationCandidate
+            : defaultSettings.highlightClickDuration;
+        if (element.__clickHighlightTimer) {
+            clearTimeout(element.__clickHighlightTimer);
+            element.classList.remove('click-highlight');
+            element.__clickHighlightTimer = null;
+        }
+        element.classList.add('click-highlight');
+        element.__clickHighlightTimer = setTimeout(() => {
+            element.classList.remove('click-highlight');
+            element.__clickHighlightTimer = null;
+        }, duration);
+    }
+
+    function focusLineElement(targetIndex, options = {}) {
+        if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= subtitleElements.length) return;
+        const element = options.element || subtitleElements[targetIndex];
+        if (!element) return;
+        const shouldScroll = options.scroll !== false;
+        const blockMode = options.scrollBlock || 'center';
+        if (shouldScroll) {
+            const fallbackTop = element.offsetTop - ((textDisplayWrapperEl && blockMode === 'center') ? (textDisplayWrapperEl.clientHeight / 2) : 0);
             try {
-                wrapper.scrollTo({ top: clampedTarget, behavior: 'smooth' });
-                return;
+                element.scrollIntoView({ behavior: 'smooth', block: blockMode });
             } catch (err) {
-                // fallback below when smooth behavior unsupported
+                smoothScrollWrapperTo(fallbackTop);
             }
         }
-        wrapper.scrollTop = clampedTarget;
+        if (options.highlight !== false) {
+            applyClickHighlight(element, options.highlightOptions || {});
+        }
+        attachSharedProgressToIndex(targetIndex);
+        paintLine(targetIndex, true);
+        schedulePaintVisible();
+    }
+
+    function updateJumpControlsState(enabled) {
+        const isEnabled = !!enabled;
+        if (jumpSettingsWrapper && jumpSettingsWrapper.length) {
+            jumpSettingsWrapper.toggle(isEnabled);
+        }
+        if (jumpPreRollInput && jumpPreRollInput.length) {
+            jumpPreRollInput.prop('disabled', !isEnabled);
+        }
+        if (jumpPreventWhilePlayingCheckbox && jumpPreventWhilePlayingCheckbox.length) {
+            jumpPreventWhilePlayingCheckbox.prop('disabled', !isEnabled);
+        }
+        if (jumpPreventWhileRecordingCheckbox && jumpPreventWhileRecordingCheckbox.length) {
+            jumpPreventWhileRecordingCheckbox.prop('disabled', !isEnabled);
+        }
+    }
+
+    function getActiveJumpPreRollSeconds() {
+        const candidate = settings && typeof settings.jumpPreRollSeconds !== 'undefined'
+            ? settings.jumpPreRollSeconds
+            : defaultSettings.jumpPreRollSeconds;
+        return sanitizeJumpPreRollSeconds(candidate, defaultSettings.jumpPreRollSeconds);
+    }
+
+    function shouldBlockJumpDueToTransport() {
+        if (!settings.jumpOnClickEnabled) return true;
+        if (settings.jumpPreventWhileRecording && isRecordingState(transportPlayState)) {
+            return true;
+        }
+        if (settings.jumpPreventWhilePlaying && isPlayingState(transportPlayState)) {
+            return true;
+        }
+        return false;
+    }
+
+    function sendNativeTransportJump(targetSeconds, options = {}) {
+        if (typeof wwr_req !== 'function') {
+            return false;
+        }
+        if (!wwr_is_enabled) {
+            wwr_is_enabled = true;
+        }
+        const numeric = Number(targetSeconds);
+        if (!Number.isFinite(numeric)) {
+            return false;
+        }
+        const clampedSeconds = Math.max(0, numeric);
+        // Round to 6 decimals which matches REAPER web expectations.
+        const formatted = clampedSeconds.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+        try {
+            wwr_req(`SET/POS/${formatted}`);
+            if (options.requestTransportRefresh) {
+                wwr_req('TRANSPORT');
+            }
+            return true;
+        } catch (err) {
+            console.error('[Prompter][jump] native SET/POS failed', err);
+            return false;
+        }
+    }
+
+    function requestJumpToLine(lineIndex, startSeconds) {
+        if (!settings.jumpOnClickEnabled) {
+            return false;
+        }
+        if (!wwr_is_enabled || !eventBus || typeof eventBus.emitToBackend !== 'function') {
+            console.debug('[Prompter][jump] backend event bus unavailable, will attempt native command if possible');
+        }
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (now - lastJumpRequestAt < JUMP_REQUEST_DEBOUNCE_MS) {
+            return false;
+        }
+        lastJumpRequestAt = now;
+        const startValue = Number(startSeconds);
+        if (!Number.isFinite(startValue) || startValue < 0) {
+            return false;
+        }
+        const preRollSeconds = getActiveJumpPreRollSeconds();
+        const targetSeconds = Math.max(0, startValue - preRollSeconds);
+        const payload = {
+            position_ms: Math.round(targetSeconds * 1000),
+            line_index: lineIndex,
+            line_start_ms: Math.round(startValue * 1000),
+            pre_roll_ms: Math.round(preRollSeconds * 1000),
+            source: 'click'
+        };
+        const nativeEmitted = sendNativeTransportJump(targetSeconds, { requestTransportRefresh: true });
+        if (nativeEmitted) {
+            return true;
+        }
+
+        if (!eventBus || typeof eventBus.emitToBackend !== 'function') {
+            return false;
+        }
+        try {
+            eventBus.emitToBackend('time:jump', payload);
+            return true;
+        } catch (err) {
+            console.error('[Prompter][jump] emitToBackend failed', err);
+            return false;
+        }
+    }
+
+    function onSubtitleContainerClick(event) {
+        try {
+            if (!settings.jumpOnClickEnabled) {
+                return;
+            }
+            if (event && event.button !== undefined && event.button !== 0) {
+                return;
+            }
+            if (event && (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)) {
+                return;
+            }
+            const selection = typeof window !== 'undefined' && window.getSelection ? window.getSelection() : null;
+            if (selection && typeof selection.toString === 'function' && selection.toString().trim().length > 0) {
+                return;
+            }
+            const container = event && event.currentTarget ? event.currentTarget : null;
+            if (!container || !container.dataset) {
+                return;
+            }
+            const index = Number(container.dataset.index);
+            if (!Number.isInteger(index) || index < 0 || index >= subtitleData.length) {
+                return;
+            }
+            const line = subtitleData[index];
+            if (!line || typeof line.start_time !== 'number') {
+                return;
+            }
+            if (shouldBlockJumpDueToTransport()) {
+                console.debug('[Prompter][jump] suppressed by transport guard', {
+                    playState: transportPlayState,
+                    preventPlay: settings.jumpPreventWhilePlaying,
+                    preventRec: settings.jumpPreventWhileRecording
+                });
+                return;
+            }
+            const emitted = requestJumpToLine(index, line.start_time);
+            focusLineElement(index, { element: container });
+            if (!emitted) {
+                console.debug('[Prompter][jump] request not emitted (backend unavailable or throttled)');
+            }
+        } catch (err) {
+            console.error('[Prompter][jump] subtitle click handler error', err);
+        }
     }
 
     function detachSharedProgress() {
@@ -1376,7 +1988,7 @@ $(document).ready(function() {
     }
 
     // Measure target scroll position ahead of DOM mutations to avoid layout thrashing.
-    function computeAutoScrollPlan(targetIndex) {
+    function computeAutoScrollPlan(targetIndex, options = {}) {
         if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
             return undefined;
         }
@@ -1386,20 +1998,88 @@ $(document).ready(function() {
         if (!targetNode) return undefined;
         const wrapperHeight = wrapper.clientHeight || 0;
         if (!wrapperHeight) return undefined;
-        // Direct offsets keep auto-scroll lightweight without manual cache rebuilds.
+        const autoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+        const rawTopPercent = sanitizeAutoScrollPercent(
+            settings.autoScrollWindowTopPercent,
+            defaultSettings.autoScrollWindowTopPercent,
+            0,
+            90
+        );
+        const rawBottomPercent = sanitizeAutoScrollPercent(
+            settings.autoScrollWindowBottomPercent,
+            defaultSettings.autoScrollWindowBottomPercent,
+            rawTopPercent + MIN_AUTO_SCROLL_WINDOW_GAP,
+            100
+        );
+        const windowTopPercent = rawTopPercent;
+        const windowBottomPercent = rawBottomPercent <= windowTopPercent + MIN_AUTO_SCROLL_WINDOW_GAP
+            ? Math.min(100, windowTopPercent + MIN_AUTO_SCROLL_WINDOW_GAP)
+            : rawBottomPercent;
+        const windowTopFraction = clampNumber(windowTopPercent / 100, 0, 0.95);
+        const windowBottomFraction = clampNumber(windowBottomPercent / 100, windowTopFraction + 0.01, 1);
         const targetOffsetTop = typeof targetNode.offsetTop === 'number' ? targetNode.offsetTop : 0;
         const currentScrollTop = wrapper.scrollTop;
         const relativeTop = targetOffsetTop - currentScrollTop;
-        const elementHeight = targetNode.offsetHeight || 1;
-        const topThreshold = wrapperHeight * 0.1;
-        const bottomThreshold = wrapperHeight * 0.9 - elementHeight;
-        if (relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
+        const elementHeight = Math.max(targetNode.offsetHeight || 1, 1);
+        const topThreshold = wrapperHeight * windowTopFraction;
+        const bottomThreshold = (wrapperHeight * windowBottomFraction) - elementHeight;
+        const forceScroll = options.force === true;
+        if (!forceScroll && relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
             return null;
         }
-        const targetScrollTop = Math.max(0, targetOffsetTop - wrapperHeight * 0.2);
-        const scrollSpeedValue = Math.max(settings.scrollSpeed || 1, 1);
-        const duration = 400 / (scrollSpeedValue / 100);
-        return { targetScrollTop, duration };
+        const lineAnchorPercent = sanitizeAutoScrollPercent(
+            settings.autoScrollLineAnchorPercent,
+            defaultSettings.autoScrollLineAnchorPercent,
+            0,
+            100
+        );
+        let anchorFraction;
+        if (autoScrollMode === 'line') {
+            anchorFraction = clampNumber(lineAnchorPercent / 100, 0.05, 0.95);
+        } else {
+            anchorFraction = windowTopFraction;
+        }
+        const lookaheadMode = options.lookahead === true;
+        const lookaheadOffsetPx = lookaheadMode
+            ? Math.min(elementHeight * 0.6, wrapperHeight * 0.25)
+            : 0;
+        let desiredScrollTop = targetOffsetTop - (wrapperHeight * anchorFraction) - lookaheadOffsetPx;
+        const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapperHeight);
+        const clampedTarget = clampNumber(desiredScrollTop, 0, maxScrollTop);
+        const distance = Math.abs(clampedTarget - currentScrollTop);
+        if (!forceScroll && distance < 0.5) {
+            return null;
+        }
+        let durationMs;
+        let easingFn;
+        if (autoScrollMode === 'line') {
+            const baseMs = sanitizeAutoScrollLineEasingBaseMs(settings.autoScrollLineEasingBaseMs, defaultSettings.autoScrollLineEasingBaseMs);
+            const perPixel = sanitizeAutoScrollLineEasingPerPixel(settings.autoScrollLineEasingPerPixel, defaultSettings.autoScrollLineEasingPerPixel);
+            const maxMs = sanitizeAutoScrollLineEasingMaxMs(settings.autoScrollLineEasingMaxMs, defaultSettings.autoScrollLineEasingMaxMs);
+            const computed = baseMs + (Math.abs(distance) * perPixel);
+            durationMs = clampNumber(Math.round(computed), 80, maxMs);
+            if (lookaheadMode) {
+                durationMs = Math.min(durationMs, Math.max(160, baseMs));
+            }
+            easingFn = easeInOutCubic;
+        } else {
+            const speedValue = clampNumber(settings.scrollSpeed || defaultSettings.scrollSpeed, 1, 1000);
+            const baseDuration = 400 / (speedValue / 100);
+            const distanceAdjusted = Math.max(baseDuration, Math.min(1400, distance * 0.9));
+            durationMs = clampNumber(Math.round(distanceAdjusted), 160, MAX_AUTO_SCROLL_ANIMATION_MS);
+            if (lookaheadMode) {
+                durationMs = Math.min(durationMs, 600);
+            }
+            easingFn = easeOutCubic;
+        }
+        return {
+            targetScrollTop: clampedTarget,
+            durationMs,
+            easing: easingFn,
+            mode: autoScrollMode,
+            distance,
+            lookahead: lookaheadMode
+        };
     }
 
     function autoScrollToIndex(targetIndex, precomputedPlan) {
@@ -1410,7 +2090,10 @@ $(document).ready(function() {
         if (!plan) {
             return;
         }
-        smoothScrollWrapperTo(plan.targetScrollTop);
+        smoothScrollWrapperTo(plan.targetScrollTop, {
+            durationMs: plan.durationMs,
+            easing: plan.easing
+        });
     }
 
     function invalidateAllLinePaint(options = {}) {
@@ -1633,6 +2316,164 @@ $(document).ready(function() {
         });
     }
 
+    function getAutoScrollTrackColors() {
+        if (typeof document === 'undefined' || !document.body) {
+            return { base: '#555', active: '#4aa8ff' };
+        }
+        const isLight = document.body.classList.contains('light-theme');
+        return isLight
+            ? { base: '#c9c9c9', active: '#0d66d0' }
+            : { base: '#555', active: '#4aa8ff' };
+    }
+
+    function updateAutoScrollWindowTrackGradient(topPercent, bottomPercent) {
+        if (!autoScrollWindowTrack.length) return;
+        const colors = getAutoScrollTrackColors();
+        const start = Math.max(0, Math.min(topPercent, bottomPercent));
+        const end = Math.max(start, Math.min(100, Math.max(topPercent, bottomPercent)));
+        const trackEl = autoScrollWindowTrack[0];
+        trackEl.style.setProperty('--range-start', start.toFixed(2));
+        trackEl.style.setProperty('--range-end', end.toFixed(2));
+        trackEl.style.setProperty('--track-base-color', colors.base);
+        trackEl.style.setProperty('--track-active-color', colors.active);
+    }
+
+    function refreshFrzzSliderFill(input) {
+        const node = input && input.length !== undefined ? input[0] : input;
+        if (!node) return;
+        const min = Number(node.min || 0);
+        const max = Number(node.max || 100);
+        const rawValue = Number(node.value ?? min);
+        const percent = max <= min ? 0 : ((rawValue - min) * 100) / (max - min);
+        const clamped = Math.max(0, Math.min(100, percent));
+        node.style.setProperty('--frzz-slider-stop', `${clamped}%`);
+    }
+
+    function updateAutoScrollWindowUI(topPercent, bottomPercent, options = {}) {
+        if (!autoScrollWindowTopInput.length || !autoScrollWindowBottomInput.length) {
+            return { top: topPercent, bottom: bottomPercent };
+        }
+        const { source } = options;
+        const sanitizedTop = sanitizeAutoScrollPercent(topPercent, defaultSettings.autoScrollWindowTopPercent, 0, 90);
+        let sanitizedBottom = sanitizeAutoScrollPercent(bottomPercent, defaultSettings.autoScrollWindowBottomPercent, 0, 100);
+        let adjustedTop = sanitizedTop;
+        let adjustedBottom = sanitizedBottom;
+        const minGap = MIN_AUTO_SCROLL_WINDOW_GAP;
+
+        if (source === 'top') {
+            const maxAllowed = Math.max(0, adjustedBottom - minGap);
+            adjustedTop = Math.min(adjustedTop, maxAllowed);
+            adjustedTop = Math.max(0, adjustedTop);
+        } else if (source === 'bottom') {
+            const minAllowed = Math.min(100, adjustedTop + minGap);
+            adjustedBottom = Math.max(adjustedBottom, minAllowed);
+            adjustedBottom = Math.min(100, adjustedBottom);
+        } else {
+            if (adjustedBottom < adjustedTop + minGap) {
+                adjustedBottom = Math.min(100, adjustedTop + minGap);
+            }
+            if (adjustedTop > adjustedBottom - minGap) {
+                adjustedTop = Math.max(0, adjustedBottom - minGap);
+            }
+        }
+
+        adjustedTop = clampNumber(Math.round(adjustedTop), 0, 100);
+        adjustedBottom = clampNumber(Math.round(adjustedBottom), 0, 100);
+
+        // Only set the actual input value for the active handle to avoid fighting the user's drag.
+        if (source === 'top') {
+            // While dragging top, only update its value (attributes stay at full 0-100 range)
+            autoScrollWindowTopInput.val(adjustedTop);
+        } else if (source === 'bottom') {
+            // While dragging bottom, only update its value
+            autoScrollWindowBottomInput.val(adjustedBottom);
+        } else {
+            // initialization / external updates: sync both handles
+            autoScrollWindowTopInput.val(adjustedTop);
+            autoScrollWindowBottomInput.val(adjustedBottom);
+        }
+
+        if (autoScrollWindowTopValue.length) {
+            autoScrollWindowTopValue.text(`${adjustedTop}%`);
+        }
+        if (autoScrollWindowBottomValue.length) {
+            autoScrollWindowBottomValue.text(`${adjustedBottom}%`);
+        }
+        updateAutoScrollWindowTrackGradient(adjustedTop, adjustedBottom);
+        return { top: adjustedTop, bottom: adjustedBottom };
+    }
+
+    function updateAutoScrollLineAnchorSlider(value) {
+        if (!autoScrollLineAnchorInput.length) return value;
+        const sanitizedValue = sanitizeAutoScrollPercent(
+            value,
+            defaultSettings.autoScrollLineAnchorPercent,
+            0,
+            100
+        );
+        autoScrollLineAnchorInput.val(sanitizedValue);
+        if (autoScrollLineAnchorValue.length) {
+            autoScrollLineAnchorValue.text(`${sanitizedValue}%`);
+        }
+        if (autoScrollLineAnchorInput.hasClass('frzz-slider')) {
+            refreshFrzzSliderFill(autoScrollLineAnchorInput);
+        }
+        return sanitizedValue;
+    }
+
+    function updateAutoScrollControlsState(enabled, modeCandidate) {
+        const isEnabled = !!enabled;
+        const resolvedMode = sanitizeAutoScrollMode(
+            modeCandidate,
+            settings.autoScrollMode || defaultSettings.autoScrollMode
+        );
+        if (autoScrollSettingsWrapper && autoScrollSettingsWrapper.length) {
+            autoScrollSettingsWrapper.css('display', isEnabled ? '' : 'none');
+        }
+        if (scrollSpeedWrapper && scrollSpeedWrapper.length) {
+            scrollSpeedWrapper.css('display', isEnabled ? '' : 'none');
+        }
+        if (scrollSpeedSlider && scrollSpeedSlider.length) {
+            scrollSpeedSlider.prop('disabled', !isEnabled);
+        }
+        if (autoScrollModeSelect && autoScrollModeSelect.length) {
+            autoScrollModeSelect.prop('disabled', !isEnabled);
+            autoScrollModeSelect.val(resolvedMode);
+        }
+        if (autoScrollLookaheadInput && autoScrollLookaheadInput.length) {
+            autoScrollLookaheadInput.prop('disabled', !isEnabled);
+        }
+        const showWindowSettings = isEnabled && resolvedMode === 'page';
+        if (autoScrollWindowWrapper && autoScrollWindowWrapper.length) {
+            autoScrollWindowWrapper.css('display', showWindowSettings ? '' : 'none');
+            autoScrollWindowWrapper.find('input[type="range"]').prop('disabled', !showWindowSettings);
+        }
+        if (autoScrollWindowTopInput && autoScrollWindowTopInput.length) {
+            autoScrollWindowTopInput.prop('disabled', !showWindowSettings);
+        }
+        if (autoScrollWindowBottomInput && autoScrollWindowBottomInput.length) {
+            autoScrollWindowBottomInput.prop('disabled', !showWindowSettings);
+        }
+        const showLineOptions = isEnabled && resolvedMode === 'line';
+        if (autoScrollLineAnchorWrapper && autoScrollLineAnchorWrapper.length) {
+            autoScrollLineAnchorWrapper.css('display', showLineOptions ? '' : 'none');
+            autoScrollLineAnchorWrapper.find('input').prop('disabled', !showLineOptions);
+        }
+        if (autoScrollLineAnchorInput && autoScrollLineAnchorInput.length) {
+            autoScrollLineAnchorInput.prop('disabled', !showLineOptions);
+        }
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.setAttribute('data-auto-scroll-mode', resolvedMode);
+        }
+        if (showLineOptions) {
+            updateAutoScrollLineAnchorSlider(autoScrollLineAnchorInput.val());
+        }
+    }
+
+    function resetAutoScrollState() {
+        lastLookaheadTargetIndex = -1;
+    }
+
     function applySettings(options) {
         try {
             console.debug('[Prompter][applySettings] applying', { fromDom: !!(options && options.fromDom) });
@@ -1650,7 +2491,15 @@ $(document).ready(function() {
                     if (el.length) {
                         if (el.is(':checkbox')) { tempSettings[key] = el.is(':checked'); }
                         else if (el.is('input[type="range"]')) { const val = parseInt(el.val(), 10); tempSettings[key] = key === 'scrollSpeed' ? speedSteps[val] : val; }
-                        else if (el.is('input[type="number"]')) { tempSettings[key] = parseInt(el.val(), 10); }
+                        else if (el.is('input[type="number"]')) {
+                            const stepAttr = el.attr('step');
+                            const rawValue = el.val();
+                            if (stepAttr && stepAttr.indexOf('.') !== -1) {
+                                tempSettings[key] = parseFloat(rawValue);
+                            } else {
+                                tempSettings[key] = parseInt(rawValue, 10);
+                            }
+                        }
                         else {
                             const color = el.spectrum && el.spectrum("get");
                             if (color && color.toRgbString) { tempSettings[key] = color.toRgbString(); }
@@ -1667,6 +2516,99 @@ $(document).ready(function() {
             if (settings.highlightClickDuration !== tempSettings.highlightClickDuration) {
                 settings.highlightClickDuration = tempSettings.highlightClickDuration;
             }
+
+            const sanitizedPreRoll = sanitizeJumpPreRollSeconds(tempSettings.jumpPreRollSeconds, settings.jumpPreRollSeconds || defaultSettings.jumpPreRollSeconds);
+            if (settings.jumpPreRollSeconds !== sanitizedPreRoll) {
+                settings.jumpPreRollSeconds = sanitizedPreRoll;
+            }
+            tempSettings.jumpPreRollSeconds = sanitizedPreRoll;
+            const jumpEnabled = !!tempSettings.jumpOnClickEnabled;
+            tempSettings.jumpOnClickEnabled = jumpEnabled;
+            settings.jumpOnClickEnabled = jumpEnabled;
+            const jumpPreventPlay = !!tempSettings.jumpPreventWhilePlaying;
+            const jumpPreventRecord = !!tempSettings.jumpPreventWhileRecording;
+            tempSettings.jumpPreventWhilePlaying = jumpPreventPlay;
+            tempSettings.jumpPreventWhileRecording = jumpPreventRecord;
+            settings.jumpPreventWhilePlaying = jumpPreventPlay;
+            settings.jumpPreventWhileRecording = jumpPreventRecord;
+
+            const autoScrollEnabled = !!tempSettings.autoScroll;
+            tempSettings.autoScroll = autoScrollEnabled;
+            settings.autoScroll = autoScrollEnabled;
+
+            const sanitizedAutoScrollMode = sanitizeAutoScrollMode(
+                tempSettings.autoScrollMode,
+                settings.autoScrollMode || defaultSettings.autoScrollMode
+            );
+            tempSettings.autoScrollMode = sanitizedAutoScrollMode;
+            settings.autoScrollMode = sanitizedAutoScrollMode;
+
+            const sanitizedLookaheadMs = sanitizeAutoScrollLookaheadMs(
+                tempSettings.autoScrollLookaheadMs,
+                settings.autoScrollLookaheadMs || defaultSettings.autoScrollLookaheadMs
+            );
+            tempSettings.autoScrollLookaheadMs = sanitizedLookaheadMs;
+            settings.autoScrollLookaheadMs = sanitizedLookaheadMs;
+
+            const sanitizedWindowTop = sanitizeAutoScrollPercent(
+                tempSettings.autoScrollWindowTopPercent,
+                settings.autoScrollWindowTopPercent || defaultSettings.autoScrollWindowTopPercent,
+                0,
+                90
+            );
+            let sanitizedWindowBottom = sanitizeAutoScrollPercent(
+                tempSettings.autoScrollWindowBottomPercent,
+                settings.autoScrollWindowBottomPercent || defaultSettings.autoScrollWindowBottomPercent,
+                sanitizedWindowTop + MIN_AUTO_SCROLL_WINDOW_GAP,
+                100
+            );
+            if (sanitizedWindowBottom - sanitizedWindowTop < MIN_AUTO_SCROLL_WINDOW_GAP) {
+                sanitizedWindowBottom = Math.min(100, sanitizedWindowTop + MIN_AUTO_SCROLL_WINDOW_GAP);
+            }
+            tempSettings.autoScrollWindowTopPercent = sanitizedWindowTop;
+            tempSettings.autoScrollWindowBottomPercent = sanitizedWindowBottom;
+            settings.autoScrollWindowTopPercent = sanitizedWindowTop;
+            settings.autoScrollWindowBottomPercent = sanitizedWindowBottom;
+            updateAutoScrollWindowUI(sanitizedWindowTop, sanitizedWindowBottom);
+            const sanitizedLineAnchorPercent = sanitizeAutoScrollPercent(
+                tempSettings.autoScrollLineAnchorPercent,
+                settings.autoScrollLineAnchorPercent || defaultSettings.autoScrollLineAnchorPercent,
+                0,
+                100
+            );
+            tempSettings.autoScrollLineAnchorPercent = sanitizedLineAnchorPercent;
+            settings.autoScrollLineAnchorPercent = sanitizedLineAnchorPercent;
+            if (autoScrollLineAnchorInput.length) {
+                updateAutoScrollLineAnchorSlider(sanitizedLineAnchorPercent);
+            }
+
+            const sanitizedLineEasingBaseMs = sanitizeAutoScrollLineEasingBaseMs(
+                tempSettings.autoScrollLineEasingBaseMs,
+                settings.autoScrollLineEasingBaseMs || defaultSettings.autoScrollLineEasingBaseMs
+            );
+            const sanitizedLineEasingPerPixel = sanitizeAutoScrollLineEasingPerPixel(
+                tempSettings.autoScrollLineEasingPerPixel,
+                settings.autoScrollLineEasingPerPixel || defaultSettings.autoScrollLineEasingPerPixel
+            );
+            let sanitizedLineEasingMaxMs = sanitizeAutoScrollLineEasingMaxMs(
+                tempSettings.autoScrollLineEasingMaxMs,
+                settings.autoScrollLineEasingMaxMs || defaultSettings.autoScrollLineEasingMaxMs
+            );
+            if (sanitizedLineEasingMaxMs < sanitizedLineEasingBaseMs) {
+                sanitizedLineEasingMaxMs = Math.max(sanitizedLineEasingBaseMs, sanitizedLineEasingMaxMs);
+            }
+            tempSettings.autoScrollLineEasingBaseMs = sanitizedLineEasingBaseMs;
+            tempSettings.autoScrollLineEasingPerPixel = sanitizedLineEasingPerPixel;
+            tempSettings.autoScrollLineEasingMaxMs = sanitizedLineEasingMaxMs;
+            settings.autoScrollLineEasingBaseMs = sanitizedLineEasingBaseMs;
+            settings.autoScrollLineEasingPerPixel = sanitizedLineEasingPerPixel;
+            settings.autoScrollLineEasingMaxMs = sanitizedLineEasingMaxMs;
+
+            if (typeof document !== 'undefined' && document.body) {
+                document.body.setAttribute('data-auto-scroll-mode', sanitizedAutoScrollMode);
+            }
+            updateAutoScrollControlsState(!!tempSettings.autoScroll, sanitizedAutoScrollMode);
+            resetAutoScrollState();
 
             // Preserve last non-empty keywords while user toggles other options (live preview phase)
             if (!tempSettings.autoFindKeywords || !tempSettings.autoFindKeywords.trim()) {
@@ -1688,6 +2630,10 @@ $(document).ready(function() {
             // Apply persistent settings (do not mutate global settings here, only visual application)
 
             $('body').toggleClass('light-theme', tempSettings.theme === 'light');
+            updateAutoScrollWindowTrackGradient(
+                tempSettings.autoScrollWindowTopPercent ?? sanitizedWindowTop,
+                tempSettings.autoScrollWindowBottomPercent ?? sanitizedWindowBottom
+            );
             // Expose role display style for CSS-based adjustments
             document.body.setAttribute('data-role-style', tempSettings.roleDisplayStyle || '');
             navigationPanel.toggleClass('top-panel', tempSettings.navigationPanelPosition === 'top');
@@ -1752,6 +2698,7 @@ $(document).ready(function() {
             renderTitle();
             invalidateAllLinePaint({ schedule: true });
             console.debug('[Prompter][applySettings] done');
+            updateJumpControlsState(tempSettings.jumpOnClickEnabled);
         } catch (e) { console.error("Error in applySettings:", e); }
     }
 
@@ -1761,24 +2708,31 @@ $(document).ready(function() {
         // Helper to ensure a select reflects a value even if option missing (inject fallback)
         function ensureSelectValue($sel, val){
             if(!$sel || !$sel.length) return;
-            if($sel.find(`option[value="${val}"]`).length === 0){
-                // Inject fallback without localization (raw value) to avoid losing state
-                $sel.append(`<option value="${val}">${val}</option>`);
+            const normalized = val === undefined || val === null ? '' : String(val);
+            const existingOption = $sel.find('option').filter(function(){ return String($(this).val()) === normalized; });
+            if(existingOption.length === 0){
+                const label = normalized.length ? normalized : '—';
+                $('<option>', { value: normalized, text: label, 'data-auto-option': '1' }).appendTo($sel);
             }
-            $sel.val(val);
+            $sel.val(normalized);
         }
-            Object.keys(s).forEach(key => {
+        Object.keys(s).forEach(key => {
             const id = '#' + key.replace(/([A-Z])/g, "-$1").toLowerCase();
             const el = $(id);
             if (el.length) {
                 if (el.is(':checkbox')) { el.prop('checked', s[key]); }
+                else if (el.is('select')) { ensureSelectValue(el, s[key]); }
                 else if (el.is('input[type="range"]')) {
                     if (key === 'scrollSpeed') {
                         const closestIndex = speedSteps.reduce((prev, curr, index) =>
                             (Math.abs(curr - s[key]) < Math.abs(speedSteps[prev] - s[key]) ? index : prev), 0);
                         el.val(closestIndex);
                     } else { el.val(s[key]); }
-                } else if (el.is('input[type="number"]')) {
+                    if (el.hasClass('frzz-slider')) {
+                        refreshFrzzSliderFill(el);
+                    }
+                }
+                else if (el.is('input[type="number"]')) {
                     el.val(s[key]);
                 } else if (el.spectrum) { el.spectrum("set", s[key]); }
                 else { el.val(s[key]); }
@@ -1811,7 +2765,7 @@ $(document).ready(function() {
 
     // (Handled above for reliability)
         autoFindKeywordsWrapper.toggle(s.autoFindTrack);
-        $('#scroll-speed-wrapper').toggle(s.autoScroll);
+        updateAutoScrollControlsState(s.autoScroll, s.autoScrollMode);
         // Explicitly set value for auto-find keywords input (was missing, causing empty overwrite on save)
         const autoFindKeywordsInput = $('#auto-find-keywords');
         if (autoFindKeywordsInput.length) {
@@ -1821,16 +2775,36 @@ $(document).ready(function() {
         checkerboardOptionsWrapper.toggle(s.checkerboardEnabled);
         highlightClickOptionsWrapper.toggle(s.highlightClickEnabled);
         highlightRoleColorWrapper.toggle(s.highlightCurrentRoleEnabled);
+        if (jumpOnClickCheckbox.length) {
+            jumpOnClickCheckbox.prop('checked', !!s.jumpOnClickEnabled);
+        }
+        if (jumpPreRollInput.length) {
+            jumpPreRollInput.val(sanitizeJumpPreRollSeconds(s.jumpPreRollSeconds, defaultSettings.jumpPreRollSeconds));
+        }
+        if (jumpPreventWhilePlayingCheckbox.length) {
+            jumpPreventWhilePlayingCheckbox.prop('checked', !!s.jumpPreventWhilePlaying);
+        }
+        if (jumpPreventWhileRecordingCheckbox.length) {
+            jumpPreventWhileRecordingCheckbox.prop('checked', !!s.jumpPreventWhileRecording);
+        }
+        updateJumpControlsState(s.jumpOnClickEnabled);
 
         const scrollIndex = parseInt(scrollSpeedSlider.val(), 10);
         const scrollValue = speedSteps[scrollIndex] || 60;
         scrollSpeedValue.text(scrollValue + '%');
         scrollSpeedCaption.text(getScrollSpeedCaption(scrollValue));
+        updateAutoScrollWindowUI(
+            s.autoScrollWindowTopPercent,
+            s.autoScrollWindowBottomPercent
+        );
+        updateAutoScrollLineAnchorSlider(s.autoScrollLineAnchorPercent);
     // Display value as entered (no conversion) for user clarity
     uiScaleValue.text(s.uiScale);
         lineSpacingValue.text(s.lineSpacing + '%');
         roleColumnScaleValue.text(s.roleColumnScale + '%');
         updateScaleWrapperVisibility();
+
+        setActiveTimecodeFormat(s.timecodeDisplayFormat, { updateUI: false, refresh: false, reason: 'ui_sync' });
     }
 
     function encodeStringToBase64Url(str) {
@@ -1876,7 +2850,7 @@ $(document).ready(function() {
         if (isEmuMode()) {
             // In EMU mode we do NOT fetch root settings.json, rely on defaults; reference/settings.json will be applied in loadEmuData
             settings = migrateSettingsObject({ ...defaultSettings });
-            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            setActiveTimecodeFormat(settings.timecodeDisplayFormat, { updateUI: false, refresh: false, reason: 'load_settings_emu' });
             setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
             $('#ui-scale').attr({ min:50, max:300, step:25 });
             initializeColorPickers();
@@ -1909,7 +2883,7 @@ $(document).ready(function() {
             }
             const migrationMeta = {};
             settings = migrateSettingsObject(settings, migrationMeta);
-            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            setActiveTimecodeFormat(settings.timecodeDisplayFormat, { updateUI: false, refresh: false, reason: 'load_settings' });
             setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
 
             if (settings.uiScale > 150) {
@@ -1951,7 +2925,7 @@ $(document).ready(function() {
         } catch(e) {
             console.warn('[Prompter][loadSettings] Error during parse/migration, reverting to defaults:', e);
             settings = migrateSettingsObject({ ...defaultSettings });
-            activeTimecodeFormat = settings.timecodeDisplayFormat;
+            setActiveTimecodeFormat(settings.timecodeDisplayFormat, { updateUI: false, refresh: false, reason: 'load_settings_fallback' });
             setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
         }
         // Reflect slider attributes
@@ -1975,7 +2949,6 @@ $(document).ready(function() {
             // Snapshot actor-related data to preserve across visual settings rebuild
             const actorMappingSnapshot = settings.actorRoleMappingText;
             const actorColorsSnapshot = settings.actorColors;
-            settings.timecodeDisplayFormat = activeTimecodeFormat;
             settings.dataModelVersion = DATA_MODEL_VERSION;
             settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
             const settingsToSave = {};
@@ -1985,10 +2958,24 @@ $(document).ready(function() {
                 if (el.length) {
                     if (el.is(':checkbox')) { settingsToSave[key] = el.is(':checked'); }
                     else if (el.is('input[type="range"]')) { const val = parseInt(el.val(), 10); settingsToSave[key] = key === 'scrollSpeed' ? speedSteps[val] : val; }
-                    else if (el.is('input[type="number"]')) { settingsToSave[key] = parseInt(el.val(), 10); }
+                    else if (el.is('input[type="number"]')) {
+                        const stepAttr = el.attr('step');
+                        const rawValue = el.val();
+                        if (key === 'jumpPreRollSeconds') {
+                            settingsToSave[key] = sanitizeJumpPreRollSeconds(parseFloat(rawValue), defaultSettings.jumpPreRollSeconds);
+                        } else if (stepAttr && stepAttr.indexOf('.') !== -1) {
+                            settingsToSave[key] = parseFloat(rawValue);
+                        } else {
+                            settingsToSave[key] = parseInt(rawValue, 10);
+                        }
+                    }
                     else { const color = el.spectrum("get"); if (color && color.toRgbString) { settingsToSave[key] = color.toRgbString(); } else { settingsToSave[key] = el.val(); } }
                 } else { settingsToSave[key] = settings[key]; }
             });
+            settingsToSave.timecodeDisplayFormat = normalizeTimecodeDisplayFormatValue(
+                settingsToSave.timecodeDisplayFormat,
+                settings.timecodeDisplayFormat || defaultSettings.timecodeDisplayFormat
+            );
             if (isNaN(settingsToSave.highlightClickDuration) || settingsToSave.highlightClickDuration <= 0 || settingsToSave.highlightClickDuration > 60000) {
                 settingsToSave.highlightClickDuration = defaultSettings.highlightClickDuration;
             }
@@ -2017,6 +3004,7 @@ $(document).ready(function() {
             // Track previous role mapping size to detect sudden loss (diagnostic)
             const prevRoleMapSize = Object.keys(roleToActor || {}).length;
             settings = settingsToSave;
+            setActiveTimecodeFormat(settings.timecodeDisplayFormat, { updateUI: false, refresh: true, reason: 'save_settings' });
             settings.timecodeDisplayFormat = activeTimecodeFormat;
             settings.dataModelVersion = DATA_MODEL_VERSION;
             settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
@@ -2051,6 +3039,7 @@ $(document).ready(function() {
         try {
             if (confirm("Вы уверены, что хотите сбросить все настройки к значениям по умолчанию? Это действие нельзя будет отменить.")) {
                 settings = migrateSettingsObject({ ...defaultSettings });
+                setActiveTimecodeFormat(settings.timecodeDisplayFormat, { updateUI: false, refresh: true, reason: 'reset_settings' });
                 localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
                 console.debug('[Prompter][resetSettings] Reset to defaults');
                 
@@ -2441,73 +3430,174 @@ $(document).ready(function() {
             };
         }
 
-        statusIndicator.text('Обновляем данные проекта...');
-        const pendingPromise = (async () => {
-            const deadline = startedAt + PROJECT_DATA_TIMEOUT_MS;
-            try {
-                wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
-                setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
+        const maxAttempts = Math.max(1, Number.isFinite(opts.retryAttempts) ? opts.retryAttempts : 3);
+        const retryDelayMs = Number.isFinite(opts.retryDelayMs) ? Math.max(0, opts.retryDelayMs) : 250;
 
-                let statusValue = 'PENDING';
-                while (true) {
-                    if (performance.now() > deadline) {
-                        throw new Error('timeout waiting project data status');
+        const fetchFromBackend = async attempt => {
+            const attemptStartedAt = performance.now();
+            const deadline = attemptStartedAt + PROJECT_DATA_TIMEOUT_MS;
+            statusIndicator.text(attempt > 1 ? `Повторная попытка обновления данных проекта... (${attempt})` : 'Обновляем данные проекта...');
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
+            setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
+
+            let latestStatusInfo = parseProjectDataStatus('PENDING');
+            let observedPending = false;
+            let pendingTimestamp = null;
+            while (true) {
+                if (performance.now() > deadline) {
+                    throw new Error('timeout waiting project data status');
+                }
+                try {
+                    const statusRaw = await requestExtStateValue(PROJECT_DATA_STATUS_KEY, Math.min(400, PROJECT_DATA_POLL_INTERVAL_MS + 200));
+                    latestStatusInfo = parseProjectDataStatus(statusRaw);
+                } catch (statusErr) {
+                    console.debug('[Prompter][projectData] status poll failed, retrying', statusErr.message);
+                    latestStatusInfo = parseProjectDataStatus('PENDING');
+                }
+                const statusTs = Number.isFinite(latestStatusInfo.timestamp) ? latestStatusInfo.timestamp : null;
+
+                if (latestStatusInfo.normalized === 'error') {
+                    const detailText = latestStatusInfo.detail || latestStatusInfo.state || latestStatusInfo.raw || 'unknown error';
+                    throw new Error(`project data status error: ${detailText}`);
+                }
+
+                if (latestStatusInfo.normalized === 'pending' || latestStatusInfo.normalized === 'unknown' || latestStatusInfo.normalized === 'other') {
+                    if (latestStatusInfo.normalized === 'pending') {
+                        observedPending = true;
+                        if (statusTs) {
+                            pendingTimestamp = statusTs;
+                        }
                     }
-                    try {
-                        const statusRaw = await requestExtStateValue(PROJECT_DATA_STATUS_KEY, Math.min(400, PROJECT_DATA_POLL_INTERVAL_MS + 200));
-                        statusValue = (statusRaw || '').trim();
-                    } catch (statusErr) {
-                        console.debug('[Prompter][projectData] status poll failed, retrying', statusErr.message);
-                        statusValue = 'PENDING';
+                    await delay(PROJECT_DATA_POLL_INTERVAL_MS);
+                    continue;
+                }
+
+                if (latestStatusInfo.normalized === 'ok') {
+                    const hasLastTimestamp = Number.isFinite(lastProjectDataTimestamp) && lastProjectDataTimestamp > 0;
+                    if (statusTs && hasLastTimestamp && (lastProjectDataTimestamp - statusTs) > PROJECT_DATA_STATUS_TOLERANCE_MS) {
+                        console.debug('[Prompter][projectData] ignoring stale OK status, waiting for fresh data', {
+                            statusTimestamp: statusTs,
+                            lastProjectDataTimestamp
+                        });
+                        observedPending = observedPending || pendingTimestamp !== null;
+                        await delay(PROJECT_DATA_POLL_INTERVAL_MS);
+                        continue;
                     }
-                    if (!statusValue || /pending/i.test(statusValue)) {
+                    if (!observedPending && (performance.now() - attemptStartedAt) < PROJECT_DATA_POLL_INTERVAL_MS * 2) {
+                        console.debug('[Prompter][projectData] ignoring premature OK status, waiting for pending');
                         await delay(PROJECT_DATA_POLL_INTERVAL_MS);
                         continue;
                     }
                     break;
                 }
 
-                if (!/^ok$/i.test(statusValue)) {
-                    throw new Error(`project data status: ${statusValue}`);
-                }
-
-                let jsonRaw = await requestExtStateValue(PROJECT_DATA_JSON_KEY, 800);
-                if ((jsonRaw || '').trim() === '__CHUNKED__') {
-                    console.debug('[Prompter][projectData] chunked payload detected');
-                    jsonRaw = await fetchProjectDataChunks();
-                }
-                if (!jsonRaw || !jsonRaw.trim()) {
-                    throw new Error('empty project data payload');
-                }
-
-                let parsed;
-                try {
-                    parsed = JSON.parse(jsonRaw);
-                } catch (parseErr) {
-                    throw new Error(`invalid project data json: ${parseErr.message}`);
-                }
-
-                storeProjectDataCache(parsed);
-                const applyResult = applyProjectDataSnapshot(parsed, { source: 'backend', reason });
-                statusIndicator.text('Данные проекта обновлены.');
-                const result = {
-                    status: 'ok',
-                    applied: applyResult.applied,
-                    data: parsed,
-                    durationMs: Math.round(performance.now() - startedAt)
-                };
-                console.info('[Prompter][projectData] backend update', {
-                    reason,
-                    durationMs: result.durationMs,
-                    tracks: Array.isArray(parsed && parsed.tracks) ? parsed.tracks.length : undefined,
-                    hasRoles: !!(parsed && parsed.roles)
-                });
-                return result;
-            } catch (err) {
-                statusIndicator.text('Не удалось обновить данные проекта.');
-                console.error('[Prompter][projectData] failed', err);
-                throw err;
+                console.debug('[Prompter][projectData] unexpected status state, waiting', latestStatusInfo);
+                await delay(PROJECT_DATA_POLL_INTERVAL_MS);
             }
+
+            const finalStatusInfo = latestStatusInfo;
+            if (!finalStatusInfo || finalStatusInfo.normalized !== 'ok') {
+                throw new Error(`project data status: ${finalStatusInfo ? finalStatusInfo.state : 'unknown'}`);
+            }
+
+            let jsonRaw = await requestExtStateValue(PROJECT_DATA_JSON_KEY, 800);
+            if ((jsonRaw || '').trim() === '__CHUNKED__') {
+                console.debug('[Prompter][projectData] chunked payload detected');
+                jsonRaw = await fetchProjectDataChunks();
+            }
+            if (!jsonRaw || !jsonRaw.trim()) {
+                throw new Error('empty project data payload');
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(jsonRaw);
+            } catch (parseErr) {
+                throw new Error(`invalid project data json: ${parseErr.message}`);
+            }
+
+            const toleranceMs = PROJECT_DATA_STATUS_TOLERANCE_MS;
+            const statusTimestamp = Number.isFinite(finalStatusInfo.timestamp) ? finalStatusInfo.timestamp : null;
+            const meta = parsed && typeof parsed === 'object' ? parsed.meta || null : null;
+            const metaRequestedRaw = meta !== null ? Number(meta.status_requested_at_ms) : NaN;
+            const metaCompletedRaw = meta !== null ? Number(meta.status_completed_at_ms) : NaN;
+            const metaRequested = Number.isFinite(metaRequestedRaw) ? metaRequestedRaw : null;
+            const metaCompleted = Number.isFinite(metaCompletedRaw) ? metaCompletedRaw : null;
+
+            if (pendingTimestamp && metaRequested && Math.abs(metaRequested - pendingTimestamp) > toleranceMs) {
+                throw new Error(`project data request timestamp mismatch (${pendingTimestamp} vs ${metaRequested})`);
+            }
+
+            if (metaRequested && metaCompleted && metaRequested > metaCompleted + toleranceMs) {
+                throw new Error('project data meta timestamps out of order');
+            }
+
+            if (statusTimestamp && metaCompleted && Math.abs(metaCompleted - statusTimestamp) > toleranceMs) {
+                throw new Error('project data status completion timestamp mismatch');
+            }
+
+            let effectiveCompletedTs = null;
+            if (metaCompleted && Number.isFinite(metaCompleted)) {
+                effectiveCompletedTs = metaCompleted;
+            } else if (statusTimestamp) {
+                effectiveCompletedTs = statusTimestamp;
+            }
+
+            if (!Number.isFinite(effectiveCompletedTs)) {
+                throw new Error('project data completion timestamp unavailable');
+            }
+
+            const hasPriorTimestamp = Number.isFinite(lastProjectDataTimestamp) && lastProjectDataTimestamp > 0;
+            if (hasPriorTimestamp && (lastProjectDataTimestamp - effectiveCompletedTs) > toleranceMs) {
+                throw new Error('stale project data payload (timestamp regressed)');
+            }
+
+            lastProjectDataTimestamp = hasPriorTimestamp
+                ? Math.max(lastProjectDataTimestamp, effectiveCompletedTs)
+                : effectiveCompletedTs;
+
+            storeProjectDataCache(parsed);
+            const applyResult = applyProjectDataSnapshot(parsed, { source: 'backend', reason });
+            statusIndicator.text('Данные проекта обновлены.');
+            const result = {
+                status: 'ok',
+                applied: applyResult.applied,
+                data: parsed,
+                statusTimestamp,
+                completedTimestamp: metaCompleted || null,
+                durationMs: Math.round(performance.now() - startedAt)
+            };
+            console.info('[Prompter][projectData] backend update', {
+                reason,
+                attempt,
+                durationMs: result.durationMs,
+                tracks: Array.isArray(parsed && parsed.tracks) ? parsed.tracks.length : undefined,
+                hasRoles: !!(parsed && parsed.roles),
+                statusTimestamp,
+                metaCompleted
+            });
+            return result;
+        };
+
+        const pendingPromise = (async () => {
+            let attempt = 0;
+            let lastError = null;
+            while (attempt < maxAttempts) {
+                attempt += 1;
+                try {
+                    return await fetchFromBackend(attempt);
+                } catch (err) {
+                    lastError = err;
+                    console.warn('[Prompter][projectData] fetch attempt failed', { attempt, maxAttempts, error: err.message });
+                    if (attempt >= maxAttempts) {
+                        statusIndicator.text('Не удалось обновить данные проекта.');
+                        console.error('[Prompter][projectData] failed', err);
+                        throw err;
+                    }
+                    await delay(retryDelayMs);
+                }
+            }
+            throw lastError || new Error('project data update failed');
         })();
 
         projectDataInFlight = pendingPromise.finally(() => {
@@ -2617,6 +3707,10 @@ $(document).ready(function() {
             console.info('[Prompter] initialize (REAPER mode)');
             statusIndicator.text('Подключение к REAPER...');
             wwr_start();
+            if (typeof window !== 'undefined' && typeof window.wwr_req === 'function' && !wwr_is_enabled) {
+                wwr_is_enabled = true;
+                console.debug('[Prompter][wwr] enabled (initialize)');
+            }
             eventBus.start();
             const cachedSnapshot = loadProjectDataCache();
             if (cachedSnapshot) {
@@ -2717,6 +3811,12 @@ $(document).ready(function() {
     
     wwr_onreply = function(results) {
         if (!results) return;
+        if (!wwr_is_enabled) {
+            if (typeof window !== 'undefined' && typeof window.wwr_req === 'function') {
+                wwr_is_enabled = true;
+                console.debug('[Prompter][wwr] enabled (first reply)');
+            }
+        }
         const lines = results.split('\n');
         for (const line of lines) {
             if (!line.trim()) continue;
@@ -3078,6 +4178,7 @@ $(document).ready(function() {
             const actorColorsMap = settings.actorColors || {};
             const configuredFrameRate = Number(settings.frameRate);
             const frameRate = Number.isFinite(configuredFrameRate) && configuredFrameRate > 0 ? configuredFrameRate : 24;
+            const effectiveFormat = getEffectiveTimecodeFormat();
             const useActorMapping = shouldIgnoreLineColors;
             const useLineColor = !shouldIgnoreLineColors;
             let previousRoleRaw = null;
@@ -3105,6 +4206,13 @@ $(document).ready(function() {
 
                 const container = document.createElement('div');
                 container.className = 'subtitle-container';
+                container.dataset.index = String(index);
+                if (Number.isFinite(line.start_time)) {
+                    container.dataset.startSeconds = String(line.start_time);
+                } else {
+                    delete container.dataset.startSeconds;
+                }
+                container.addEventListener('click', onSubtitleContainerClick);
 
                 const contentElement = document.createElement('div');
                 contentElement.className = 'subtitle-content';
@@ -3162,11 +4270,12 @@ $(document).ready(function() {
                 }
 
                 let timeString;
-                if (line.__cachedFrameRate === frameRate && typeof line.__cachedTimecode === 'string') {
+                if (line.__cachedFrameRate === frameRate && line.__cachedTimecodeFormat === effectiveFormat && typeof line.__cachedTimecode === 'string') {
                     timeString = line.__cachedTimecode;
                 } else {
                     timeString = formatTimecode(line.start_time, frameRate);
                     line.__cachedFrameRate = frameRate;
+                    line.__cachedTimecodeFormat = effectiveFormat;
                     line.__cachedTimecode = timeString;
                 }
                 const timeElement = document.createElement('span');
@@ -3907,6 +5016,7 @@ $(document).ready(function() {
             }
 
             if (indexChanged) {
+                lastLookaheadTargetIndex = -1;
                 if (newCurrentLineIndex !== -1) {
                     attachSharedProgressToIndex(newCurrentLineIndex);
                 } else {
@@ -3931,6 +5041,33 @@ $(document).ready(function() {
                         autoScrollToIndex(currentLineIndex);
                     }
                 }
+            }
+
+            if (settings.autoScroll) {
+                const lookaheadMs = Number(settings.autoScrollLookaheadMs) || 0;
+                if (lookaheadMs > 0 && currentLineIndex !== -1 && subtitleData.length > currentLineIndex + 1) {
+                    const nextIndex = currentLineIndex + 1;
+                    const nextLine = subtitleData[nextIndex];
+                    if (nextLine) {
+                        const lookaheadSeconds = lookaheadMs / 1000;
+                        const timeUntilNext = nextLine.start_time - currentTime;
+                        if (timeUntilNext > 0 && timeUntilNext <= lookaheadSeconds) {
+                            if (lastLookaheadTargetIndex !== nextIndex) {
+                                const lookaheadPlan = computeAutoScrollPlan(nextIndex, { force: true, lookahead: true });
+                                if (lookaheadPlan) {
+                                    autoScrollToIndex(nextIndex, lookaheadPlan);
+                                    lastLookaheadTargetIndex = nextIndex;
+                                }
+                            }
+                        } else if (timeUntilNext > lookaheadSeconds || timeUntilNext <= 0) {
+                            lastLookaheadTargetIndex = -1;
+                        }
+                    }
+                } else if (lookaheadMs <= 0) {
+                    lastLookaheadTargetIndex = -1;
+                }
+            } else if (lastLookaheadTargetIndex !== -1) {
+                lastLookaheadTargetIndex = -1;
             }
 
             if (currentLineIndex !== -1) {
@@ -4111,17 +5248,81 @@ $(document).ready(function() {
     // Обработчики для обновления UI (появление/скрытие блоков)
     titleModeSelect.on('change', function() { customTitleWrapper.toggle($(this).val() === 'custom_text'); });
     autoFindTrackCheckbox.on('change', function() { autoFindKeywordsWrapper.toggle($(this).is(':checked')); });
-    autoScrollCheckbox.on('change', function() { $('#scroll-speed-wrapper').toggle($(this).is(':checked')); });
+    autoScrollCheckbox.on('change', function() {
+        const enabled = $(this).is(':checked');
+        const mode = autoScrollModeSelect && autoScrollModeSelect.length
+            ? autoScrollModeSelect.val()
+            : (settings.autoScrollMode || defaultSettings.autoScrollMode);
+        updateAutoScrollControlsState(enabled, mode);
+        if (!enabled) {
+            resetAutoScrollState();
+        }
+    });
+    if (autoScrollModeSelect && autoScrollModeSelect.length) {
+        autoScrollModeSelect.on('change', function() {
+            const mode = $(this).val();
+            updateAutoScrollControlsState(autoScrollCheckbox.is(':checked'), mode);
+        });
+    }
     processRolesCheckbox.on('change', function() { roleOptionsWrapper.toggle($(this).is(':checked')); updateScaleWrapperVisibility(); });
     checkerboardEnabledCheckbox.on('change', function() { checkerboardOptionsWrapper.toggle($(this).is(':checked')); });
     highlightCurrentRoleEnabledCheckbox.on('change', function() { highlightRoleColorWrapper.toggle($(this).is(':checked')); });
     highlightClickEnabledCheckbox.on('change', function() { highlightClickOptionsWrapper.toggle($(this).is(':checked')); });
+    if (jumpOnClickCheckbox.length) {
+        jumpOnClickCheckbox.on('change', function() {
+            updateJumpControlsState($(this).is(':checked'));
+        });
+    }
+    if (jumpPreRollInput.length) {
+        const sanitizeJumpInput = function() {
+            const sanitized = sanitizeJumpPreRollSeconds($(this).val(), settings.jumpPreRollSeconds || defaultSettings.jumpPreRollSeconds);
+            $(this).val(sanitized);
+        };
+        jumpPreRollInput.on('change', sanitizeJumpInput);
+        jumpPreRollInput.on('blur', sanitizeJumpInput);
+    }
 
     // Обработчики для обновления подписей у слайдеров
-    scrollSpeedSlider.on('input', function() { const i = parseInt($(this).val(), 10); scrollSpeedValue.text(speedSteps[i] + '%'); scrollSpeedCaption.text(getScrollSpeedCaption(speedSteps[i])); });
-    uiScaleSlider.on('input', function() { uiScaleValue.text($(this).val() + '%'); });
-    lineSpacingSlider.on('input', function() { lineSpacingValue.text($(this).val() + '%'); });
-    roleColumnScaleSlider.on('input', function() { roleColumnScaleValue.text($(this).val() + '%'); });
+    scrollSpeedSlider.on('input change', function() {
+        const i = parseInt($(this).val(), 10);
+        scrollSpeedValue.text(speedSteps[i] + '%');
+        scrollSpeedCaption.text(getScrollSpeedCaption(speedSteps[i]));
+        refreshFrzzSliderFill(scrollSpeedSlider);
+    });
+    uiScaleSlider.on('input change', function() {
+        uiScaleValue.text($(this).val() + '%');
+        refreshFrzzSliderFill(uiScaleSlider);
+    });
+    lineSpacingSlider.on('input change', function() {
+        lineSpacingValue.text($(this).val() + '%');
+        refreshFrzzSliderFill(lineSpacingSlider);
+    });
+    roleColumnScaleSlider.on('input change', function() {
+        roleColumnScaleValue.text($(this).val() + '%');
+        refreshFrzzSliderFill(roleColumnScaleSlider);
+    });
+    if (autoScrollWindowTopInput.length && autoScrollWindowBottomInput.length) {
+        const syncWindowBounds = (source) => {
+            updateAutoScrollWindowUI(
+                autoScrollWindowTopInput.val(),
+                autoScrollWindowBottomInput.val(),
+                { source }
+            );
+        };
+        autoScrollWindowTopInput.on('input change', () => syncWindowBounds('top'));
+        autoScrollWindowBottomInput.on('input change', () => syncWindowBounds('bottom'));
+    }
+    if (autoScrollLineAnchorInput.length) {
+        autoScrollLineAnchorInput.on('input change', function() {
+            updateAutoScrollLineAnchorSlider($(this).val());
+        });
+    }
+
+    if (scrollSpeedSlider.length) { refreshFrzzSliderFill(scrollSpeedSlider); }
+    if (uiScaleSlider.length) { refreshFrzzSliderFill(uiScaleSlider); }
+    if (lineSpacingSlider.length) { refreshFrzzSliderFill(lineSpacingSlider); }
+    if (roleColumnScaleSlider.length) { refreshFrzzSliderFill(roleColumnScaleSlider); }
+    if (autoScrollLineAnchorInput.length) { refreshFrzzSliderFill(autoScrollLineAnchorInput); }
     
     // Обработчики для более сложных действий
     enableColorSwatchesCheckbox.on('change', updateScaleWrapperVisibility);
@@ -4140,21 +5341,7 @@ $(document).ready(function() {
         }
         if (targetIndex !== -1) {
             const targetElement = subtitleElements[targetIndex];
-            if (targetElement) {
-                if (typeof targetElement.scrollIntoView === 'function') {
-                    targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-                if (settings.highlightClickEnabled) {
-                    targetElement.classList.add('click-highlight');
-                    const dur = (typeof settings.highlightClickDuration === 'number' && settings.highlightClickDuration > 0 && settings.highlightClickDuration <= 60000)
-                        ? settings.highlightClickDuration
-                        : defaultSettings.highlightClickDuration;
-                    setTimeout(() => targetElement.classList.remove('click-highlight'), dur);
-                }
-                attachSharedProgressToIndex(targetIndex);
-                paintLine(targetIndex, true);
-                schedulePaintVisible();
-            }
+            focusLineElement(targetIndex, { element: targetElement });
         }
     });
 

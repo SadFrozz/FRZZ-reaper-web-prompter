@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>REAPER Web Prompter v1.4.2</title>
+    <title>REAPER Web Prompter v1.5.0-pre</title>
     <link rel="stylesheet" href="style.css">
     <script src="jquery.min.js"></script>
     <link rel="stylesheet" type="text/css" href="spectrum.css">
@@ -115,7 +115,7 @@
                         </div>
                         <div id="role-column-scale-wrapper" class="setting-item">
                             <label for="role-column-scale">Масштаб колонки</label>
-                            <input type="range" id="role-column-scale" min="50" max="200" step="25">
+                            <input type="range" id="role-column-scale" class="frzz-slider" min="50" max="200" step="25">
                             <span id="role-column-scale-value">100%</span>
                         </div>
                     </div>
@@ -236,6 +236,53 @@
                     </div>
                 </fieldset>
                 <fieldset class="fieldset-collapsible expanded">
+                    <legend>Автопрокрутка</legend>
+                    <div class="setting-item">
+                        <label for="auto-scroll">Включить</label>
+                        <input type="checkbox" id="auto-scroll">
+                    </div>
+                    <div id="auto-scroll-settings-wrapper" class="auto-scroll-settings" style="display:none;">
+                        <div class="auto-scroll-card" id="auto-scroll-mode-card">
+                            <label for="auto-scroll-mode">Режим автоскролла</label>
+                            <select id="auto-scroll-mode">
+                                <option value="page">Постраничный</option>
+                                <option value="line">Построчный</option>
+                            </select>
+                        </div>
+                        <div class="auto-scroll-card" id="auto-scroll-lookahead-card">
+                            <label for="auto-scroll-lookahead-ms">Порог срабатывания (мс)</label>
+                            <input type="number" id="auto-scroll-lookahead-ms" class="short-input" min="0" max="5000" step="50" value="0">
+                        </div>
+                        <div class="auto-scroll-card" id="auto-scroll-window-wrapper">
+                            <label>Границы прокрутки (%)</label>
+                            <div class="setting-range with-side-values">
+                                <span id="auto-scroll-window-top-value">10%</span>
+                                <div class="dual-range" id="auto-scroll-window-range">
+                                    <div class="dual-range-track" id="auto-scroll-window-track"></div>
+                                    <input type="range" id="auto-scroll-window-top-percent" min="0" max="100" step="1" value="10">
+                                    <input type="range" id="auto-scroll-window-bottom-percent" min="0" max="100" step="1" value="85">
+                                </div>
+                                <span id="auto-scroll-window-bottom-value">85%</span>
+                            </div>
+                        </div>
+                        <div class="auto-scroll-card" id="scroll-speed-wrapper">
+                            <label for="scroll-speed">Скорость прокрутки</label>
+                            <div class="setting-range">
+                                <input type="range" id="scroll-speed" class="frzz-slider" min="0" max="21" step="1">
+                                <span id="scroll-speed-value">60%</span>
+                            </div>
+                            <p id="scroll-speed-caption" class="scroll-caption"></p>
+                        </div>
+                        <div class="auto-scroll-card" id="auto-scroll-line-anchor-wrapper" style="display:none;">
+                            <label for="auto-scroll-line-anchor-percent">Позиция строки (%)</label>
+                            <div class="setting-range">
+                                <input type="range" id="auto-scroll-line-anchor-percent" class="frzz-slider" min="0" max="100" step="1" value="35">
+                                <span id="auto-scroll-line-anchor-value">35%</span>
+                            </div>
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset class="fieldset-collapsible expanded">
                     <legend>Общие настройки</legend>
                     <div class="setting-item">
                         <label for="title-mode">Заголовок</label>
@@ -255,14 +302,37 @@
                         <input type="checkbox" id="navigation-panel-position">
                     </div>
                     <div class="setting-item">
-                        <label for="auto-scroll">Автоматическая прокрутка</label>
-                        <input type="checkbox" id="auto-scroll">
+                        <label for="timecode-display-format">Формат таймкода</label>
+                        <select id="timecode-display-format">
+                            <option value="auto" selected>Авто (по FPS)</option>
+                            <option value="frames">HH:MM:SS:FF</option>
+                            <option value="milliseconds">HH:MM:SS.ms</option>
+                        </select>
                     </div>
-                     <div class="setting-item" id="scroll-speed-wrapper">
-                        <label for="scroll-speed">Скорость прокрутки</label>
-                        <input type="range" id="scroll-speed" min="0" max="21" step="1">
-                        <span id="scroll-speed-value">60%</span>
-                        <p id="scroll-speed-caption" class="scroll-caption"></p>
+                    <div class="setting-group">
+                        <div class="setting-group-header-flex">
+                            <p class="setting-group-title">Прыжок по клику</p>
+                            <div class="inline-checkbox">
+                                <input type="checkbox" id="jump-on-click-enabled" aria-label="Включить Jump по клику">
+                            </div>
+                        </div>
+                        <div id="jump-settings-wrapper" style="display:none;">
+                            <div class="setting-item">
+                                <label for="jump-pre-roll-seconds">Время до реплики (сек)</label>
+                                <input type="number" id="jump-pre-roll-seconds" class="short-input" min="0" max="10" step="0.1" value="0">
+                            </div>
+                            <p class="setting-group-title">Блокировать прыжок</p>
+                            <div class="setting-inline-row">
+                                <div class="setting-item mini">
+                                    <label for="jump-prevent-while-playing">При воспроизведении</label>
+                                    <input type="checkbox" id="jump-prevent-while-playing" checked>
+                                </div>
+                                <div class="setting-item mini">
+                                    <label for="jump-prevent-while-recording">При записи</label>
+                                    <input type="checkbox" id="jump-prevent-while-recording" checked>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <div class="setting-item">
                         <label for="theme-toggle">Светлая тема</label>
@@ -287,12 +357,12 @@
                     </div>
                     <div class="setting-item">
                         <label for="ui-scale">Масштаб интерфейса</label>
-                        <input type="range" id="ui-scale" min="50" max="300" step="25">
+                        <input type="range" id="ui-scale" class="frzz-slider" min="50" max="300" step="25">
                         <span id="ui-scale-value">100</span>
                     </div>
                     <div class="setting-item">
                         <label for="line-spacing">Межстрочный отступ</label>
-                        <input type="range" id="line-spacing" min="0" max="400" step="10">
+                        <input type="range" id="line-spacing" class="frzz-slider" min="0" max="400" step="10">
                         <span id="line-spacing-value">100%</span>
                     </div>
                 </fieldset>

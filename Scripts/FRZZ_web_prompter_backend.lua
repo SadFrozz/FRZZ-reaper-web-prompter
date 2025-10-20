@@ -1,3 +1,18 @@
+local function now_ms()
+  return math.floor(reaper.time_precise() * 1000 + 0.5)
+end
+
+local function build_status(state, timestamp, detail)
+  if timestamp and detail and detail ~= '' then
+    return string.format("%s|%d|%s", state, timestamp, detail)
+  elseif timestamp then
+    return string.format("%s|%d", state, timestamp)
+  elseif detail and detail ~= '' then
+    return string.format("%s|0|%s", state, detail)
+  end
+  return state
+end
+
 -- File: web_prompter_backend.lua
 
 local sep = package.config:sub(1,1)
@@ -262,22 +277,27 @@ local function build_project_data()
 end
 
 local function handle_get_project_data()
-  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "PENDING", false)
+  local request_ts = now_ms()
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, build_status("PENDING", request_ts), false)
   local ok, payload_or_err = pcall(build_project_data)
   if not ok then
     store_project_data_payload('')
-    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "ERROR:" .. tostring(payload_or_err), false)
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, build_status("ERROR", now_ms(), tostring(payload_or_err)), false)
     return
   end
   local payload = payload_or_err
   local encoded, encode_err = json_encode(payload)
   if not encoded then
     store_project_data_payload('')
-    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "ERROR:" .. tostring(encode_err), false)
+    reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, build_status("ERROR", now_ms(), tostring(encode_err)), false)
     return
   end
+  local completed_ts = now_ms()
+  payload.meta = payload.meta or {}
+  payload.meta.status_requested_at_ms = request_ts
+  payload.meta.status_completed_at_ms = completed_ts
   store_project_data_payload(encoded)
-  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, "OK", false)
+  reaper.SetExtState(PROJECT_DATA_SECTION, PROJECT_DATA_STATUS_KEY, build_status("OK", completed_ts), false)
 end
 
 local function save_roles()
@@ -362,6 +382,57 @@ function url_decode(str)
   return str
 end
 -- ---------------------
+
+local function parse_query_string(str)
+  local result = {}
+  if not str or str == '' then return result end
+  for pair in string.gmatch(str, '([^&]+)') do
+    local key, value = pair:match('([^=]+)=?(.*)')
+    if key then
+      local decoded_key = url_decode(key)
+      local decoded_value = value and url_decode(value) or ''
+      result[decoded_key] = decoded_value
+    end
+  end
+  return result
+end
+
+local function handle_time_jump(payload)
+  if not payload then return end
+  local position_ms = tonumber(payload.position_ms) or tonumber(payload.position) or 0
+  local position_sec
+  if position_ms and position_ms > 0 then
+    position_sec = position_ms / 1000
+  else
+    position_sec = tonumber(payload.position_sec) or tonumber(payload.position_s) or 0
+  end
+  if not position_sec then position_sec = 0 end
+  if position_sec < 0 then position_sec = 0 end
+  reaper.SetEditCurPos(position_sec, true, false)
+  reaper.UpdateArrange()
+  reaper.UpdateTimeline()
+end
+
+local function process_event_command()
+  local raw_name = reaper.GetExtState(PROJECT_DATA_SECTION, "event_name") or ''
+  local raw_payload = reaper.GetExtState(PROJECT_DATA_SECTION, "event_payload") or ''
+  if raw_name == '' then
+    if raw_payload ~= '' then
+      reaper.DeleteExtState(PROJECT_DATA_SECTION, "event_payload", true)
+    end
+    return
+  end
+  local event_name = url_decode(raw_name)
+  local payload_str = url_decode(raw_payload)
+  local payload = parse_query_string(payload_str)
+  if event_name == 'time:jump' then
+    handle_time_jump(payload)
+  end
+  reaper.DeleteExtState(PROJECT_DATA_SECTION, "event_name", true)
+  if raw_payload ~= '' then
+    reaper.DeleteExtState(PROJECT_DATA_SECTION, "event_payload", true)
+  end
+end
 
 function get_text_and_save_to_file(track_id_str)
   local track_id = tonumber(track_id_str)
@@ -489,6 +560,8 @@ function main()
     save_settings()
   elseif command == "SAVE_ROLES" then
     save_roles()
+  elseif command == "PROCESS_EVENT" then
+    process_event_command()
   end
 end
 
