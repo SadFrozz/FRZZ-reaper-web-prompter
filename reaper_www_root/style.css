@@ -547,12 +547,10 @@ input[type="checkbox"]:active::after {
 .highlight-settings-tiles .setting-group-inline-colors {
     width: 100%;
 }
-#auto-scroll-mode-card,
-#auto-scroll-lookahead-card {
+#auto-scroll-mode-card {
     min-width: 240px;
 }
-#auto-scroll-mode-card select,
-#auto-scroll-lookahead-card input[type="number"] {
+#auto-scroll-mode-card select {
     width: 100%;
 }
 .general-settings-tiles {
@@ -606,6 +604,14 @@ input[type="checkbox"]:active::after {
     font-size: 0.9em;
     color: #bbb;
 }
+.settings-helper-text {
+    margin: 0;
+    font-size: 0.9em;
+    color: #bbb;
+}
+.light-theme .settings-helper-text {
+    color: #4a4a4a;
+}
 .settings-tile .setting-range {
     width: 100%;
 }
@@ -621,9 +627,12 @@ input[type="checkbox"]:active::after {
 }
 
 #auto-scroll-window-wrapper {
-    order: 3;
+    order: 2;
 }
 #scroll-speed-wrapper {
+    order: 3;
+}
+#auto-scroll-dynamic-speed-tile {
     order: 4;
 }
 #auto-scroll-line-anchor-wrapper {
@@ -631,9 +640,12 @@ input[type="checkbox"]:active::after {
 }
 
 body[data-auto-scroll-mode="line"] #auto-scroll-line-anchor-wrapper {
-    order: 4;
+    order: 3;
 }
 body[data-auto-scroll-mode="line"] #scroll-speed-wrapper {
+    order: 4;
+}
+body[data-auto-scroll-mode="line"] #auto-scroll-dynamic-speed-tile {
     order: 5;
 }
 

@@ -273,10 +273,6 @@
                                 <option value="line">Построчный</option>
                             </select>
                         </div>
-                        <div class="settings-tile" id="auto-scroll-lookahead-card">
-                            <label class="settings-tile-title" for="auto-scroll-lookahead-ms">Порог срабатывания (мс)</label>
-                            <input type="number" id="auto-scroll-lookahead-ms" class="short-input" min="0" max="5000" step="50" value="0">
-                        </div>
                         <div class="settings-tile" id="auto-scroll-window-wrapper">
                             <label class="settings-tile-title">Границы прокрутки (%)</label>
                             <div class="setting-range with-side-values">
@@ -296,6 +292,13 @@
                                 <span id="scroll-speed-value" class="settings-slider-value">60%</span>
                             </div>
                             <p id="scroll-speed-caption" class="scroll-caption settings-slider-caption"></p>
+                        </div>
+                        <div class="settings-tile" id="auto-scroll-dynamic-speed-tile">
+                            <div class="setting-item">
+                                <label for="auto-scroll-dynamic-speed-enabled">Динамическая скорость</label>
+                                <input type="checkbox" id="auto-scroll-dynamic-speed-enabled" checked>
+                            </div>
+                            <p class="settings-helper-text">При отключении используется фиксированная длительность прокрутки.</p>
                         </div>
                         <div class="settings-tile settings-tile-slider" id="auto-scroll-line-anchor-wrapper" style="display:none;">
                             <label class="settings-tile-title" for="auto-scroll-line-anchor-percent">Позиция строки (%)</label>

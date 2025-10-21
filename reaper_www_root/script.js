@@ -2,10 +2,21 @@ const SETTINGS_SCHEMA_VERSION = 4;
 const DATA_MODEL_VERSION = 2;
 const DEFAULT_PROJECT_FPS = 24;
 const MAX_JUMP_PRE_ROLL_SECONDS = 10;
-const MAX_AUTO_SCROLL_LOOKAHEAD_MS = 5000;
 const MIN_AUTO_SCROLL_WINDOW_GAP = 5;
 const MAX_AUTO_SCROLL_EASING_PER_PIXEL = 10;
 const MAX_AUTO_SCROLL_ANIMATION_MS = 3000;
+const SPEED_BASELINE_FACTOR = 2;
+const MIN_SPEED_MULTIPLIER = 0.1;
+const MAX_SPEED_MULTIPLIER = 20;
+const PAGE_DYNAMIC_BASE_DURATION_MS = 540;
+const PAGE_DYNAMIC_DISTANCE_COEFFICIENT = 0.9;
+const DEFAULT_PAGE_STATIC_DURATION_MS = 360;
+const DEFAULT_LINE_STATIC_DURATION_MS = 330;
+const MIN_TIMELINE_SCROLL_MS = 120;
+const TIMELINE_ACTIVE_COMPLETION_RATIO = 0.85;
+const TIMELINE_LOOKAHEAD_COMPLETION_RATIO = 0.65;
+const SUBTREADER_INERTIA_WINDOW_SECONDS = 0.7; // SubtReader UI.transition_sec window
+const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to prevent jitter
 
 function clampNumber(value, min, max) {
     const numeric = Number(value);
@@ -54,14 +65,6 @@ function sanitizeAutoScrollMode(value, fallback = 'page') {
         if (normalized === 'page') return 'page';
     }
     return typeof fallback === 'string' ? fallback : 'page';
-}
-
-function sanitizeAutoScrollLookaheadMs(value, fallback = 0) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric) || numeric < 0) {
-        return clampNumber(fallback, 0, MAX_AUTO_SCROLL_LOOKAHEAD_MS);
-    }
-    return clampNumber(Math.round(numeric), 0, MAX_AUTO_SCROLL_LOOKAHEAD_MS);
 }
 
 function sanitizeAutoScrollPercent(value, fallback, min = 0, max = 100) {
@@ -283,7 +286,7 @@ const defaultSettings = {
     autoScroll: true,
     scrollSpeed: 60,
     autoScrollMode: 'page',
-    autoScrollLookaheadMs: 0,
+    autoScrollDynamicSpeedEnabled: true,
     autoScrollWindowTopPercent: 10,
     autoScrollWindowBottomPercent: 85,
     autoScrollLineAnchorPercent: 35,
@@ -293,8 +296,6 @@ const defaultSettings = {
     theme: 'dark',
     lineSpacing: 50,
     fontFamily: "'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-    // New base = 200 (represents 100% actual). Slider range 50..300 => 25%..150% relative to old base 100.
-    // Baseline logic remains: 200 == 100% visual. Default now 100 (i.e. 50% of previous default visual size).
     uiScale: 100,
     titleMode: 'placeholder',
     customTitleText: 'Мой суфлер',
@@ -553,7 +554,8 @@ $(document).ready(function() {
     const scrollSpeedWrapper = $('#scroll-speed-wrapper');
     const autoScrollSettingsWrapper = $('#auto-scroll-settings-wrapper');
     const autoScrollModeSelect = $('#auto-scroll-mode');
-    const autoScrollLookaheadInput = $('#auto-scroll-lookahead-ms');
+    const autoScrollDynamicSpeedWrapper = $('#auto-scroll-dynamic-speed-tile');
+    const autoScrollDynamicSpeedToggle = $('#auto-scroll-dynamic-speed-enabled');
     const autoScrollWindowWrapper = $('#auto-scroll-window-wrapper');
     const autoScrollWindowTrack = $('#auto-scroll-window-track');
     const autoScrollWindowTopInput = $('#auto-scroll-window-top-percent');
@@ -692,6 +694,7 @@ $(document).ready(function() {
     let subtitleLoadTrackId = null;
     let subtitlesLoadedOnce = false;
     let currentLineIndex = -1;
+    let lastPlaybackTimeSeconds = 0;
     let latestTimecode = 0;
     let firstRenderTs = null;
     const readyStagesLogged = new Set();
@@ -701,7 +704,11 @@ $(document).ready(function() {
     let transportLastTimecode = 0;
     let lastJumpRequestAt = 0;
     let scrollAnimationFrame = null;
-    let lastLookaheadTargetIndex = -1;
+    let subtReaderInertiaState = {
+        activeIndex: -1,
+        lastTarget: null,
+        lastRawProgress: 0
+    };
 
     function hasReliableFrameRateForAuto() {
         if (!Number.isFinite(projectFps) || projectFps <= 0) return false;
@@ -1299,12 +1306,9 @@ $(document).ready(function() {
             base.autoScrollMode = sanitizedMode;
             changed = true;
         }
-        const sanitizedLookahead = sanitizeAutoScrollLookaheadMs(
-            base.autoScrollLookaheadMs,
-            defaultSettings.autoScrollLookaheadMs
-        );
-        if (sanitizedLookahead !== base.autoScrollLookaheadMs) {
-            base.autoScrollLookaheadMs = sanitizedLookahead;
+        const sanitizedDynamicSpeed = base.autoScrollDynamicSpeedEnabled !== false;
+        if (sanitizedDynamicSpeed !== base.autoScrollDynamicSpeedEnabled) {
+            base.autoScrollDynamicSpeedEnabled = sanitizedDynamicSpeed;
             changed = true;
         }
         const sanitizedWindowTop = sanitizeAutoScrollPercent(
@@ -2048,6 +2052,165 @@ $(document).ready(function() {
         schedulePaintVisible();
     }
 
+    function getLineTimingBounds(index) {
+        if (!Array.isArray(subtitleData) || !Number.isInteger(index) || index < 0 || index >= subtitleData.length) {
+            return null;
+        }
+        const line = subtitleData[index];
+        if (!line) return null;
+        const start = Number.isFinite(line.start_time) ? line.start_time : null;
+        let end = Number.isFinite(line.end_time) ? line.end_time : null;
+        if (!Number.isFinite(end)) {
+            const next = subtitleData[index + 1];
+            if (next && Number.isFinite(next.start_time)) {
+                end = next.start_time;
+            }
+        }
+        if (start === null && end === null) {
+            return null;
+        }
+        return { start, end };
+    }
+
+    function computeTimelineDurationConstraint(index, currentTime, isLookahead) {
+        let referenceTime = Number.isFinite(currentTime) ? currentTime : null;
+        if (referenceTime === null && Number.isFinite(lastPlaybackTimeSeconds)) {
+            referenceTime = lastPlaybackTimeSeconds;
+        }
+        if (referenceTime === null) {
+            return null;
+        }
+        const bounds = getLineTimingBounds(index);
+        if (!bounds) {
+            return null;
+        }
+        const { start, end } = bounds;
+        let budgetMs = null;
+        if (isLookahead && Number.isFinite(start)) {
+            const millisUntilStart = Math.max(0, (start - referenceTime) * 1000);
+            if (millisUntilStart > 0) {
+                const lookaheadBudget = millisUntilStart * TIMELINE_LOOKAHEAD_COMPLETION_RATIO;
+                budgetMs = Math.max(MIN_TIMELINE_SCROLL_MS, lookaheadBudget);
+            }
+        }
+        if (Number.isFinite(end)) {
+            const millisUntilEnd = Math.max(0, (end - referenceTime) * 1000);
+            if (millisUntilEnd > 0) {
+                const activeBudget = millisUntilEnd * TIMELINE_ACTIVE_COMPLETION_RATIO;
+                budgetMs = budgetMs === null
+                    ? Math.max(MIN_TIMELINE_SCROLL_MS, activeBudget)
+                    : Math.min(budgetMs, Math.max(MIN_TIMELINE_SCROLL_MS, activeBudget));
+            }
+        }
+        if (budgetMs === null) {
+            return null;
+        }
+        return clampNumber(Math.round(budgetMs), MIN_TIMELINE_SCROLL_MS, MAX_AUTO_SCROLL_ANIMATION_MS);
+    }
+
+    function computeSubtReaderInertiaEase(progress) {
+        const clamped = clampNumber(progress, 0, 1);
+        if (clamped <= 0 || clamped >= 1) {
+            return clamped;
+        }
+        const eased = 0.5 + 0.5 * Math.cos((Math.PI * clamped) - Math.PI);
+        return eased * eased;
+    }
+
+    function resetSubtReaderLineState() {
+        subtReaderInertiaState.activeIndex = -1;
+        subtReaderInertiaState.lastTarget = null;
+        subtReaderInertiaState.lastRawProgress = 0;
+    }
+
+    function resetSubtReaderInertiaState() {
+        resetSubtReaderLineState();
+    }
+
+    function computeSubtReaderInertiaTarget(index, currentTime) {
+        if (!settings.autoScroll || !Number.isFinite(currentTime)) return null;
+        if (!Array.isArray(subtitleData) || index < 0 || index >= subtitleData.length - 1) return null;
+        const activeMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+        if (activeMode !== 'line') return null;
+        if (settings.autoScrollDynamicSpeedEnabled === false) return null;
+        const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
+        if (!wrapper) return null;
+        const currentLine = subtitleData[index];
+        const nextLine = subtitleData[index + 1];
+        if (!currentLine || !nextLine) return null;
+        const timeUntilNext = nextLine.start_time - currentTime;
+        if (!Number.isFinite(timeUntilNext) || timeUntilNext <= 0) return null;
+        if (timeUntilNext > SUBTREADER_INERTIA_WINDOW_SECONDS) return null;
+        if (wrapper.clientHeight <= 0) return null;
+
+        const basePlan = computeAutoScrollPlan(index, { force: true, currentTime });
+        const nextPlan = computeAutoScrollPlan(index + 1, { force: true, currentTime });
+        if (!basePlan || !nextPlan) return null;
+
+        const baseTarget = basePlan.targetScrollTop;
+        const nextTarget = nextPlan.targetScrollTop;
+        if (!Number.isFinite(baseTarget) || !Number.isFinite(nextTarget)) return null;
+
+        const targetDelta = nextTarget - baseTarget;
+        if (Math.abs(targetDelta) < SUBTREADER_INERTIA_MIN_DISTANCE_PX) return null;
+
+        const rawProgress = clampNumber(1 - (timeUntilNext / SUBTREADER_INERTIA_WINDOW_SECONDS), 0, 1);
+        const easedProgress = computeSubtReaderInertiaEase(rawProgress);
+        const interpolatedTarget = baseTarget + (targetDelta * easedProgress);
+        const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight);
+
+        return {
+            target: clampNumber(interpolatedTarget, 0, maxScrollTop),
+            rawProgress,
+            easedProgress
+        };
+    }
+
+    function applySubtReaderInertia(index, currentTime) {
+        if (!settings.autoScroll || !Number.isFinite(currentTime)) {
+            if (subtReaderInertiaState.activeIndex !== -1) {
+                resetSubtReaderLineState();
+            }
+            return;
+        }
+        const activeMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+        if (activeMode !== 'line') {
+            if (subtReaderInertiaState.activeIndex !== -1) {
+                resetSubtReaderLineState();
+            }
+            return;
+        }
+        if (settings.autoScrollDynamicSpeedEnabled === false) {
+            if (subtReaderInertiaState.activeIndex !== -1) {
+                resetSubtReaderLineState();
+            }
+            return;
+        }
+        if (scrollAnimationFrame) {
+            return;
+        }
+        const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
+        if (!wrapper) return;
+        const inertiaResult = computeSubtReaderInertiaTarget(index, currentTime);
+        if (!inertiaResult) {
+            if (subtReaderInertiaState.activeIndex !== -1) {
+                resetSubtReaderLineState();
+            }
+            return;
+        }
+        const delta = inertiaResult.target - wrapper.scrollTop;
+        if (Math.abs(delta) < SUBTREADER_INERTIA_MIN_DISTANCE_PX) {
+            subtReaderInertiaState.activeIndex = index;
+            subtReaderInertiaState.lastTarget = inertiaResult.target;
+            subtReaderInertiaState.lastRawProgress = inertiaResult.rawProgress;
+            return;
+        }
+        wrapper.scrollTop = inertiaResult.target;
+        subtReaderInertiaState.activeIndex = index;
+        subtReaderInertiaState.lastTarget = inertiaResult.target;
+        subtReaderInertiaState.lastRawProgress = inertiaResult.rawProgress;
+    }
+
     // Measure target scroll position ahead of DOM mutations to avoid layout thrashing.
     function computeAutoScrollPlan(targetIndex, options = {}) {
         if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
@@ -2084,27 +2247,42 @@ $(document).ready(function() {
         const elementHeight = Math.max(targetNode.offsetHeight || 1, 1);
         const topThreshold = wrapperHeight * windowTopFraction;
         const bottomThreshold = (wrapperHeight * windowBottomFraction) - elementHeight;
-        const forceScroll = options.force === true;
-        if (!forceScroll && relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
-            return null;
-        }
+        const currentTimeSeconds = Number.isFinite(options.currentTime) ? options.currentTime : null;
         const lineAnchorPercent = sanitizeAutoScrollPercent(
             settings.autoScrollLineAnchorPercent,
             defaultSettings.autoScrollLineAnchorPercent,
             0,
             100
         );
-        let anchorFraction;
+        let anchorFraction = windowTopFraction;
         if (autoScrollMode === 'line') {
             anchorFraction = clampNumber(lineAnchorPercent / 100, 0.05, 0.95);
-        } else {
-            anchorFraction = windowTopFraction;
         }
         const lookaheadMode = options.lookahead === true;
         const lookaheadOffsetPx = lookaheadMode
             ? Math.min(elementHeight * 0.6, wrapperHeight * 0.25)
             : 0;
-        let desiredScrollTop = targetOffsetTop - (wrapperHeight * anchorFraction) - lookaheadOffsetPx;
+        const dynamicSpeedEnabled = settings.autoScrollDynamicSpeedEnabled !== false;
+        const speedFactor = getScrollSpeedMultiplier();
+        const anchorTargetRelativeTop = (wrapperHeight * anchorFraction) + lookaheadOffsetPx;
+        const forceScroll = options.force === true;
+        if (!forceScroll) {
+            if (autoScrollMode === 'line') {
+                const anchorTolerancePx = Math.max(12, Math.min(elementHeight * 0.5, wrapperHeight * 0.1));
+                const currentCenter = relativeTop + (elementHeight * 0.5);
+                if (Math.abs(currentCenter - anchorTargetRelativeTop) <= anchorTolerancePx) {
+                    return null;
+                }
+            } else if (relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
+                return null;
+            }
+        }
+        let desiredScrollTop;
+        if (autoScrollMode === 'line') {
+            desiredScrollTop = targetOffsetTop - anchorTargetRelativeTop + (elementHeight * 0.5);
+        } else {
+            desiredScrollTop = targetOffsetTop - anchorTargetRelativeTop;
+        }
         const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapperHeight);
         const clampedTarget = clampNumber(desiredScrollTop, 0, maxScrollTop);
         const distance = Math.abs(clampedTarget - currentScrollTop);
@@ -2117,21 +2295,46 @@ $(document).ready(function() {
             const baseMs = sanitizeAutoScrollLineEasingBaseMs(settings.autoScrollLineEasingBaseMs, defaultSettings.autoScrollLineEasingBaseMs);
             const perPixel = sanitizeAutoScrollLineEasingPerPixel(settings.autoScrollLineEasingPerPixel, defaultSettings.autoScrollLineEasingPerPixel);
             const maxMs = sanitizeAutoScrollLineEasingMaxMs(settings.autoScrollLineEasingMaxMs, defaultSettings.autoScrollLineEasingMaxMs);
-            const computed = baseMs + (Math.abs(distance) * perPixel);
-            durationMs = clampNumber(Math.round(computed), 80, maxMs);
-            if (lookaheadMode) {
-                durationMs = Math.min(durationMs, Math.max(160, baseMs));
+            if (dynamicSpeedEnabled) {
+                const adjustedBase = Math.max(40, baseMs / speedFactor);
+                const adjustedPerPixel = Math.max(0, perPixel / speedFactor);
+                const computed = adjustedBase + (Math.abs(distance) * adjustedPerPixel);
+                durationMs = clampNumber(Math.round(computed), 60, maxMs);
+                if (lookaheadMode) {
+                    durationMs = Math.min(durationMs, Math.max(120, adjustedBase));
+                }
+            } else {
+                const staticDuration = Math.max(60, DEFAULT_LINE_STATIC_DURATION_MS / speedFactor);
+                durationMs = clampNumber(Math.round(staticDuration), 60, maxMs);
             }
             easingFn = easeInOutCubic;
         } else {
-            const speedValue = clampNumber(settings.scrollSpeed || defaultSettings.scrollSpeed, 1, 1000);
-            const baseDuration = 400 / (speedValue / 100);
-            const distanceAdjusted = Math.max(baseDuration, Math.min(1400, distance * 0.9));
-            durationMs = clampNumber(Math.round(distanceAdjusted), 160, MAX_AUTO_SCROLL_ANIMATION_MS);
-            if (lookaheadMode) {
-                durationMs = Math.min(durationMs, 600);
+            if (dynamicSpeedEnabled) {
+                const distanceComponent = Math.min(1400, distance * PAGE_DYNAMIC_DISTANCE_COEFFICIENT);
+                const baseDuration = Math.max(PAGE_DYNAMIC_BASE_DURATION_MS, distanceComponent);
+                let computedDuration = clampNumber(
+                    Math.round(baseDuration / speedFactor),
+                    80,
+                    MAX_AUTO_SCROLL_ANIMATION_MS
+                );
+                if (lookaheadMode) {
+                    const cappedBase = Math.max(220, PAGE_DYNAMIC_BASE_DURATION_MS / speedFactor);
+                    computedDuration = Math.min(computedDuration, cappedBase);
+                }
+                durationMs = computedDuration;
+            } else {
+                durationMs = clampNumber(
+                    Math.round(DEFAULT_PAGE_STATIC_DURATION_MS / speedFactor),
+                    80,
+                    MAX_AUTO_SCROLL_ANIMATION_MS
+                );
             }
             easingFn = easeOutCubic;
+        }
+        const timelineConstraintMs = computeTimelineDurationConstraint(targetIndex, currentTimeSeconds, lookaheadMode);
+        if (timelineConstraintMs !== null && Number.isFinite(durationMs)) {
+            durationMs = Math.min(durationMs, timelineConstraintMs);
+            durationMs = Math.max(MIN_TIMELINE_SCROLL_MS, durationMs);
         }
         return {
             targetScrollTop: clampedTarget,
@@ -2312,6 +2515,12 @@ $(document).ready(function() {
     }, { passive: true });
     
     function getScrollSpeedCaption(speed) { if (speed === 1) return "Я БЛИТЦ! СКОРОСТЬ БЕЗ ГРАНИЦ"; if (speed >= 10 && speed <= 40) return "Ой, что-то меня укачало"; if (speed >= 50 && speed <= 70) return "Да не укачивает меня, просто резко встал"; if (speed >= 80 && speed <= 100) return "У меня хороший вестибу-бу-булярный аппарат"; if (speed >= 110 && speed <= 150) return "Это по вашему скорость?"; if (speed >= 160 && speed <= 200) return "АМЕРИКАНСКИЕ ГОРКИ! Ю-ХУУУ!!!"; if (speed === 500) return "Вы Борис?"; return ""; }
+
+    function getScrollSpeedMultiplier() {
+        const rawSpeed = clampNumber(settings.scrollSpeed || defaultSettings.scrollSpeed, 1, 1000);
+        const multiplier = (rawSpeed / 100) * SPEED_BASELINE_FACTOR;
+        return Math.max(MIN_SPEED_MULTIPLIER, Math.min(MAX_SPEED_MULTIPLIER, multiplier));
+    }
 
     function kebabToCamel(s) { return s.replace(/-./g, x => x.charAt(1).toUpperCase()); }
 
@@ -2502,8 +2711,11 @@ $(document).ready(function() {
             autoScrollModeSelect.prop('disabled', !isEnabled);
             autoScrollModeSelect.val(resolvedMode);
         }
-        if (autoScrollLookaheadInput && autoScrollLookaheadInput.length) {
-            autoScrollLookaheadInput.prop('disabled', !isEnabled);
+        if (autoScrollDynamicSpeedWrapper && autoScrollDynamicSpeedWrapper.length) {
+            autoScrollDynamicSpeedWrapper.css('display', isEnabled ? '' : 'none');
+        }
+        if (autoScrollDynamicSpeedToggle && autoScrollDynamicSpeedToggle.length) {
+            autoScrollDynamicSpeedToggle.prop('disabled', !isEnabled);
         }
         const showWindowSettings = isEnabled && resolvedMode === 'page';
         if (autoScrollWindowWrapper && autoScrollWindowWrapper.length) {
@@ -2534,7 +2746,7 @@ $(document).ready(function() {
     }
 
     function resetAutoScrollState() {
-        lastLookaheadTargetIndex = -1;
+        resetSubtReaderInertiaState();
     }
 
     function applySettings(options) {
@@ -2599,19 +2811,16 @@ $(document).ready(function() {
             tempSettings.autoScroll = autoScrollEnabled;
             settings.autoScroll = autoScrollEnabled;
 
+            const dynamicSpeedEnabled = tempSettings.autoScrollDynamicSpeedEnabled !== false;
+            tempSettings.autoScrollDynamicSpeedEnabled = dynamicSpeedEnabled;
+            settings.autoScrollDynamicSpeedEnabled = dynamicSpeedEnabled;
+
             const sanitizedAutoScrollMode = sanitizeAutoScrollMode(
                 tempSettings.autoScrollMode,
                 settings.autoScrollMode || defaultSettings.autoScrollMode
             );
             tempSettings.autoScrollMode = sanitizedAutoScrollMode;
             settings.autoScrollMode = sanitizedAutoScrollMode;
-
-            const sanitizedLookaheadMs = sanitizeAutoScrollLookaheadMs(
-                tempSettings.autoScrollLookaheadMs,
-                settings.autoScrollLookaheadMs || defaultSettings.autoScrollLookaheadMs
-            );
-            tempSettings.autoScrollLookaheadMs = sanitizedLookaheadMs;
-            settings.autoScrollLookaheadMs = sanitizedLookaheadMs;
 
             const sanitizedWindowTop = sanitizeAutoScrollPercent(
                 tempSettings.autoScrollWindowTopPercent,
@@ -2829,6 +3038,9 @@ $(document).ready(function() {
     // (Handled above for reliability)
         autoFindKeywordsWrapper.toggle(s.autoFindTrack);
         updateAutoScrollControlsState(s.autoScroll, s.autoScrollMode);
+        if (autoScrollDynamicSpeedToggle && autoScrollDynamicSpeedToggle.length) {
+            autoScrollDynamicSpeedToggle.prop('checked', s.autoScrollDynamicSpeedEnabled !== false);
+        }
         // Explicitly set value for auto-find keywords input (was missing, causing empty overwrite on save)
         const autoFindKeywordsInput = $('#auto-find-keywords');
         if (autoFindKeywordsInput.length) {
@@ -5037,15 +5249,20 @@ $(document).ready(function() {
     
     function updateTeleprompter(currentTime) {
         try {
+            if (Number.isFinite(currentTime)) {
+                lastPlaybackTimeSeconds = currentTime;
+            }
             const located = locateSubtitleIndexAtTime(currentTime);
             const newCurrentLineIndex = located.index;
             const inPause = located.inPause;
             const indexChanged = newCurrentLineIndex !== currentLineIndex;
+            const autoScrollEnabled = !!settings.autoScroll;
+            const activeAutoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
             let autoScrollPlan;
             let autoScrollPlanComputed = false;
 
-            if (indexChanged && newCurrentLineIndex !== -1 && settings.autoScroll) {
-                autoScrollPlan = computeAutoScrollPlan(newCurrentLineIndex);
+            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled && activeAutoScrollMode === 'line') {
+                autoScrollPlan = computeAutoScrollPlan(newCurrentLineIndex, { currentTime });
                 autoScrollPlanComputed = true;
             }
 
@@ -5081,7 +5298,6 @@ $(document).ready(function() {
             }
 
             if (indexChanged) {
-                lastLookaheadTargetIndex = -1;
                 if (newCurrentLineIndex !== -1) {
                     attachSharedProgressToIndex(newCurrentLineIndex);
                 } else {
@@ -5095,7 +5311,7 @@ $(document).ready(function() {
                 if (currentLineIndex !== -1) {
                     paintLine(currentLineIndex, true);
                 }
-                if (settings.autoScroll && currentLineIndex !== -1) {
+                if (autoScrollEnabled && currentLineIndex !== -1) {
                     if (autoScrollPlanComputed) {
                         if (autoScrollPlan) {
                             autoScrollToIndex(currentLineIndex, autoScrollPlan);
@@ -5106,33 +5322,11 @@ $(document).ready(function() {
                         autoScrollToIndex(currentLineIndex);
                     }
                 }
-            }
-
-            if (settings.autoScroll) {
-                const lookaheadMs = Number(settings.autoScrollLookaheadMs) || 0;
-                if (lookaheadMs > 0 && currentLineIndex !== -1 && subtitleData.length > currentLineIndex + 1) {
-                    const nextIndex = currentLineIndex + 1;
-                    const nextLine = subtitleData[nextIndex];
-                    if (nextLine) {
-                        const lookaheadSeconds = lookaheadMs / 1000;
-                        const timeUntilNext = nextLine.start_time - currentTime;
-                        if (timeUntilNext > 0 && timeUntilNext <= lookaheadSeconds) {
-                            if (lastLookaheadTargetIndex !== nextIndex) {
-                                const lookaheadPlan = computeAutoScrollPlan(nextIndex, { force: true, lookahead: true });
-                                if (lookaheadPlan) {
-                                    autoScrollToIndex(nextIndex, lookaheadPlan);
-                                    lastLookaheadTargetIndex = nextIndex;
-                                }
-                            }
-                        } else if (timeUntilNext > lookaheadSeconds || timeUntilNext <= 0) {
-                            lastLookaheadTargetIndex = -1;
-                        }
-                    }
-                } else if (lookaheadMs <= 0) {
-                    lastLookaheadTargetIndex = -1;
-                }
-            } else if (lastLookaheadTargetIndex !== -1) {
-                lastLookaheadTargetIndex = -1;
+                resetSubtReaderInertiaState();
+            } else if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime)) {
+                applySubtReaderInertia(currentLineIndex, currentTime);
+            } else {
+                resetSubtReaderInertiaState();
             }
 
             if (currentLineIndex !== -1) {
