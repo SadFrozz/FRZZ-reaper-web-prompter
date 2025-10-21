@@ -241,20 +241,20 @@
                         <label for="auto-scroll">Включить</label>
                         <input type="checkbox" id="auto-scroll">
                     </div>
-                    <div id="auto-scroll-settings-wrapper" class="auto-scroll-settings" style="display:none;">
-                        <div class="auto-scroll-card" id="auto-scroll-mode-card">
-                            <label for="auto-scroll-mode">Режим автоскролла</label>
+                    <div id="auto-scroll-settings-wrapper" class="settings-tile-grid" style="display:none;">
+                        <div class="settings-tile" id="auto-scroll-mode-card">
+                            <label class="settings-tile-title" for="auto-scroll-mode">Режим автоскролла</label>
                             <select id="auto-scroll-mode">
                                 <option value="page">Постраничный</option>
                                 <option value="line">Построчный</option>
                             </select>
                         </div>
-                        <div class="auto-scroll-card" id="auto-scroll-lookahead-card">
-                            <label for="auto-scroll-lookahead-ms">Порог срабатывания (мс)</label>
+                        <div class="settings-tile" id="auto-scroll-lookahead-card">
+                            <label class="settings-tile-title" for="auto-scroll-lookahead-ms">Порог срабатывания (мс)</label>
                             <input type="number" id="auto-scroll-lookahead-ms" class="short-input" min="0" max="5000" step="50" value="0">
                         </div>
-                        <div class="auto-scroll-card" id="auto-scroll-window-wrapper">
-                            <label>Границы прокрутки (%)</label>
+                        <div class="settings-tile" id="auto-scroll-window-wrapper">
+                            <label class="settings-tile-title">Границы прокрутки (%)</label>
                             <div class="setting-range with-side-values">
                                 <span id="auto-scroll-window-top-value">10%</span>
                                 <div class="dual-range" id="auto-scroll-window-range">
@@ -265,105 +265,121 @@
                                 <span id="auto-scroll-window-bottom-value">85%</span>
                             </div>
                         </div>
-                        <div class="auto-scroll-card" id="scroll-speed-wrapper">
-                            <label for="scroll-speed">Скорость прокрутки</label>
-                            <div class="setting-range">
+                        <div class="settings-tile settings-tile-slider" id="scroll-speed-wrapper">
+                            <label class="settings-tile-title" for="scroll-speed">Скорость прокрутки</label>
+                            <div class="settings-slider-row">
                                 <input type="range" id="scroll-speed" class="frzz-slider" min="0" max="21" step="1">
-                                <span id="scroll-speed-value">60%</span>
+                                <span id="scroll-speed-value" class="settings-slider-value">60%</span>
                             </div>
-                            <p id="scroll-speed-caption" class="scroll-caption"></p>
+                            <p id="scroll-speed-caption" class="scroll-caption settings-slider-caption"></p>
                         </div>
-                        <div class="auto-scroll-card" id="auto-scroll-line-anchor-wrapper" style="display:none;">
-                            <label for="auto-scroll-line-anchor-percent">Позиция строки (%)</label>
-                            <div class="setting-range">
+                        <div class="settings-tile settings-tile-slider" id="auto-scroll-line-anchor-wrapper" style="display:none;">
+                            <label class="settings-tile-title" for="auto-scroll-line-anchor-percent">Позиция строки (%)</label>
+                            <div class="settings-slider-row">
                                 <input type="range" id="auto-scroll-line-anchor-percent" class="frzz-slider" min="0" max="100" step="1" value="35">
-                                <span id="auto-scroll-line-anchor-value">35%</span>
+                                <span id="auto-scroll-line-anchor-value" class="settings-slider-value">35%</span>
                             </div>
                         </div>
                     </div>
                 </fieldset>
                 <fieldset class="fieldset-collapsible expanded">
                     <legend>Общие настройки</legend>
-                    <div class="setting-item">
-                        <label for="title-mode">Заголовок</label>
-                        <select id="title-mode">
-                            <option value="placeholder" selected>Показывать заглушку</option>
-                            <option value="project_name">Показывать название проекта</option>
-                            <option value="custom_text">Показывать свой текст</option>
-                            <option value="none">Ничего не показывать</option>
-                        </select>
-                    </div>
-                    <div class="setting-item" id="custom-title-wrapper">
-                        <label for="custom-title-text">Свой текст заголовка</label>
-                        <input type="text" id="custom-title-text">
-                    </div>
-                    <div class="setting-item">
-                        <label for="navigation-panel-position">Навигационная панель сверху</label>
-                        <input type="checkbox" id="navigation-panel-position">
-                    </div>
-                    <div class="setting-item">
-                        <label for="timecode-display-format">Формат таймкода</label>
-                        <select id="timecode-display-format">
-                            <option value="auto" selected>Авто (по FPS)</option>
-                            <option value="frames">HH:MM:SS:FF</option>
-                            <option value="milliseconds">HH:MM:SS.ms</option>
-                        </select>
-                    </div>
-                    <div class="setting-group">
-                        <div class="setting-group-header-flex">
-                            <p class="setting-group-title">Прыжок по клику</p>
-                            <div class="inline-checkbox">
-                                <input type="checkbox" id="jump-on-click-enabled" aria-label="Включить Jump по клику">
-                            </div>
-                        </div>
-                        <div id="jump-settings-wrapper" style="display:none;">
+                    <div id="general-settings-tiles" class="settings-tile-grid general-settings-tiles">
+                        <div class="settings-tile general-settings-tile" id="general-title-tile">
                             <div class="setting-item">
-                                <label for="jump-pre-roll-seconds">Время до реплики (сек)</label>
-                                <input type="number" id="jump-pre-roll-seconds" class="short-input" min="0" max="10" step="0.1" value="0">
+                                <label for="title-mode">Заголовок</label>
+                                <select id="title-mode">
+                                    <option value="placeholder" selected>Показывать заглушку</option>
+                                    <option value="project_name">Показывать название проекта</option>
+                                    <option value="custom_text">Показывать свой текст</option>
+                                    <option value="none">Ничего не показывать</option>
+                                </select>
                             </div>
-                            <p class="setting-group-title">Блокировать прыжок</p>
-                            <div class="setting-inline-row">
-                                <div class="setting-item mini">
-                                    <label for="jump-prevent-while-playing">При воспроизведении</label>
-                                    <input type="checkbox" id="jump-prevent-while-playing" checked>
+                            <div class="setting-item" id="custom-title-wrapper">
+                                <label for="custom-title-text">Свой текст заголовка</label>
+                                <input type="text" id="custom-title-text">
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile" id="general-layout-tile">
+                            <div class="setting-item">
+                                <label for="navigation-panel-position">Навигационная панель сверху</label>
+                                <input type="checkbox" id="navigation-panel-position">
+                            </div>
+                            <div class="setting-item">
+                                <label for="timecode-display-format">Формат таймкода</label>
+                                <select id="timecode-display-format">
+                                    <option value="auto" selected>Авто (по FPS)</option>
+                                    <option value="frames">HH:MM:SS:FF</option>
+                                    <option value="milliseconds">HH:MM:SS.ms</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile" id="general-jump-tile">
+                            <div class="setting-group">
+                                <div class="setting-group-header-flex">
+                                    <p class="setting-group-title">Прыжок по клику</p>
+                                    <div class="inline-checkbox">
+                                        <input type="checkbox" id="jump-on-click-enabled" aria-label="Включить Jump по клику">
+                                    </div>
                                 </div>
-                                <div class="setting-item mini">
-                                    <label for="jump-prevent-while-recording">При записи</label>
-                                    <input type="checkbox" id="jump-prevent-while-recording" checked>
+                                <div id="jump-settings-wrapper" style="display:none;">
+                                    <div class="setting-item">
+                                        <label for="jump-pre-roll-seconds">Время до реплики (сек)</label>
+                                        <input type="number" id="jump-pre-roll-seconds" class="short-input" min="0" max="10" step="0.1" value="0">
+                                    </div>
+                                    <p class="setting-group-title">Блокировать прыжок</p>
+                                    <div class="setting-inline-row">
+                                        <div class="setting-item mini">
+                                            <label for="jump-prevent-while-playing">При воспроизведении</label>
+                                            <input type="checkbox" id="jump-prevent-while-playing" checked>
+                                        </div>
+                                        <div class="setting-item mini">
+                                            <label for="jump-prevent-while-recording">При записи</label>
+                                            <input type="checkbox" id="jump-prevent-while-recording" checked>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    <div class="setting-item">
-                        <label for="theme-toggle">Светлая тема</label>
-                        <input type="checkbox" id="theme-toggle">
-                    </div>
-                     <div class="setting-item">
-                        <label for="auto-find-track">Автоматически искать дорожку</label>
-                        <input type="checkbox" id="auto-find-track">
-                    </div>
-                    <div class="setting-item-vertical" id="auto-find-keywords-wrapper">
-                        <label for="auto-find-keywords">Ключевые слова для автопоиска (через запятую)</label>
-                        <input type="text" id="auto-find-keywords">
-                    </div>
-                    <div class="setting-item">
-                        <label for="font-family">Шрифт</label>
-                        <select id="font-family">
-                            <option value="'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">Стандартный</option>
-                            <option value="'Courier New', Courier, monospace">Моноширинный (Courier)</option>
-                            <option value="'Times New Roman', Times, serif">С засечками (Times)</option>
-                            <option value="Verdana, Geneva, sans-serif">Без засечек (Verdana)</option>
-                        </select>
-                    </div>
-                    <div class="setting-item">
-                        <label for="ui-scale">Масштаб интерфейса</label>
-                        <input type="range" id="ui-scale" class="frzz-slider" min="50" max="300" step="25">
-                        <span id="ui-scale-value">100</span>
-                    </div>
-                    <div class="setting-item">
-                        <label for="line-spacing">Межстрочный отступ</label>
-                        <input type="range" id="line-spacing" class="frzz-slider" min="0" max="400" step="10">
-                        <span id="line-spacing-value">100%</span>
+                        <div class="settings-tile general-settings-tile" id="general-theme-tile">
+                            <div class="setting-item">
+                                <label for="theme-toggle">Светлая тема</label>
+                                <input type="checkbox" id="theme-toggle">
+                            </div>
+                            <div class="setting-item">
+                                <label for="auto-find-track">Автоматически искать дорожку</label>
+                                <input type="checkbox" id="auto-find-track">
+                            </div>
+                            <div class="setting-item-vertical" id="auto-find-keywords-wrapper">
+                                <label for="auto-find-keywords">Ключевые слова для автопоиска (через запятую)</label>
+                                <input type="text" id="auto-find-keywords">
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile" id="general-font-tile">
+                            <div class="setting-item">
+                                <label for="font-family">Шрифт</label>
+                                <select id="font-family">
+                                    <option value="'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">Стандартный</option>
+                                    <option value="'Courier New', Courier, monospace">Моноширинный (Courier)</option>
+                                    <option value="'Times New Roman', Times, serif">С засечками (Times)</option>
+                                    <option value="Verdana, Geneva, sans-serif">Без засечек (Verdana)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile settings-tile-slider" id="general-ui-scale-tile">
+                            <label class="settings-tile-title" for="ui-scale">Масштаб интерфейса</label>
+                            <div class="settings-slider-row">
+                                <input type="range" id="ui-scale" class="frzz-slider" min="50" max="300" step="25">
+                                <span id="ui-scale-value" class="settings-slider-value">100%</span>
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile settings-tile-slider" id="general-line-spacing-tile">
+                            <label class="settings-tile-title" for="line-spacing">Межстрочный отступ</label>
+                            <div class="settings-slider-row">
+                                <input type="range" id="line-spacing" class="frzz-slider" min="0" max="400" step="10">
+                                <span id="line-spacing-value" class="settings-slider-value">100%</span>
+                            </div>
+                        </div>
                     </div>
                 </fieldset>
                 <div class="modal-footer-buttons">

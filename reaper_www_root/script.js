@@ -567,6 +567,58 @@ $(document).ready(function() {
     const lineSpacingValue = $('#line-spacing-value');
     const autoFindTrackCheckbox = $('#auto-find-track');
     const autoFindKeywordsWrapper = $('#auto-find-keywords-wrapper');
+    const settingsTileGrids = $('.settings-tile-grid');
+    const TILE_GRID_ROW_SIZE = 6; // finer granularity for masonry spans
+    let settingsTileReflowRaf = null;
+
+    function computeTileGridRowGap(gridEl) {
+        if (!gridEl || typeof window === 'undefined') return 0;
+        const styles = window.getComputedStyle(gridEl);
+        const gapValue = styles.rowGap || styles.gridRowGap || '0';
+        const parsed = parseFloat(gapValue);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function reflowSettingsTileGrid(gridEl) {
+        if (!gridEl || gridEl.childElementCount === 0) return;
+        if (gridEl.offsetParent === null) return; // Skip hidden grids
+        const baseRow = TILE_GRID_ROW_SIZE;
+        const rowGap = computeTileGridRowGap(gridEl);
+        gridEl.style.gridAutoFlow = 'row dense';
+        gridEl.style.gridAutoRows = `${baseRow}px`;
+        const tiles = gridEl.querySelectorAll('.settings-tile');
+        tiles.forEach(tile => {
+            if (!tile) return;
+            // Ensure measurement includes margins inside the tile
+            const tileRect = tile.getBoundingClientRect();
+            if (!tileRect || tileRect.height === 0) {
+                tile.style.gridRowEnd = 'span 1';
+                return;
+            }
+            const totalHeight = tileRect.height + rowGap;
+            const span = Math.max(1, Math.ceil(totalHeight / (baseRow + rowGap)));
+            tile.style.gridRowEnd = `span ${span}`;
+        });
+    }
+
+    function scheduleSettingsTileReflow() {
+        if (settingsTileReflowRaf !== null) return;
+        if (!settingsTileGrids || !settingsTileGrids.length) return;
+        settingsTileReflowRaf = (typeof window !== 'undefined' && window.requestAnimationFrame)
+            ? window.requestAnimationFrame(() => {
+                settingsTileReflowRaf = null;
+                settingsTileGrids.each((_, gridEl) => reflowSettingsTileGrid(gridEl));
+            })
+            : setTimeout(() => {
+                settingsTileReflowRaf = null;
+                settingsTileGrids.each((_, gridEl) => reflowSettingsTileGrid(gridEl));
+            }, 16);
+    }
+
+    scheduleSettingsTileReflow();
+    if (typeof window !== 'undefined') {
+        $(window).on('resize', scheduleSettingsTileReflow);
+    }
     const processRolesCheckbox = $('#process-roles');
     const roleOptionsWrapper = $('#role-options-wrapper');
     const roleDisplayStyleSelect = $('#role-display-style');
@@ -1691,6 +1743,7 @@ $(document).ready(function() {
         if (jumpPreventWhileRecordingCheckbox && jumpPreventWhileRecordingCheckbox.length) {
             jumpPreventWhileRecordingCheckbox.prop('disabled', !isEnabled);
         }
+        scheduleSettingsTileReflow();
     }
 
     function getActiveJumpPreRollSeconds() {
@@ -2301,6 +2354,7 @@ $(document).ready(function() {
             const swatchesEnabled = enableColorSwatchesCheckbox.is(':checked');
             roleColumnScaleWrapper.toggle(rolesInColumn || swatchesEnabled);
         } catch (e) { console.error("Error in updateScaleWrapperVisibility:", e); }
+        scheduleSettingsTileReflow();
     }
 
     function initializeColorPickers() {
@@ -2468,6 +2522,7 @@ $(document).ready(function() {
         if (showLineOptions) {
             updateAutoScrollLineAnchorSlider(autoScrollLineAnchorInput.val());
         }
+        scheduleSettingsTileReflow();
     }
 
     function resetAutoScrollState() {
@@ -2789,6 +2844,8 @@ $(document).ready(function() {
         }
         updateJumpControlsState(s.jumpOnClickEnabled);
 
+        scheduleSettingsTileReflow();
+
         const scrollIndex = parseInt(scrollSpeedSlider.val(), 10);
         const scrollValue = speedSteps[scrollIndex] || 60;
         scrollSpeedValue.text(scrollValue + '%');
@@ -2799,7 +2856,7 @@ $(document).ready(function() {
         );
         updateAutoScrollLineAnchorSlider(s.autoScrollLineAnchorPercent);
     // Display value as entered (no conversion) for user clarity
-    uiScaleValue.text(s.uiScale);
+    uiScaleValue.text(s.uiScale + '%');
         lineSpacingValue.text(s.lineSpacing + '%');
         roleColumnScaleValue.text(s.roleColumnScale + '%');
         updateScaleWrapperVisibility();
@@ -5246,8 +5303,14 @@ $(document).ready(function() {
     // $('.settings-body').find('input, select').on('change input', applySettings);
 
     // Обработчики для обновления UI (появление/скрытие блоков)
-    titleModeSelect.on('change', function() { customTitleWrapper.toggle($(this).val() === 'custom_text'); });
-    autoFindTrackCheckbox.on('change', function() { autoFindKeywordsWrapper.toggle($(this).is(':checked')); });
+    titleModeSelect.on('change', function() {
+        customTitleWrapper.toggle($(this).val() === 'custom_text');
+        scheduleSettingsTileReflow();
+    });
+    autoFindTrackCheckbox.on('change', function() {
+        autoFindKeywordsWrapper.toggle($(this).is(':checked'));
+        scheduleSettingsTileReflow();
+    });
     autoScrollCheckbox.on('change', function() {
         const enabled = $(this).is(':checked');
         const mode = autoScrollModeSelect && autoScrollModeSelect.length
@@ -5264,10 +5327,23 @@ $(document).ready(function() {
             updateAutoScrollControlsState(autoScrollCheckbox.is(':checked'), mode);
         });
     }
-    processRolesCheckbox.on('change', function() { roleOptionsWrapper.toggle($(this).is(':checked')); updateScaleWrapperVisibility(); });
-    checkerboardEnabledCheckbox.on('change', function() { checkerboardOptionsWrapper.toggle($(this).is(':checked')); });
-    highlightCurrentRoleEnabledCheckbox.on('change', function() { highlightRoleColorWrapper.toggle($(this).is(':checked')); });
-    highlightClickEnabledCheckbox.on('change', function() { highlightClickOptionsWrapper.toggle($(this).is(':checked')); });
+    processRolesCheckbox.on('change', function() {
+        roleOptionsWrapper.toggle($(this).is(':checked'));
+        updateScaleWrapperVisibility();
+        scheduleSettingsTileReflow();
+    });
+    checkerboardEnabledCheckbox.on('change', function() {
+        checkerboardOptionsWrapper.toggle($(this).is(':checked'));
+        scheduleSettingsTileReflow();
+    });
+    highlightCurrentRoleEnabledCheckbox.on('change', function() {
+        highlightRoleColorWrapper.toggle($(this).is(':checked'));
+        scheduleSettingsTileReflow();
+    });
+    highlightClickEnabledCheckbox.on('change', function() {
+        highlightClickOptionsWrapper.toggle($(this).is(':checked'));
+        scheduleSettingsTileReflow();
+    });
     if (jumpOnClickCheckbox.length) {
         jumpOnClickCheckbox.on('change', function() {
             updateJumpControlsState($(this).is(':checked'));
