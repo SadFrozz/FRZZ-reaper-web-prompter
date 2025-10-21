@@ -621,6 +621,10 @@ $(document).ready(function() {
     }
     const processRolesCheckbox = $('#process-roles');
     const roleOptionsWrapper = $('#role-options-wrapper');
+    const setRoleOptionsVisibility = (enabled) => {
+        if (!roleOptionsWrapper.length) return;
+        roleOptionsWrapper.toggleClass('is-hidden', !enabled);
+    };
     const roleDisplayStyleSelect = $('#role-display-style');
     const enableColorSwatchesCheckbox = $('#enable-color-swatches');
     const roleColumnScaleWrapper = $('#role-column-scale-wrapper');
@@ -628,6 +632,10 @@ $(document).ready(function() {
     const roleColumnScaleValue = $('#role-column-scale-value');
     const checkerboardEnabledCheckbox = $('#checkerboard-enabled');
     const checkerboardOptionsWrapper = $('#checkerboard-options-wrapper');
+    const setCheckerboardOptionsVisibility = (enabled) => {
+        if (!checkerboardOptionsWrapper.length) return;
+        checkerboardOptionsWrapper.toggleClass('is-hidden', !enabled);
+    };
     const highlightCurrentRoleEnabledCheckbox = $('#highlight-current-role-enabled');
     const highlightClickEnabledCheckbox = $('#highlight-click-enabled');
     const highlightClickOptionsWrapper = $('#highlight-click-options-wrapper');
@@ -2826,8 +2834,8 @@ $(document).ready(function() {
         if (autoFindKeywordsInput.length) {
             autoFindKeywordsInput.val(s.autoFindKeywords || defaultSettings.autoFindKeywords);
         }
-        roleOptionsWrapper.toggle(s.processRoles);
-        checkerboardOptionsWrapper.toggle(s.checkerboardEnabled);
+    setRoleOptionsVisibility(s.processRoles);
+    setCheckerboardOptionsVisibility(s.checkerboardEnabled);
         highlightClickOptionsWrapper.toggle(s.highlightClickEnabled);
         highlightRoleColorWrapper.toggle(s.highlightCurrentRoleEnabled);
         if (jumpOnClickCheckbox.length) {
@@ -5328,12 +5336,12 @@ $(document).ready(function() {
         });
     }
     processRolesCheckbox.on('change', function() {
-        roleOptionsWrapper.toggle($(this).is(':checked'));
+    setRoleOptionsVisibility($(this).is(':checked'));
         updateScaleWrapperVisibility();
         scheduleSettingsTileReflow();
     });
     checkerboardEnabledCheckbox.on('change', function() {
-        checkerboardOptionsWrapper.toggle($(this).is(':checked'));
+        setCheckerboardOptionsVisibility($(this).is(':checked'));
         scheduleSettingsTileReflow();
     });
     highlightCurrentRoleEnabledCheckbox.on('change', function() {

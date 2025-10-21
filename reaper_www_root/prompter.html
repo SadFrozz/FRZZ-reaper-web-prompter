@@ -77,93 +77,114 @@
             <h2>Настройки</h2>
             <div class="settings-body">
                 <fieldset class="fieldset-collapsible expanded">
-                    <legend>Отображение колонки</legend>
-                    <div class="setting-item">
-                        <label for="process-roles">Обрабатывать роли [в скобках]</label>
-                        <input type="checkbox" id="process-roles">
-                    </div>
-                    <div id="role-options-wrapper">
-                        <div class="setting-item">
-                            <label for="role-display-style">Стиль отображения роли</label>
-                            <select id="role-display-style">
-                                <option value="column_with_swatch">В колонке с ярлыком цвета</option>
-                                <option value="column">В отдельной колонке</option>
-                                <option value="inline">В тексте реплики</option>
-                                <option value="hidden">Скрыть роль</option>
-                            </select>
+                    <legend>Взаимодействие с ролями</legend>
+                    <div class="settings-tile-grid role-settings-tiles">
+                        <div class="settings-tile role-settings-tile" id="process-roles-tile">
+                            <div class="setting-item">
+                                <label for="process-roles">Включить обработку</label>
+                                <input type="checkbox" id="process-roles">
+                            </div>
                         </div>
-                        <div class="setting-item">
-                            <label for="enable-color-swatches">Включить окраску блоков</label>
-                            <input type="checkbox" id="enable-color-swatches">
-                        </div>
-                        <div class="setting-item">
-                            <label for="role-font-color-enabled" title="Если включено, фон роли будет осветляться для обеспечения контраста с черным текстом. Если выключено, цвет текста будет подбираться автоматически.">Осветлять ярлык роли под черный шрифт</label>
-                            <input type="checkbox" id="role-font-color-enabled">
-                        </div>
-                        <hr>
-                        <div class="setting-item">
-                            <label for="deduplicate-roles">Скрывать повтор роли</label>
-                            <input type="checkbox" id="deduplicate-roles">
-                        </div>
-                        <div class="setting-item">
-                            <label for="auto-hide-empty-column">Автоматически скрывать пустую колонку</label>
-                            <input type="checkbox" id="auto-hide-empty-column">
-                        </div>
-                        <div class="setting-item">
-                            <label for="swap-columns">Поменять колонки местами</label>
-                            <input type="checkbox" id="swap-columns">
-                        </div>
-                        <div id="role-column-scale-wrapper" class="setting-item">
-                            <label for="role-column-scale">Масштаб колонки</label>
-                            <input type="range" id="role-column-scale" class="frzz-slider" min="50" max="200" step="25">
-                            <span id="role-column-scale-value">100%</span>
+                        <div class="role-options-wrapper is-hidden" id="role-options-wrapper">
+                            <div class="settings-tile role-settings-tile" id="role-display-style-tile">
+                                <div class="setting-item" style="display: contents;">
+                                    <label for="role-display-style">Стиль отображения роли</label>
+                                    <select id="role-display-style" style="max-width: 100%;">
+                                        <option value="column_with_swatch">В колонке с ярлыком цвета</option>
+                                        <option value="column">В отдельной колонке</option>
+                                        <option value="inline">В тексте реплики</option>
+                                        <option value="hidden">Скрыть роль</option>
+                                    </select>
+                                </div>
+                                <div class="setting-item">
+                                    <label for="enable-color-swatches">Включить окраску блоков</label>
+                                    <input type="checkbox" id="enable-color-swatches">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="role-font-color-enabled" title="Если включено, фон роли будет осветляться для обеспечения контраста с черным текстом. Если выключено, цвет текста будет подбираться автоматически.">Осветлять ярлык роли под черный шрифт</label>
+                                    <input type="checkbox" id="role-font-color-enabled">
+                                </div>
+                            </div>
+                            <div class="settings-tile role-settings-tile" id="role-behavior-tile">
+                                <div class="setting-item">
+                                    <label for="deduplicate-roles">Скрывать повтор роли</label>
+                                    <input type="checkbox" id="deduplicate-roles">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="auto-hide-empty-column">Автоматически скрывать пустую колонку</label>
+                                    <input type="checkbox" id="auto-hide-empty-column">
+                                </div>
+                            </div>
+                            <div class="settings-tile role-settings-tile" id="role-layout-tile">
+                                <div class="setting-item">
+                                    <label for="swap-columns">Поменять колонки местами</label>
+                                    <input type="checkbox" id="swap-columns">
+                                </div>
+                            </div>
+                            <div class="settings-tile role-settings-tile" id="role-scale-tile">
+                                <div class="setting-item" id="role-column-scale-wrapper">
+                                    <label for="role-column-scale">Масштаб колонки</label>
+                                    <input type="range" id="role-column-scale" class="frzz-slider" min="50" max="200" step="25">
+                                    <span id="role-column-scale-value">100%</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </fieldset>
                 <fieldset class="fieldset-collapsible expanded">
                     <legend>Шахматная раскраска</legend>
-                    <div class="setting-item">
-                        <label for="checkerboard-enabled">Включить</label>
-                        <input type="checkbox" id="checkerboard-enabled">
-                    </div>
-                    <div id="checkerboard-options-wrapper" style="display: none;">
-                        <div class="setting-item">
-                            <label for="checkerboard-mode">Режим чередования</label>
-                            <select id="checkerboard-mode">
-                                <option value="unconditional">Безусловно</option>
-                                <option value="by_role">Следить за ролями</option>
-                                <option value="by_color">Следить за цветами</option>
-                            </select>
-                        </div>
-                        <div class="checkerboard-pair-row">
-                            <div class="checkerboard-cell">
-                                <label for="checkerboard-bg1">Фон 1</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="checkerboard-bg1" value="rgba(34,34,34,1)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                                </div>
-                            </div>
-                            <div class="checkerboard-cell">
-                                <label for="checkerboard-font1">Шрифт 1</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                                </div>
+                    <div class="settings-tile-grid checkerboard-settings-tiles">
+                        <div class="settings-tile checkerboard-settings-tile" id="checkerboard-toggle-tile">
+                            <div class="setting-item">
+                                <label for="checkerboard-enabled">Включить</label>
+                                <input type="checkbox" id="checkerboard-enabled">
                             </div>
                         </div>
-                        <div class="checkerboard-pair-row">
-                            <div class="checkerboard-cell">
-                                <label for="checkerboard-bg2">Фон 2</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="checkerboard-bg2" value="rgba(42,42,42,1)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                        <div class="checkerboard-options-wrapper is-hidden" id="checkerboard-options-wrapper">
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-mode-tile">
+                                <div class="setting-item">
+                                    <label for="checkerboard-mode">Режим</label>
+                                    <select id="checkerboard-mode">
+                                        <option value="unconditional">Безусловно</option>
+                                        <option value="by_role">Следить за ролями</option>
+                                        <option value="by_color">Следить за цветами</option>
+                                    </select>
                                 </div>
                             </div>
-                            <div class="checkerboard-cell">
-                                <label for="checkerboard-font2">Шрифт 2</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-backgrounds-tile">
+                                <div class="checkerboard-pair-row wrap">
+                                    <div class="checkerboard-cell responsive">
+                                        <label for="checkerboard-bg1">Фон 1</label>
+                                        <div class="input-with-button">
+                                            <input type="text" id="checkerboard-bg1" value="rgba(34,34,34,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        </div>
+                                    </div>
+                                    <div class="checkerboard-cell responsive">
+                                        <label for="checkerboard-bg2">Фон 2</label>
+                                        <div class="input-with-button">
+                                            <input type="text" id="checkerboard-bg2" value="rgba(42,42,42,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-fonts-tile">
+                                <div class="checkerboard-pair-row wrap">
+                                    <div class="checkerboard-cell responsive">
+                                        <label for="checkerboard-font1">Шрифт 1</label>
+                                        <div class="input-with-button">
+                                            <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        </div>
+                                    </div>
+                                    <div class="checkerboard-cell responsive">
+                                        <label for="checkerboard-font2">Шрифт 2</label>
+                                        <div class="input-with-button">
+                                            <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -172,30 +193,30 @@
                 
                 <fieldset class="fieldset-collapsible expanded">
                     <legend>Подсветка</legend>
-                    <div class="setting-group">
-                        <p class="setting-group-title">Текущая реплика (с прогресс-баром)</p>
-                        <div class="setting-group-inline-colors">
-                        <div class="setting-item">
-                            <label for="highlight-current-bg">Фон</label>
-                            <div class="input-with-button">
-                                <input type="text" id="highlight-current-bg" value="rgba(80, 80, 0, 0.4)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                    <div class="settings-tile-grid highlight-settings-tiles setting-group-inline-colors">
+                        <div class="settings-tile highlight-settings-tile" id="highlight-current-tile">
+                            <div class="setting-group">
+                                <p class="setting-group-title">Текущая реплика (с прогресс-баром)</p>
+                                <div class="setting-item">
+                                    <label for="highlight-current-bg">Фон</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="highlight-current-bg" value="rgba(80, 80, 0, 0.4)">
+                                        <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                    </div>
+                                </div>
+                                <div class="setting-item">
+                                    <label for="progress-bar-color">Прогресс-бар</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
+                                        <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
-                        <div class="setting-item">
-                            <label for="progress-bar-color">Прогресс-бар</label>
-                            <div class="input-with-button">
-                                <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
-                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                            </div>
-                        </div>
-                        </div>
-                        <div class="setting-item">
-                            <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
-                            <input type="checkbox" id="highlight-current-role-enabled">
-                        </div>
-                        <div id="highlight-role-color-wrapper" style="display: none;">
                             <div class="setting-item">
+                                <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
+                                <input type="checkbox" id="highlight-current-role-enabled">
+                            </div>
+                            <div class="setting-item mini" id="highlight-role-color-wrapper" style="display: none;">
                                 <label for="highlight-current-role-bg">Цвет фона роли</label>
                                 <div class="input-with-button">
                                     <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
@@ -203,34 +224,37 @@
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    <hr>
-                    <div class="setting-group-header-flex pause-inline-color">
-                        <p class="setting-group-title">Цвет подсветки в паузах</p>
-                        <div class="input-with-button">
-                            <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
-                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                        </div>
-                    </div>
-                    <hr>
-                    <div class="setting-group">
-                        <div class="setting-group-header-flex">
-                            <p class="setting-group-title">Подсветка по клику на таймкод</p>
-                            <div class="inline-checkbox">
-                                <input type="checkbox" id="highlight-click-enabled" aria-label="Включить подсветку по клику">
-                            </div>
-                        </div>
-                        <div id="highlight-click-options-wrapper" class="setting-inline-row" style="display: none;">
-                            <div class="setting-item mini">
-                                <label for="highlight-click-bg">Фон</label>
+                        <div class="settings-tile highlight-settings-tile setting-group-inline-colors" id="highlight-pause-tile">
+                            <div class="setting-item">
+                                <label for="highlight-pause-bg">Цвет подсветки в паузах</label>
                                 <div class="input-with-button">
-                                    <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
+                                    <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
                                     <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                                 </div>
                             </div>
-                            <div class="setting-item mini">
-                                <label for="highlight-click-duration">Длительность (мс)</label>
-                                <input type="number" id="highlight-click-duration" class="short-input" value="800" min="50" max="60000" step="50">
+                        </div>
+                        <div class="settings-tile highlight-settings-tile" id="highlight-click-tile">
+                            <div class="setting-group">
+                                <div class="setting-group-header-flex">
+                                    <p class="setting-group-title">Подсветка по клику на таймкод</p>
+                                    <div class="inline-checkbox">
+                                        <input type="checkbox" id="highlight-click-enabled" aria-label="Включить подсветку по клику">
+                                    </div>
+                                </div>
+                                <div id="highlight-click-options-wrapper" class="setting-inline-row setting-group-inline-colors" style="display: none;">
+                                    <div class="setting-item mini">
+                                        <label for="highlight-click-bg">Фон</label>
+                                            <div class="input-with-button">
+                                                <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
+                                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="setting-item mini">
+                                        <label for="highlight-click-duration">Длительность (мс)</label>
+                                        <input type="number" id="highlight-click-duration" class="short-input" value="800" min="50" max="60000" step="50">
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

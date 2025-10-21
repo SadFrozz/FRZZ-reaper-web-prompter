@@ -114,13 +114,16 @@ legend { padding: 0 0.5em; color: #ccc; font-weight: bold; }
 .checkerboard-cell .input-with-button { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 0.4rem; }
 .checkerboard-cell .input-with-button input[type="text"] { flex: 0 0 auto; width: 70px; min-width: 70px; padding: 0.35em 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; }
 .checkerboard-cell .copy-color-btn { height: 2.1rem; width: 2.1rem; padding: 0; }
+.role-options-wrapper { display: contents; }
+.role-options-wrapper.is-hidden { display: none; }
+.checkerboard-options-wrapper { display: contents; }
+.checkerboard-options-wrapper.is-hidden { display: none; }
 .setting-group-title { font-weight: bold; margin: 0.5rem 0 1rem; color: #ccc; }
 hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .setting-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .setting-item-vertical { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin-bottom: 1rem; }
 .setting-item-vertical input[type="text"] { width: 100%; box-sizing: border-box; }
 .setting-item label { flex-grow: 1; margin-right: 0.625rem; }
-.setting-item input[type="checkbox"] { width: 1.25rem; height: 1.25rem; cursor: pointer; }
 .setting-item input[type="range"] {
     /* Width subtracts value badge (2.5rem) plus gap (0.3125rem) */
     flex: 0 1 calc(clamp(10rem, 50%, 18rem) - 2.8125rem);
@@ -134,6 +137,71 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .setting-item input[type="color"] { -webkit-appearance: none; -moz-appearance: none; appearance: none; width: 100%; height: 2rem; background-color: transparent; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
 .setting-item input[type="color"]::-webkit-color-swatch { border-radius: 3px; border: none; }
 .setting-item input[type="color"]::-moz-color-swatch { border-radius: 3px; border: none; }
+input[type="checkbox"] {
+    --toggle-width: 2.6rem;
+    --toggle-height: 1.3rem;
+    --toggle-padding: 0.16rem;
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--toggle-width);
+    height: var(--toggle-height);
+    border-radius: var(--toggle-height);
+    background-color: #555;
+    border: 1px solid rgba(0, 0, 0, 0.55);
+    position: relative;
+    display: inline-block;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    vertical-align: middle;
+}
+input[type="checkbox"]::after {
+    content: "";
+    position: absolute;
+    width: calc(var(--toggle-height) - var(--toggle-padding) * 2);
+    height: calc(var(--toggle-height) - var(--toggle-padding) * 2);
+    border-radius: 50%;
+    background-color: #fff;
+    top: 50%;
+    left: var(--toggle-padding);
+    transform: translate(0, -50%);
+    transition: transform 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+input[type="checkbox"]:checked {
+    background-color: #4aa8ff;
+    border-color: rgba(32, 112, 185, 0.75);
+}
+input[type="checkbox"]:checked::after {
+    transform: translate(calc(var(--toggle-width) - var(--toggle-height)), -50%);
+}
+input[type="checkbox"]:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(74, 168, 255, 0.35);
+}
+input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+    background-color: #3a3a3a;
+    border-color: rgba(0, 0, 0, 0.4);
+}
+input[type="checkbox"]:disabled::after {
+    box-shadow: none;
+}
+.light-theme input[type="checkbox"] {
+    background-color: #c9c9c9;
+    border-color: rgba(0, 0, 0, 0.2);
+}
+.light-theme input[type="checkbox"]:checked {
+    background-color: #0d66d0;
+    border-color: rgba(10, 70, 140, 0.5);
+}
+.light-theme input[type="checkbox"]:focus-visible {
+    box-shadow: 0 0 0 3px rgba(13, 102, 208, 0.35);
+}
+input[type="checkbox"]:active::after {
+    transition-duration: 0.12s;
+}
 .scroll-caption { font-size: 0.9em; color: #bbb; text-align: center; width: 100%; margin-top: 0.5rem; }
 .scroll-caption:empty { display: none; }
 .hide-empty-role-column .role-area-is-empty { display: none; }
@@ -177,14 +245,13 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 /* Unified inline color-row layout for highlight section (current line) */
 .setting-group-inline-colors { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; align-items: flex-start; margin-bottom: 1rem; }
 .setting-group-inline-colors .setting-item { margin: 0; min-width: 10rem; flex: 1 1 auto; display: flex; align-items: center; gap: 0.6rem; }
-.setting-group-inline-colors .setting-item label { flex: 0 0 auto; margin: 0; white-space: nowrap; }
-.setting-group-inline-colors .setting-item .input-with-button { margin-left: auto; flex: 0 0 auto; }
-.setting-group-inline-colors .setting-item input[type="text"] { width: 7rem; }
+.setting-group-inline-colors .setting-item .input-with-button { flex: 0 0 auto; margin-left: auto; }
+.setting-group-inline-colors .setting-item input[type="text"] { width: 3rem; min-width: 3rem; }
 /* Header flex for click highlight section */
 .setting-group-header-flex { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
 .setting-group-header-flex .setting-group-title { margin: 0; }
 .inline-checkbox { display: flex; align-items: center; gap: 0.5rem; }
-.inline-checkbox input[type="checkbox"] { width: 1.25rem; height: 1.25rem; cursor: pointer; }
+.inline-checkbox input[type="checkbox"] { margin: 0; }
 
 /* Dual-range slider for auto-scroll window */
 .dual-range {
@@ -441,7 +508,7 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
     background: rgba(255, 255, 255, 0.03);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.7rem;
     min-width: 0;
     width: 100%;
     box-sizing: border-box;
@@ -453,13 +520,32 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .settings-tile .setting-item,
 .settings-tile .setting-item-vertical,
 .settings-tile .setting-group {
-    margin-bottom: 0;
+    margin: 0.5rem 0rem;
 }
 .settings-tile .setting-group > *:last-child {
     margin-bottom: 0;
 }
 .settings-tile .setting-inline-row {
     margin-bottom: 0;
+}
+.settings-tile hr {
+    margin: 0.75rem 0;
+    width: 100%;
+    align-self: stretch;
+}
+.light-theme .settings-tile hr {
+    background-color: #ccc;
+}
+.role-settings-tiles .settings-tile,
+.checkerboard-settings-tiles .settings-tile,
+.highlight-settings-tiles .settings-tile {
+    gap: 0.6rem;
+}
+.role-settings-tiles #role-options-wrapper {
+    gap: 0.6rem;
+}
+.highlight-settings-tiles .setting-group-inline-colors {
+    width: 100%;
 }
 #auto-scroll-mode-card,
 #auto-scroll-lookahead-card {
@@ -525,10 +611,10 @@ hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 }
 .settings-tile .scroll-caption {
     text-align: left;
-    margin: 0;
+    margin: 0.5rem 0rem;
 }
 .settings-tile .setting-group-title {
-    margin: 0;
+    margin: 0.5rem 0rem;
 }
 .settings-tile .setting-group-header-flex {
     margin-bottom: 0rem;
@@ -604,9 +690,6 @@ body[data-auto-scroll-mode="line"] #scroll-speed-wrapper {
 .setting-inline-row .setting-item.mini label { margin: 0; white-space: nowrap; }
 .setting-inline-row .setting-item.mini .input-with-button { margin-left: auto; flex: 0 0 auto; }
 /* Inline pause color picker variant */
-.pause-inline-color { margin-bottom: 0.75rem; }
-.pause-inline-color .input-with-button { margin-left: auto; display: flex; align-items: center; gap: 0.4rem; }
-.pause-inline-color .input-with-button input[type="text"] { width: 70px; min-width:70px; padding: 0.35em 0.5em; background-color:#333; color:#eee; border:1px solid #555; border-radius:4px; }
 .copy-color-btn { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; }
 .copy-color-btn:hover { background-color: #5a5a5a; }
 .light-theme .copy-color-btn { background-color: #dcdcdc; color: #333; }
