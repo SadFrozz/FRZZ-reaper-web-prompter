@@ -42,7 +42,8 @@ local function find_reaper_section(lines)
   local in_section = false
   local section_lines = {}
   for _, line in ipairs(lines) do
-    if line:match('^%[reaper%]') then
+    local lower_line = line:lower()
+    if lower_line:match('^%[reaper%]') then
       in_section = true
     elseif line:match('^%[') then
       if in_section then break end
