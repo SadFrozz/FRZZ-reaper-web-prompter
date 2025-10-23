@@ -2016,9 +2016,8 @@ $(document).ready(function() {
             const idx = target && target.dataset ? parseInt(target.dataset.frzzIndex, 10) : NaN;
             if (!Number.isInteger(idx)) continue;
             const isVisible = entry.isIntersecting && entry.intersectionRatio > 0;
-            if (supportsInert && target && typeof target.inert === 'boolean') {
-                target.inert = !isVisible;
-            }
+            // Keep nodes searchable/focusable even when outside viewport; avoid toggling inert
+            // which breaks browser find-in-page for off-screen content.
             if (isVisible) {
                 if (!visibleIndices.has(idx)) {
                     visibleIndices.add(idx);
@@ -5260,10 +5259,16 @@ $(document).ready(function() {
             const activeAutoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
             let autoScrollPlan;
             let autoScrollPlanComputed = false;
+            let autoScrollPlanWasUndefined = false;
 
-            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled && activeAutoScrollMode === 'line') {
-                autoScrollPlan = computeAutoScrollPlan(newCurrentLineIndex, { currentTime });
+            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled) {
+                const computedPlan = computeAutoScrollPlan(newCurrentLineIndex, { currentTime });
                 autoScrollPlanComputed = true;
+                if (typeof computedPlan === 'undefined') {
+                    autoScrollPlanWasUndefined = true;
+                } else {
+                    autoScrollPlan = computedPlan;
+                }
             }
 
             if (indexChanged && currentLineIndex !== -1) {
@@ -5305,17 +5310,33 @@ $(document).ready(function() {
                 }
                 const previousIndex = currentLineIndex;
                 currentLineIndex = newCurrentLineIndex;
-                if (previousIndex !== -1) {
-                    paintLine(previousIndex, true);
-                }
-                if (currentLineIndex !== -1) {
-                    paintLine(currentLineIndex, true);
-                }
+                // Limit expensive painting to lines that are currently visible.
+                // Off-screen lines are left dirty and will be painted by the
+                // IntersectionObserver / paintVisibleRange pipeline when they
+                // enter the viewport. This prevents forced reflows in rAF.
+                try {
+                    if (previousIndex !== -1) {
+                        if (visibleIndices.has(previousIndex)) {
+                            paintLine(previousIndex, true);
+                        } else if (subtitlePaintStates && previousIndex < subtitlePaintStates.length) {
+                            // mark as dirty so it will be painted when visible
+                            subtitlePaintStates[previousIndex] = -1;
+                        }
+                    }
+                    if (currentLineIndex !== -1) {
+                        if (visibleIndices.has(currentLineIndex)) {
+                            paintLine(currentLineIndex, true);
+                        } else if (subtitlePaintStates && currentLineIndex < subtitlePaintStates.length) {
+                            // ensure it will be painted later by the visibility pipeline
+                            subtitlePaintStates[currentLineIndex] = -1;
+                        }
+                    }
+                } catch (err) { /* defensive: avoid breaking rAF loop */ }
                 if (autoScrollEnabled && currentLineIndex !== -1) {
                     if (autoScrollPlanComputed) {
                         if (autoScrollPlan) {
                             autoScrollToIndex(currentLineIndex, autoScrollPlan);
-                        } else if (typeof autoScrollPlan === 'undefined') {
+                        } else if (autoScrollPlanWasUndefined) {
                             autoScrollToIndex(currentLineIndex);
                         }
                     } else {
