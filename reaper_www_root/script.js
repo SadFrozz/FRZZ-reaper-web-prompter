@@ -1,4 +1,4 @@
-const SETTINGS_SCHEMA_VERSION = 4;
+const SETTINGS_SCHEMA_VERSION = 6;
 const DATA_MODEL_VERSION = 2;
 const DEFAULT_PROJECT_FPS = 24;
 const MAX_JUMP_PRE_ROLL_SECONDS = 10;
@@ -17,6 +17,7 @@ const TIMELINE_ACTIVE_COMPLETION_RATIO = 0.85;
 const TIMELINE_LOOKAHEAD_COMPLETION_RATIO = 0.65;
 const SUBTREADER_INERTIA_WINDOW_SECONDS = 0.7; // SubtReader UI.transition_sec window
 const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to prevent jitter
+const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
 
 function clampNumber(value, min, max) {
     const numeric = Number(value);
@@ -65,6 +66,20 @@ function sanitizeAutoScrollMode(value, fallback = 'page') {
         if (normalized === 'page') return 'page';
     }
     return typeof fallback === 'string' ? fallback : 'page';
+}
+
+function sanitizeProgressBarMode(value, fallback = 'subtitle') {
+    const fallbackNormalized = typeof fallback === 'string' && fallback.toLowerCase() === 'timecode' ? 'timecode' : 'subtitle';
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'timecode' || normalized === 'transport' || normalized === 'timcode') {
+            return 'timecode';
+        }
+        if (normalized === 'subtitle' || normalized === 'line' || normalized === 'replica') {
+            return 'subtitle';
+        }
+    }
+    return fallbackNormalized;
 }
 
 function sanitizeAutoScrollPercent(value, fallback, min = 0, max = 100) {
@@ -278,10 +293,12 @@ if (typeof window !== 'undefined') {
 
 // --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
 const defaultSettings = {
-    settingsSchemaVersion: 4,
+    settingsSchemaVersion: 6,
     fontSize: 2,
     lineHeight: 1.4,
     navigationPanelPosition: 'bottom',
+    navigationCompactMode: false,
+    transportTimecodeVisible: true,
     frameRate: 24,
     autoScroll: true,
     scrollSpeed: 60,
@@ -315,6 +332,11 @@ const defaultSettings = {
     checkerboardFont1: 'rgba(238, 238, 238, 1)',
     checkerboardBg2: 'rgba(42, 42, 42, 1)',
     checkerboardFont2: 'rgba(238, 238, 238, 1)',
+    highlightCurrentEnabled: true,
+    highlightPreviousEnabled: true,
+    highlightPauseEnabled: true,
+    progressBarEnabled: true,
+    progressBarMode: 'subtitle',
     highlightCurrentBg: 'rgba(80, 80, 0, 0.4)',
     highlightCurrentRoleEnabled: true,
     highlightCurrentRoleBg: 'rgba(80, 80, 0, 0.4)',
@@ -337,6 +359,9 @@ let settings = {};
 let currentProjectName = '';
 let animationFrameId = null;
 let wwr_is_enabled = false;
+let navigationPanelCollapsed = false;
+const NAV_PANEL_ANIMATION_MS = 280; // Keep in sync with CSS transition timings
+let navigationPanelAnimationTimer = null;
 // Removed initialLoad flag: applySettings now, by default, uses in-memory `settings` object (source of truth)
 const ORIGINAL_DOCUMENT_TITLE = document.title;
 // High-contrast actor color palette (distinct hues for quick recognition)
@@ -534,12 +559,22 @@ $(document).ready(function() {
     let sharedProgressHost = null;
     let sharedProgressIndex = -1;
     let sharedProgressValue = 0;
+    let transportProgressValue = 0;
+    let activeTimecodeProgressIndex = -1;
+    let timecodeProgressValue = 0;
     const statusIndicator = $('#status-indicator');
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
+    const navigationCompactToggle = $('#navigation-compact-toggle');
+    const navigationFloatingControls = $('#navigation-floating-controls');
+    const navigationFloatingExpandButton = $('#navigation-floating-expand');
+    const navigationFloatingSettingsButton = $('#navigation-floating-settings');
     const transportStatus = $('#transport-status');
     const transportStateText = $('#transport-state-text');
     const transportTimecode = $('#transport-timecode');
+    const transportProgressContainer = $('#transport-progress-container');
+    const transportProgressBar = $('#transport-progress-bar');
+    const transportProgressBarEl = transportProgressBar.length ? transportProgressBar[0] : null;
     const saveSettingsButton = $('#save-settings-button');
     const resetSettingsButton = $('#reset-settings-button');
     const titleModeSelect = $('#title-mode');
@@ -621,6 +656,116 @@ $(document).ready(function() {
     if (typeof window !== 'undefined') {
         $(window).on('resize', scheduleSettingsTileReflow);
     }
+
+    function refreshNavigationCollapseToggleUI(collapsed) {
+        if (!navigationCompactToggle || !navigationCompactToggle.length) {
+            return;
+        }
+        const isCollapsed = !!collapsed;
+        navigationCompactToggle.attr('aria-expanded', isCollapsed ? 'false' : 'true');
+        navigationCompactToggle.attr('title', isCollapsed ? 'Развернуть панель' : 'Свернуть панель');
+        navigationCompactToggle.attr('aria-label', isCollapsed ? 'Развернуть панель' : 'Свернуть панель');
+        navigationCompactToggle.toggleClass('is-collapsed', isCollapsed);
+    }
+
+    function updateNavigationCollapsedUI() {
+        const collapsed = navigationPanelCollapsed;
+        const navAnimating = navigationPanel.length && navigationPanel.hasClass('nav-panel-animating');
+        if (navigationPanel.length) {
+            if (!navAnimating) {
+                navigationPanel.toggleClass('is-collapsed', collapsed);
+            }
+            if (collapsed) {
+                navigationPanel.attr('aria-hidden', 'true');
+            } else {
+                navigationPanel.removeAttr('aria-hidden');
+            }
+            if (supportsInert) {
+                if (collapsed) {
+                    navigationPanel.attr('inert', '');
+                } else {
+                    navigationPanel.removeAttr('inert');
+                }
+            }
+        }
+        $('body').toggleClass('nav-panel-collapsed', collapsed);
+        refreshNavigationCollapseToggleUI(collapsed);
+        if (navigationFloatingControls.length) {
+            navigationFloatingControls.toggleClass('is-visible', collapsed);
+            navigationFloatingControls.attr('aria-hidden', collapsed ? 'false' : 'true');
+            const floatingButtons = navigationFloatingControls.find('button');
+            floatingButtons.attr('tabindex', collapsed ? 0 : -1);
+            if (supportsInert) {
+                if (collapsed) {
+                    navigationFloatingControls.removeAttr('inert');
+                } else {
+                    navigationFloatingControls.attr('inert', '');
+                }
+            }
+        }
+        if (navigationFloatingExpandButton.length) {
+            navigationFloatingExpandButton.attr('aria-expanded', collapsed ? 'false' : 'true');
+            navigationFloatingExpandButton.attr('title', collapsed ? 'Развернуть панель' : 'Свернуть панель');
+            navigationFloatingExpandButton.attr('aria-label', collapsed ? 'Развернуть панель' : 'Свернуть панель');
+        }
+    }
+
+    function setNavigationPanelCollapsed(collapsed) {
+        const next = !!collapsed;
+        if (!navigationPanel.length) {
+            navigationPanelCollapsed = next;
+            updateNavigationCollapsedUI();
+            return;
+        }
+
+        if (navigationPanelAnimationTimer !== null) {
+            clearTimeout(navigationPanelAnimationTimer);
+            navigationPanelAnimationTimer = null;
+            navigationPanel.removeClass('nav-panel-animating nav-panel-hidden');
+            if (navigationPanelCollapsed) {
+                navigationPanel.addClass('is-collapsed');
+            } else {
+                navigationPanel.removeClass('is-collapsed');
+            }
+        }
+
+        if (navigationPanelCollapsed === next) {
+            updateNavigationCollapsedUI();
+            return;
+        }
+
+        navigationPanelCollapsed = next;
+
+        const panelEl = navigationPanel[0];
+        const finishAnimation = () => {
+            navigationPanel.removeClass('nav-panel-animating nav-panel-hidden');
+            navigationPanelAnimationTimer = null;
+            updateNavigationCollapsedUI();
+        };
+
+        navigationPanel.addClass('nav-panel-animating');
+        if (next) {
+            navigationPanel.removeClass('is-collapsed');
+            panelEl.offsetHeight; // force reflow
+            navigationPanel.addClass('nav-panel-hidden');
+            navigationPanelAnimationTimer = setTimeout(() => {
+                navigationPanel.addClass('is-collapsed');
+                finishAnimation();
+            }, NAV_PANEL_ANIMATION_MS);
+        } else {
+            navigationPanel.removeClass('is-collapsed');
+            navigationPanel.addClass('nav-panel-hidden');
+            panelEl.offsetHeight; // force reflow
+            navigationPanel.removeClass('nav-panel-hidden');
+            navigationPanelAnimationTimer = setTimeout(() => {
+                finishAnimation();
+            }, NAV_PANEL_ANIMATION_MS);
+        }
+        updateNavigationCollapsedUI();
+        scheduleTransportWrapEvaluation();
+    }
+
+    updateNavigationCollapsedUI();
     const processRolesCheckbox = $('#process-roles');
     const roleOptionsWrapper = $('#role-options-wrapper');
     const setRoleOptionsVisibility = (enabled) => {
@@ -638,6 +783,19 @@ $(document).ready(function() {
         if (!checkerboardOptionsWrapper.length) return;
         checkerboardOptionsWrapper.toggleClass('is-hidden', !enabled);
     };
+    const highlightCurrentTile = $('#highlight-current-tile');
+    const highlightPreviousTile = $('#highlight-previous-tile');
+    const highlightProgressTile = $('#highlight-progress-tile');
+    const highlightCurrentOptions = $('#highlight-current-options');
+    const highlightPreviousOptions = $('#highlight-previous-options');
+    const highlightProgressOptions = $('#highlight-progress-options');
+    const highlightCurrentEnabledCheckbox = $('#highlight-current-enabled');
+    const highlightPreviousEnabledCheckbox = $('#highlight-previous-enabled');
+    const highlightPauseEnabledCheckbox = $('#highlight-pause-enabled');
+    const progressBarEnabledCheckbox = $('#progress-bar-enabled');
+    const progressBarModeSelect = $('#progress-bar-mode');
+    const progressBarModeWrapper = $('#progress-bar-mode-wrapper');
+    const progressBarColorInput = $('#progress-bar-color');
     const highlightCurrentRoleEnabledCheckbox = $('#highlight-current-role-enabled');
     const highlightClickEnabledCheckbox = $('#highlight-click-enabled');
     const highlightClickOptionsWrapper = $('#highlight-click-options-wrapper');
@@ -652,9 +810,11 @@ $(document).ready(function() {
     let subtitleData = [];
     let subtitleElements = [];
     let subtitleContentElements = [];
+    let subtitleTimeElements = [];
+    let subtitleTimeLabelElements = [];
+    let subtitleTimeProgressElements = [];
     let subtitlePaintStates = [];
     let subtitleStyleMetadata = [];
-    const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
     let paintGeneration = 0;
     let paintScheduled = false;
     let lastVisibleStart = 0;
@@ -662,11 +822,102 @@ $(document).ready(function() {
     const PAINT_BUFFER = 50;
     let subtitleObserver = null;
     const visibleIndices = new Set();
+
+    function clearPreviousLineHighlight() {
+        if (lastPreviousLineIndex === -1) {
+            return;
+        }
+        removePreviousLineHighlightAt(lastPreviousLineIndex);
+    }
+
+    function applyPreviousLineHighlight(index) {
+        if (typeof index !== 'number' || index < 0 || index >= subtitleElements.length) {
+            clearPreviousLineHighlight();
+            return;
+        }
+        if (lastPreviousLineIndex !== -1 && lastPreviousLineIndex !== index) {
+            removePreviousLineHighlightAt(lastPreviousLineIndex);
+        }
+        const target = subtitleElements[index];
+        if (target && target.classList) {
+            target.classList.add('previous-line');
+            lastPreviousLineIndex = index;
+        } else {
+            lastPreviousLineIndex = -1;
+        }
+    }
+    function removePreviousLineHighlightAt(index) {
+        if (typeof index !== 'number' || index < 0 || index >= subtitleElements.length) {
+            return;
+        }
+        const element = subtitleElements[index];
+        if (element && element.classList) {
+            element.classList.remove('previous-line');
+        }
+        if (lastPreviousLineIndex === index) {
+            lastPreviousLineIndex = -1;
+        }
+    }
+
+    function updatePreviousLineHighlightState({
+        newCurrentLineIndex,
+        previousIndex,
+        inPause,
+        highlightPreviousEnabled,
+        highlightPauseEnabled,
+        indexChanged
+    }) {
+        if (!highlightPreviousEnabled) {
+            clearPreviousLineHighlight();
+            return;
+        }
+
+        if (highlightPauseEnabled) {
+            if (inPause && newCurrentLineIndex !== -1) {
+                applyPreviousLineHighlight(newCurrentLineIndex);
+            } else {
+                if (lastPreviousLineIndex !== -1) {
+                    removePreviousLineHighlightAt(lastPreviousLineIndex);
+                }
+                const precedingIndex = newCurrentLineIndex - 1;
+                if (precedingIndex >= 0) {
+                    removePreviousLineHighlightAt(precedingIndex);
+                }
+            }
+            if (indexChanged && previousIndex !== -1 && previousIndex !== newCurrentLineIndex) {
+                removePreviousLineHighlightAt(previousIndex);
+            }
+            return;
+        }
+
+        if (newCurrentLineIndex === -1) {
+            if (indexChanged && previousIndex !== -1) {
+                applyPreviousLineHighlight(previousIndex);
+            } else {
+                clearPreviousLineHighlight();
+            }
+            return;
+        }
+
+        if (inPause) {
+            applyPreviousLineHighlight(newCurrentLineIndex);
+            return;
+        }
+
+        const targetIndex = newCurrentLineIndex - 1;
+        if (targetIndex >= 0) {
+            applyPreviousLineHighlight(targetIndex);
+        } else {
+            clearPreviousLineHighlight();
+        }
+    }
+
     let visibleRangeStart = 0;
     let visibleRangeEnd = -1;
     // rAF id for render loop
     // Move transportWrapRaf early to avoid TDZ error when scheduleTransportWrapEvaluation runs during applySettings
     let transportWrapRaf = null;
+    let lastPreviousLineIndex = -1;
     // When roles.json is successfully loaded, prefer actor colors over per-line color entirely
     let rolesLoaded = false;
     let rolesSaveInFlight = false;
@@ -739,12 +990,19 @@ $(document).ready(function() {
         for (let i = 0; i < subtitleData.length; i++) {
             const line = subtitleData[i];
             if (!line) continue;
-            const container = subtitleElements[i];
-            if (!container) continue;
-            const timeNode = container.querySelector('.subtitle-time');
-            if (!timeNode) continue;
             const timeString = formatTimecode(line.start_time, frameRate);
-            timeNode.textContent = timeString;
+            const labelNode = subtitleTimeLabelElements[i];
+            if (labelNode) {
+                labelNode.textContent = timeString;
+            } else {
+                const container = subtitleElements[i];
+                if (container) {
+                    const timeNode = container.querySelector('.subtitle-time');
+                    if (timeNode) {
+                        timeNode.textContent = timeString;
+                    }
+                }
+            }
             line.__cachedTimecode = timeString;
             line.__cachedFrameRate = frameRate;
             line.__cachedTimecodeFormat = effectiveFormat;
@@ -1203,6 +1461,27 @@ $(document).ready(function() {
         const incoming = rawSettings && typeof rawSettings === 'object' ? { ...rawSettings } : {};
         const legacySchema = Number(incoming.settingsSchemaVersion || incoming.settings_schema_version || 1);
         let changed = false;
+        const coerceFlag = (value, fallback) => {
+            if (value === undefined || value === null) {
+                return !!fallback;
+            }
+            if (typeof value === 'boolean') {
+                return value;
+            }
+            if (typeof value === 'number') {
+                return value !== 0;
+            }
+            if (typeof value === 'string') {
+                const normalized = value.trim().toLowerCase();
+                if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+                    return true;
+                }
+                if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+                    return false;
+                }
+            }
+            return !!fallback;
+        };
         if ((!incoming.actorRoleMappingText || !incoming.actorRoleMappingText.trim()) && incoming.actorRoleMapping) {
             const legacyText = legacyActorMappingToText(incoming.actorRoleMapping);
             if (legacyText) {
@@ -1278,6 +1557,56 @@ $(document).ready(function() {
             }
         }
         const base = { ...defaultSettings, ...incoming };
+        const navCompact = coerceFlag(base.navigationCompactMode, defaultSettings.navigationCompactMode);
+        if (navCompact !== base.navigationCompactMode) {
+            base.navigationCompactMode = navCompact;
+            changed = true;
+        } else {
+            base.navigationCompactMode = navCompact;
+        }
+        const transportVisible = coerceFlag(base.transportTimecodeVisible, defaultSettings.transportTimecodeVisible);
+        if (transportVisible !== base.transportTimecodeVisible) {
+            base.transportTimecodeVisible = transportVisible;
+            changed = true;
+        } else {
+            base.transportTimecodeVisible = transportVisible;
+        }
+        const highlightCurrent = coerceFlag(base.highlightCurrentEnabled, defaultSettings.highlightCurrentEnabled);
+        if (highlightCurrent !== base.highlightCurrentEnabled) {
+            base.highlightCurrentEnabled = highlightCurrent;
+            changed = true;
+        } else {
+            base.highlightCurrentEnabled = highlightCurrent;
+        }
+        const highlightPrevious = coerceFlag(base.highlightPreviousEnabled, defaultSettings.highlightPreviousEnabled);
+        if (highlightPrevious !== base.highlightPreviousEnabled) {
+            base.highlightPreviousEnabled = highlightPrevious;
+            changed = true;
+        } else {
+            base.highlightPreviousEnabled = highlightPrevious;
+        }
+        const highlightPause = coerceFlag(base.highlightPauseEnabled, defaultSettings.highlightPauseEnabled);
+        if (highlightPause !== base.highlightPauseEnabled) {
+            base.highlightPauseEnabled = highlightPause;
+            changed = true;
+        } else {
+            base.highlightPauseEnabled = highlightPause;
+        }
+        const progressEnabled = coerceFlag(base.progressBarEnabled, defaultSettings.progressBarEnabled);
+        if (progressEnabled !== base.progressBarEnabled) {
+            base.progressBarEnabled = progressEnabled;
+            changed = true;
+        } else {
+            base.progressBarEnabled = progressEnabled;
+        }
+        const sanitizedProgressMode = sanitizeProgressBarMode(
+            base.progressBarMode,
+            defaultSettings.progressBarMode
+        );
+        if (sanitizedProgressMode !== base.progressBarMode) {
+            base.progressBarMode = sanitizedProgressMode;
+            changed = true;
+        }
         if (!base.dataModelVersion || base.dataModelVersion < DATA_MODEL_VERSION) {
             changed = true;
             base.dataModelVersion = DATA_MODEL_VERSION;
@@ -1902,6 +2231,71 @@ $(document).ready(function() {
             sharedProgressBar.style.transform = 'scaleX(0)';
         }
         sharedProgressValue = 0;
+    }
+
+    function resetTransportProgress() {
+        transportProgressValue = 0;
+        if (transportProgressBarEl) {
+            transportProgressBarEl.style.transform = 'scaleX(0)';
+        }
+        if (transportProgressContainer && transportProgressContainer.length) {
+            transportProgressContainer.removeClass('is-active');
+        }
+    }
+
+    function clearTimecodeProgress() {
+        if (activeTimecodeProgressIndex === -1) {
+            timecodeProgressValue = 0;
+            return;
+        }
+        const wrapper = subtitleTimeElements[activeTimecodeProgressIndex] || null;
+        const progressEl = subtitleTimeProgressElements[activeTimecodeProgressIndex] || null;
+        if (wrapper && wrapper.classList) {
+            wrapper.classList.remove('has-time-progress');
+        }
+        if (progressEl) {
+            progressEl.style.transform = 'scaleX(0)';
+        }
+        activeTimecodeProgressIndex = -1;
+        timecodeProgressValue = 0;
+    }
+
+    function setTimecodeProgress(index, fraction) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleTimeElements.length) {
+            clearTimecodeProgress();
+            return;
+        }
+        const wrapper = subtitleTimeElements[index];
+        const progressEl = subtitleTimeProgressElements[index];
+        if (!wrapper || !progressEl) {
+            clearTimecodeProgress();
+            return;
+        }
+        if (activeTimecodeProgressIndex !== index) {
+            clearTimecodeProgress();
+            activeTimecodeProgressIndex = index;
+            timecodeProgressValue = -1;
+            if (wrapper.classList) {
+                wrapper.classList.add('has-time-progress');
+            }
+        }
+        const clamped = Math.max(0, Math.min(1, Number(fraction) || 0));
+        if (Math.abs(clamped - timecodeProgressValue) < 0.001) {
+            return;
+        }
+        timecodeProgressValue = clamped;
+        progressEl.style.transform = `scaleX(${clamped})`;
+    }
+
+    function setTransportProgress(fraction) {
+        if (!transportProgressBarEl) return;
+        const clamped = Math.max(0, Math.min(1, Number(fraction) || 0));
+        if (Math.abs(clamped - transportProgressValue) < 0.001) return;
+        transportProgressValue = clamped;
+        transportProgressBarEl.style.transform = `scaleX(${clamped})`;
+        if (transportProgressContainer && transportProgressContainer.length) {
+            transportProgressContainer.toggleClass('is-active', clamped > 0);
+        }
     }
 
     function attachSharedProgressToIndex(index) {
@@ -2573,6 +2967,101 @@ $(document).ready(function() {
         scheduleSettingsTileReflow();
     }
 
+    function normalizeHighlightFeatureValues(source) {
+        const raw = source || {};
+        return {
+            highlightCurrentEnabled: raw.highlightCurrentEnabled !== false,
+            highlightPreviousEnabled: raw.highlightPreviousEnabled !== false,
+            highlightPauseEnabled: raw.highlightPauseEnabled !== false,
+            progressBarEnabled: raw.progressBarEnabled !== false,
+            progressBarMode: sanitizeProgressBarMode(raw.progressBarMode, defaultSettings.progressBarMode)
+        };
+    }
+
+    function applyHighlightUIStateFromValues(values, options = {}) {
+        const normalized = normalizeHighlightFeatureValues(values);
+        const syncControls = options.syncControls !== false;
+        if (syncControls) {
+            if (highlightCurrentEnabledCheckbox.length) {
+                highlightCurrentEnabledCheckbox.prop('checked', normalized.highlightCurrentEnabled);
+            }
+            if (highlightPreviousEnabledCheckbox.length) {
+                highlightPreviousEnabledCheckbox.prop('checked', normalized.highlightPreviousEnabled);
+            }
+            if (highlightPauseEnabledCheckbox.length) {
+                highlightPauseEnabledCheckbox.prop('checked', normalized.highlightPauseEnabled);
+            }
+            if (progressBarEnabledCheckbox.length) {
+                progressBarEnabledCheckbox.prop('checked', normalized.progressBarEnabled);
+            }
+            if (progressBarModeSelect.length) {
+                progressBarModeSelect.val(normalized.progressBarMode);
+            }
+        }
+
+        if (highlightCurrentOptions && highlightCurrentOptions.length) {
+            highlightCurrentOptions.toggle(normalized.highlightCurrentEnabled);
+        }
+        if (highlightPreviousOptions && highlightPreviousOptions.length) {
+            highlightPreviousOptions.toggle(normalized.highlightPreviousEnabled);
+        }
+        if (highlightPreviousTile && highlightPreviousTile.length) {
+            highlightPreviousTile.removeClass('is-disabled');
+            highlightPreviousTile.find('input, select, button, textarea').each(function() {
+                const $el = $(this);
+                if ($el.is('#highlight-previous-enabled')) {
+                    return;
+                }
+                const shouldEnable = normalized.highlightPreviousEnabled;
+                $el.prop('disabled', !shouldEnable);
+                if (typeof $el.data === 'function' && $el.data('spectrum')) {
+                    $el.spectrum(shouldEnable ? 'enable' : 'disable');
+                }
+            });
+        }
+        if (highlightProgressOptions && highlightProgressOptions.length) {
+            highlightProgressOptions.toggle(normalized.progressBarEnabled);
+        }
+        if (progressBarModeWrapper && progressBarModeWrapper.length) {
+            progressBarModeWrapper.toggle(normalized.progressBarEnabled);
+        }
+        if (progressBarModeSelect && progressBarModeSelect.length) {
+            progressBarModeSelect.prop('disabled', !normalized.progressBarEnabled);
+        }
+        if (progressBarColorInput && progressBarColorInput.length) {
+            progressBarColorInput.prop('disabled', !normalized.progressBarEnabled);
+            if (typeof progressBarColorInput.data === 'function' && progressBarColorInput.data('spectrum')) {
+                progressBarColorInput.spectrum(normalized.progressBarEnabled ? 'enable' : 'disable');
+            }
+            const copyButton = progressBarColorInput.closest('.input-with-button').find('.copy-color-btn');
+            if (copyButton && copyButton.length) {
+                copyButton.prop('disabled', !normalized.progressBarEnabled);
+            }
+        }
+        if ((!normalized.highlightPreviousEnabled) || (normalized.highlightPauseEnabled && normalized.highlightCurrentEnabled)) {
+            if (subtitleElements && subtitleElements.length) {
+                subtitleElements.forEach(el => {
+                    if (el && el.classList) {
+                        el.classList.remove('previous-line');
+                    }
+                });
+            }
+            clearPreviousLineHighlight();
+        }
+        scheduleSettingsTileReflow();
+        return normalized;
+    }
+
+    function getHighlightFeatureValuesFromUI() {
+        return {
+            highlightCurrentEnabled: !highlightCurrentEnabledCheckbox.length || highlightCurrentEnabledCheckbox.is(':checked'),
+            highlightPreviousEnabled: !highlightPreviousEnabledCheckbox.length || highlightPreviousEnabledCheckbox.is(':checked'),
+            highlightPauseEnabled: !highlightPauseEnabledCheckbox.length || highlightPauseEnabledCheckbox.is(':checked'),
+            progressBarEnabled: !progressBarEnabledCheckbox.length || progressBarEnabledCheckbox.is(':checked'),
+            progressBarMode: progressBarModeSelect.length ? progressBarModeSelect.val() : defaultSettings.progressBarMode
+        };
+    }
+
     function initializeColorPickers() {
         const colorInputs = $('input[type="text"]').filter(function() {
             const id = $(this).attr('id');
@@ -2881,6 +3370,41 @@ $(document).ready(function() {
             updateAutoScrollControlsState(!!tempSettings.autoScroll, sanitizedAutoScrollMode);
             resetAutoScrollState();
 
+            const navigationCompactMode = tempSettings.navigationCompactMode === true;
+            tempSettings.navigationCompactMode = navigationCompactMode;
+            settings.navigationCompactMode = navigationCompactMode;
+
+            const transportTimecodeVisible = tempSettings.transportTimecodeVisible !== false;
+            tempSettings.transportTimecodeVisible = transportTimecodeVisible;
+            settings.transportTimecodeVisible = transportTimecodeVisible;
+
+            const highlightCurrentEnabled = tempSettings.highlightCurrentEnabled !== false;
+            tempSettings.highlightCurrentEnabled = highlightCurrentEnabled;
+            settings.highlightCurrentEnabled = highlightCurrentEnabled;
+
+            const highlightPreviousEnabled = tempSettings.highlightPreviousEnabled !== false;
+            tempSettings.highlightPreviousEnabled = highlightPreviousEnabled;
+            settings.highlightPreviousEnabled = highlightPreviousEnabled;
+
+            const highlightPauseEnabled = tempSettings.highlightPauseEnabled !== false;
+            tempSettings.highlightPauseEnabled = highlightPauseEnabled;
+            settings.highlightPauseEnabled = highlightPauseEnabled;
+
+            const progressBarEnabled = tempSettings.progressBarEnabled !== false;
+            tempSettings.progressBarEnabled = progressBarEnabled;
+            settings.progressBarEnabled = progressBarEnabled;
+
+            const sanitizedProgressBarMode = sanitizeProgressBarMode(
+                tempSettings.progressBarMode,
+                settings.progressBarMode || defaultSettings.progressBarMode
+            );
+            tempSettings.progressBarMode = sanitizedProgressBarMode;
+            settings.progressBarMode = sanitizedProgressBarMode;
+
+            const highlightFeatureState = applyHighlightUIStateFromValues(tempSettings);
+            const useSubtitleProgress = highlightFeatureState.progressBarEnabled && highlightFeatureState.progressBarMode === 'subtitle';
+            const useTimecodeProgress = highlightFeatureState.progressBarEnabled && highlightFeatureState.progressBarMode === 'timecode';
+
             // Preserve last non-empty keywords while user toggles other options (live preview phase)
             if (!tempSettings.autoFindKeywords || !tempSettings.autoFindKeywords.trim()) {
                 tempSettings.autoFindKeywords = settings.autoFindKeywords || defaultSettings.autoFindKeywords;
@@ -2901,6 +3425,9 @@ $(document).ready(function() {
             // Apply persistent settings (do not mutate global settings here, only visual application)
 
             $('body').toggleClass('light-theme', tempSettings.theme === 'light');
+            $('body').toggleClass('transport-timecode-hidden', !transportTimecodeVisible);
+            $('body').toggleClass('progress-disabled', !highlightFeatureState.progressBarEnabled);
+            $('body').toggleClass('progress-mode-timecode', useTimecodeProgress);
             updateAutoScrollWindowTrackGradient(
                 tempSettings.autoScrollWindowTopPercent ?? sanitizedWindowTop,
                 tempSettings.autoScrollWindowBottomPercent ?? sanitizedWindowBottom
@@ -2908,9 +3435,36 @@ $(document).ready(function() {
             // Expose role display style for CSS-based adjustments
             document.body.setAttribute('data-role-style', tempSettings.roleDisplayStyle || '');
             navigationPanel.toggleClass('top-panel', tempSettings.navigationPanelPosition === 'top');
+            navigationPanel.toggleClass('compact-mode', navigationCompactMode);
+            updateNavigationCollapsedUI();
             $('body').toggleClass('columns-swapped', tempSettings.swapColumns);
             $('body').toggleClass('hide-empty-role-column', tempSettings.autoHideEmptyColumn);
             textDisplay.css({'font-family': tempSettings.fontFamily});
+
+            if (!useSubtitleProgress) {
+                detachSharedProgress();
+            }
+            resetTransportProgress();
+            clearTimecodeProgress();
+            if (subtitleElements && subtitleElements.length && (!highlightFeatureState.highlightCurrentEnabled || !highlightFeatureState.highlightPauseEnabled || !highlightFeatureState.highlightPreviousEnabled)) {
+                subtitleElements.forEach(el => {
+                    if (!el) {
+                        return;
+                    }
+                    if (!highlightFeatureState.highlightCurrentEnabled) {
+                        el.classList.remove('current-line');
+                    }
+                    if (!highlightFeatureState.highlightPauseEnabled) {
+                        el.classList.remove('pause-highlight');
+                    }
+                    if (!highlightFeatureState.highlightPreviousEnabled) {
+                        el.classList.remove('previous-line');
+                    }
+                });
+            }
+            if (!highlightFeatureState.highlightPreviousEnabled) {
+                lastPreviousLineIndex = -1;
+            }
 
             // Apply UI scale: baseline 100 => 100% root. Additional 0.75 scaling will be applied via CSS on main container.
             let rawScale = tempSettings.uiScale || 100;
@@ -2959,14 +3513,21 @@ $(document).ready(function() {
             }
             styleText += generateHighlightRules('current-line', tempSettings.highlightCurrentBg, tempSettings.highlightCurrentRoleEnabled, tempSettings.highlightCurrentRoleBg);
             styleText += generateHighlightRules('pause-highlight', tempSettings.highlightPauseBg, tempSettings.highlightCurrentRoleEnabled, tempSettings.highlightCurrentRoleBg);
+            styleText += generateHighlightRules('previous-line', tempSettings.highlightPauseBg, false, null);
             styleText += generateHighlightRules('click-highlight', tempSettings.highlightClickBg, tempSettings.highlightCurrentRoleEnabled, tempSettings.highlightCurrentRoleBg);
-            styleText += `.subtitle-progress-bar { background-color: ${tempSettings.progressBarColor}; }`;
+            styleText += `.subtitle-progress-bar, .subtitle-time-progress { background-color: ${tempSettings.progressBarColor}; }`;
             
             settingsStyle.text(styleText);
+            if (transportProgressBarEl) {
+                transportProgressBarEl.style.backgroundColor = tempSettings.progressBarColor || defaultSettings.progressBarColor;
+            }
             // After applying font/UI scale, re-evaluate navigation panel wrapping
             scheduleTransportWrapEvaluation();
             // Ensure visual title reflects authoritative settings + currentProjectName
             renderTitle();
+            if (currentLineIndex !== -1) {
+                updateTeleprompter(lastPlaybackTimeSeconds);
+            }
             invalidateAllLinePaint({ schedule: true });
             console.debug('[Prompter][applySettings] done');
             updateJumpControlsState(tempSettings.jumpOnClickEnabled);
@@ -3049,6 +3610,7 @@ $(document).ready(function() {
     setCheckerboardOptionsVisibility(s.checkerboardEnabled);
         highlightClickOptionsWrapper.toggle(s.highlightClickEnabled);
         highlightRoleColorWrapper.toggle(s.highlightCurrentRoleEnabled);
+        applyHighlightUIStateFromValues(s, { syncControls: false });
         if (jumpOnClickCheckbox.length) {
             jumpOnClickCheckbox.prop('checked', !!s.jumpOnClickEnabled);
         }
@@ -3255,6 +3817,16 @@ $(document).ready(function() {
             if (isNaN(settingsToSave.highlightClickDuration) || settingsToSave.highlightClickDuration <= 0 || settingsToSave.highlightClickDuration > 60000) {
                 settingsToSave.highlightClickDuration = defaultSettings.highlightClickDuration;
             }
+            settingsToSave.progressBarMode = sanitizeProgressBarMode(
+                settingsToSave.progressBarMode,
+                settings.progressBarMode || defaultSettings.progressBarMode
+            );
+            settingsToSave.highlightCurrentEnabled = settingsToSave.highlightCurrentEnabled !== false;
+            settingsToSave.highlightPreviousEnabled = settingsToSave.highlightPreviousEnabled !== false;
+            settingsToSave.highlightPauseEnabled = settingsToSave.highlightPauseEnabled !== false;
+            settingsToSave.progressBarEnabled = settingsToSave.progressBarEnabled !== false;
+            settingsToSave.navigationCompactMode = !!settingsToSave.navigationCompactMode;
+            settingsToSave.transportTimecodeVisible = settingsToSave.transportTimecodeVisible !== false;
 
             // Guard: do not allow empty autoFindKeywords to wipe previous value
             if (!settingsToSave.autoFindKeywords || !settingsToSave.autoFindKeywords.trim()) {
@@ -4408,14 +4980,22 @@ $(document).ready(function() {
             else { textDisplay.empty(); }
             detachSharedProgress();
             sharedProgressBar.style.transform = 'scaleX(0)';
+            clearTimecodeProgress();
             disconnectVisibilityObserver();
             resetVisibilityTracking();
+            lastPreviousLineIndex = -1;
             const total = subtitleData.length;
             subtitleElements = new Array(total);
             subtitleContentElements = new Array(total);
+            subtitleTimeElements = new Array(total);
+            subtitleTimeLabelElements = new Array(total);
+            subtitleTimeProgressElements = new Array(total);
             subtitlePaintStates = new Array(total);
             subtitleStyleMetadata = new Array(total);
             if (total === 0) {
+                subtitleTimeElements = [];
+                subtitleTimeLabelElements = [];
+                subtitleTimeProgressElements = [];
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 finalizeDataModelUpdate();
                 return;
@@ -4556,7 +5136,18 @@ $(document).ready(function() {
                 }
                 const timeElement = document.createElement('span');
                 timeElement.className = 'subtitle-time';
-                timeElement.textContent = timeString;
+                const timeLabelElement = document.createElement('span');
+                timeLabelElement.className = 'subtitle-time-label';
+                timeLabelElement.textContent = timeString;
+                const timeProgressElement = document.createElement('span');
+                timeProgressElement.className = 'subtitle-time-progress';
+                timeProgressElement.setAttribute('aria-hidden', 'true');
+                timeProgressElement.style.transform = 'scaleX(0)';
+                timeElement.appendChild(timeLabelElement);
+                timeElement.appendChild(timeProgressElement);
+                subtitleTimeElements[index] = timeElement;
+                subtitleTimeLabelElements[index] = timeLabelElement;
+                subtitleTimeProgressElements[index] = timeProgressElement;
 
                 let checkerboardClass = '';
                 if (checkerboardEnabled) {
@@ -5251,10 +5842,20 @@ $(document).ready(function() {
             if (Number.isFinite(currentTime)) {
                 lastPlaybackTimeSeconds = currentTime;
             }
+            const highlightCurrentEnabled = settings.highlightCurrentEnabled !== false;
+            const highlightPreviousEnabled = settings.highlightPreviousEnabled !== false;
+            const highlightPauseEnabled = settings.highlightPauseEnabled !== false;
+            const progressEnabled = settings.progressBarEnabled !== false;
+            const progressMode = progressEnabled
+                ? sanitizeProgressBarMode(settings.progressBarMode, defaultSettings.progressBarMode)
+                : defaultSettings.progressBarMode;
+            const useSubtitleProgress = progressEnabled && progressMode === 'subtitle';
+            const useTimecodeProgress = progressEnabled && progressMode === 'timecode';
             const located = locateSubtitleIndexAtTime(currentTime);
             const newCurrentLineIndex = located.index;
             const inPause = located.inPause;
-            const indexChanged = newCurrentLineIndex !== currentLineIndex;
+            const oldCurrentIndex = currentLineIndex;
+            const indexChanged = newCurrentLineIndex !== oldCurrentIndex;
             const autoScrollEnabled = !!settings.autoScroll;
             const activeAutoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
             let autoScrollPlan;
@@ -5271,44 +5872,57 @@ $(document).ready(function() {
                 }
             }
 
-            if (indexChanged && currentLineIndex !== -1) {
-                const previousElement = subtitleElements[currentLineIndex];
+            if (indexChanged && oldCurrentIndex !== -1) {
+                const previousElement = subtitleElements[oldCurrentIndex];
                 if (previousElement) {
                     previousElement.classList.remove('current-line');
                     previousElement.classList.remove('pause-highlight');
+                    previousElement.classList.remove('previous-line');
                 }
             }
 
             if (newCurrentLineIndex !== -1) {
                 const newElement = subtitleElements[newCurrentLineIndex];
                 if (newElement) {
-                    if (inPause) {
-                        if (!newElement.classList.contains('pause-highlight')) {
-                            newElement.classList.remove('current-line');
-                            newElement.classList.add('pause-highlight');
-                        }
-                    } else {
-                        if (!newElement.classList.contains('current-line')) {
-                            newElement.classList.remove('pause-highlight');
+                    // Always strip current-related classes first.
+                    newElement.classList.remove('current-line');
+                    if (!highlightPauseEnabled || !inPause || !highlightPreviousEnabled) {
+                        newElement.classList.remove('pause-highlight');
+                    }
+                    if (!inPause || !highlightPreviousEnabled) {
+                        newElement.classList.remove('previous-line');
+                    }
+
+                    if (!inPause) {
+                        if (highlightCurrentEnabled) {
                             newElement.classList.add('current-line');
+                        }
+                    } else if (highlightPauseEnabled) {
+                        if (!highlightPreviousEnabled) {
+                            newElement.classList.add('pause-highlight');
                         }
                     }
                 }
-            } else if (currentLineIndex !== -1 && !indexChanged) {
-                const previousElement = subtitleElements[currentLineIndex];
-                if (previousElement) {
-                    previousElement.classList.remove('current-line');
-                    previousElement.classList.remove('pause-highlight');
-                }
             }
 
+            updatePreviousLineHighlightState({
+                newCurrentLineIndex,
+                previousIndex: oldCurrentIndex,
+                inPause,
+                highlightPreviousEnabled,
+                highlightPauseEnabled,
+                indexChanged
+            });
+
             if (indexChanged) {
-                if (newCurrentLineIndex !== -1) {
+                if (useSubtitleProgress && newCurrentLineIndex !== -1) {
                     attachSharedProgressToIndex(newCurrentLineIndex);
                 } else {
                     detachSharedProgress();
                 }
-                const previousIndex = currentLineIndex;
+                resetTransportProgress();
+                clearTimecodeProgress();
+                const previousIndex = oldCurrentIndex;
                 currentLineIndex = newCurrentLineIndex;
                 // Limit expensive painting to lines that are currently visible.
                 // Off-screen lines are left dirty and will be painted by the
@@ -5344,36 +5958,61 @@ $(document).ready(function() {
                     }
                 }
                 resetSubtReaderInertiaState();
-            } else if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime)) {
-                applySubtReaderInertia(currentLineIndex, currentTime);
             } else {
-                resetSubtReaderInertiaState();
+                if (!useSubtitleProgress && sharedProgressIndex !== -1) {
+                    detachSharedProgress();
+                }
+                if (!useTimecodeProgress && transportProgressValue !== 0) {
+                    resetTransportProgress();
+                }
+                if (!useTimecodeProgress) {
+                    clearTimecodeProgress();
+                }
+                if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime)) {
+                    applySubtReaderInertia(currentLineIndex, currentTime);
+                } else {
+                    resetSubtReaderInertiaState();
+                }
             }
 
             if (currentLineIndex !== -1) {
                 const activeElement = subtitleElements[currentLineIndex];
                 if (activeElement) {
-                    if (sharedProgressIndex !== currentLineIndex) {
-                        attachSharedProgressToIndex(currentLineIndex);
+                    if (useSubtitleProgress) {
+                        if (sharedProgressIndex !== currentLineIndex) {
+                            attachSharedProgressToIndex(currentLineIndex);
+                        }
                     }
                     if (!inPause) {
                         const currentSub = subtitleData[currentLineIndex];
                         const lineDuration = currentSub.end_time - currentSub.start_time;
                         const rawFraction = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) : 0;
                         const clampedFraction = Math.max(0, Math.min(1, rawFraction));
-                        if (Math.abs(clampedFraction - sharedProgressValue) > 0.001) {
+                        if (useSubtitleProgress && Math.abs(clampedFraction - sharedProgressValue) > 0.001) {
                             sharedProgressValue = clampedFraction;
                             sharedProgressBar.style.transform = `scaleX(${clampedFraction})`;
                         }
+                        if (useTimecodeProgress) {
+                            setTimecodeProgress(currentLineIndex, clampedFraction);
+                        }
                     } else {
-                        if (sharedProgressValue !== 0) {
+                        if (useSubtitleProgress && sharedProgressValue !== 0) {
                             sharedProgressValue = 0;
                             sharedProgressBar.style.transform = 'scaleX(0)';
                         }
+                        if (useTimecodeProgress) {
+                            setTimecodeProgress(currentLineIndex, 0);
+                        }
                     }
                 }
-            } else if (sharedProgressIndex !== -1) {
-                detachSharedProgress();
+            } else {
+                if (sharedProgressIndex !== -1) {
+                    detachSharedProgress();
+                }
+                if (useTimecodeProgress && transportProgressValue !== 0) {
+                    resetTransportProgress();
+                }
+                clearTimecodeProgress();
             }
         } catch (e) { console.error("Error in updateTeleprompter:", e); }
     }
@@ -5390,6 +6029,28 @@ $(document).ready(function() {
             console.error('[Prompter] refresh project data failed', err);
         });
     });
+    if (navigationCompactToggle && navigationCompactToggle.length) {
+        navigationCompactToggle.on('click', function(event) {
+            event.preventDefault();
+            setNavigationPanelCollapsed(!navigationPanelCollapsed);
+        });
+    }
+    if (navigationFloatingExpandButton && navigationFloatingExpandButton.length) {
+        navigationFloatingExpandButton.on('click', function(event) {
+            event.preventDefault();
+            setNavigationPanelCollapsed(false);
+            if (navigationCompactToggle && navigationCompactToggle.length) {
+                navigationCompactToggle.trigger('focus');
+            }
+        });
+    }
+    if (navigationFloatingSettingsButton && navigationFloatingSettingsButton.length) {
+        navigationFloatingSettingsButton.on('click', function(event) {
+            event.preventDefault();
+            updateUIFromSettings();
+            $('#settings-modal').show();
+        });
+    }
     $('#settings-button').on('click', function() {
         // Refresh form fields from authoritative settings before showing
         updateUIFromSettings();
@@ -5567,6 +6228,17 @@ $(document).ready(function() {
         highlightClickOptionsWrapper.toggle($(this).is(':checked'));
         scheduleSettingsTileReflow();
     });
+    const syncHighlightFeatureState = () => {
+        applyHighlightUIStateFromValues(getHighlightFeatureValuesFromUI(), { syncControls: false });
+    };
+    [highlightCurrentEnabledCheckbox, highlightPreviousEnabledCheckbox, highlightPauseEnabledCheckbox, progressBarEnabledCheckbox].forEach($el => {
+        if ($el && $el.length) {
+            $el.on('change', syncHighlightFeatureState);
+        }
+    });
+    if (progressBarModeSelect && progressBarModeSelect.length) {
+        progressBarModeSelect.on('change', syncHighlightFeatureState);
+    }
     if (jumpOnClickCheckbox.length) {
         jumpOnClickCheckbox.on('change', function() {
             updateJumpControlsState($(this).is(':checked'));

@@ -34,9 +34,16 @@
                     </div>
                     <span id="transport-state-text">Стоп</span>
                     <span id="transport-timecode">00:00:00:00</span>
+                    <div id="transport-progress-container" aria-hidden="true">
+                        <div id="transport-progress-bar"></div>
+                    </div>
                 </div>
                 
                 <div class="controls-right">
+                    <button id="navigation-compact-toggle" title="Свернуть панель" aria-label="Свернуть панель" aria-expanded="true">
+                        <svg class="icon-svg icon-collapse" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 10l5 5 5-5H7z"/></svg>
+                        <svg class="icon-svg icon-expand" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14l5-5 5 5H7z"/></svg>
+                    </button>
                     <!-- Actors coloring button placed BEFORE stats/settings -->
                     <button id="actors-button" title="Раскраска актёров (цвета)">
                         <!-- Brush icon (geometry preserved) -->
@@ -60,6 +67,15 @@
                     </button>
                 </div>
             </div>
+        </div>
+
+        <div id="navigation-floating-controls" class="navigation-floating-controls" aria-hidden="true">
+            <button id="navigation-floating-expand" type="button" title="Развернуть панель" aria-label="Развернуть панель">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14l5-5 5 5H7z"/></svg>
+            </button>
+            <button id="navigation-floating-settings" type="button" title="Настройки" aria-label="Настройки">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.43,12.98c0.04,-0.32 0.07,-0.64 0.07,-0.98s-0.03,-0.66 -0.07,-0.98l2.11,-1.65c0.19,-0.15 0.24,-0.42 0.12,-0.64l-2,-3.46c-0.12,-0.22 -0.39,-0.3 -0.61,-0.22l-2.49,1c-0.52,-0.4 -1.08,-0.73 -1.69,-0.98l-0.38,-2.65C14.46,2.18 14.25,2 14,2h-4c-0.25,0 -0.46,0.18 -0.49,0.42l-0.38,2.65c-0.61,0.25 -1.17,0.59 -1.69,0.98l-2.49,-1c-0.23,0.09 -0.49,0 -0.61,0.22l-2,3.46c-0.13,0.22 -0.07,0.49 0.12,0.64l2.11,1.65c-0.04,0.32 -0.07,0.65 -0.07,0.98s0.03,0.66 0.07,0.98l-2.11,1.65c-0.19,0.15 -0.24,0.42 -0.12,0.64l2,3.46c0.12,0.22 0.39,0.3 0.61,0.22l2.49,-1c0.52,0.4 1.08,0.73 1.69,0.98l0.38,2.65c0.03,0.24 0.24,0.42 0.49,0.42h4c0.25,0 0.46,-0.18 0.49,-0.42l0.38,-2.65c0.61,-0.25 1.17,-0.59 1.69,-0.98l2.49,1c0.23,0.09 0.49,0 0.61,-0.22l2,-3.46c0.12,-0.22 0.07,-0.49 -0.12,-0.64L19.43,12.98zM12,15.5c-1.93,0 -3.5,-1.57 -3.5,-3.5s1.57,-3.5 3.5,-3.5s3.5,1.57 3.5,3.5S13.93,15.5 12,15.5z"/></svg>
+            </button>
         </div>
 
         <main>
@@ -193,67 +209,100 @@
                 
                 <fieldset class="fieldset-collapsible expanded">
                     <legend>Подсветка</legend>
-                    <div class="settings-tile-grid highlight-settings-tiles setting-group-inline-colors">
+                    <div class="settings-tile-grid highlight-settings-tiles">
                         <div class="settings-tile highlight-settings-tile" id="highlight-current-tile">
-                            <div class="setting-group">
-                                <p class="setting-group-title">Текущая реплика (с прогресс-баром)</p>
-                                <div class="setting-item">
-                                    <label for="highlight-current-bg">Фон</label>
+                            <div class="setting-item mini">
+                                <label for="highlight-current-enabled">Текущая реплика</label>
+                                <input type="checkbox" id="highlight-current-enabled">
+                            </div>
+                            <div id="highlight-current-options" class="setting-inline-row setting-group-inline-colors">
+                                <div class="setting-item mini">
+                                    <label for="highlight-current-bg">Цвет подсветки</label>
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-current-bg" value="rgba(80, 80, 0, 0.4)">
-                                        <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        </button>
                                     </div>
                                 </div>
-                                <div class="setting-item">
-                                    <label for="progress-bar-color">Прогресс-бар</label>
+                                <div class="setting-item mini">
+                                    <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
+                                    <input type="checkbox" id="highlight-current-role-enabled">
+                                </div>
+                                <div class="setting-item mini" id="highlight-role-color-wrapper" style="display: none;">
+                                    <label for="highlight-current-role-bg">Цвет подсветки</label>
                                     <div class="input-with-button">
-                                        <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
-                                        <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                        <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        </button>
                                     </div>
-                                </div>
-                            </div>
-                            <div class="setting-item">
-                                <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
-                                <input type="checkbox" id="highlight-current-role-enabled">
-                            </div>
-                            <div class="setting-item mini" id="highlight-role-color-wrapper" style="display: none;">
-                                <label for="highlight-current-role-bg">Цвет фона роли</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
                                 </div>
                             </div>
                         </div>
-                        <div class="settings-tile highlight-settings-tile setting-group-inline-colors" id="highlight-pause-tile">
+                        <div class="settings-tile highlight-settings-tile" id="highlight-previous-tile">
                             <div class="setting-item">
-                                <label for="highlight-pause-bg">Цвет подсветки в паузах</label>
-                                <div class="input-with-button">
-                                    <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
-                                    <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                <label for="highlight-previous-enabled">Прошлая реплика</label>
+                                <input type="checkbox" id="highlight-previous-enabled">
+                            </div>
+                            <div id="highlight-previous-options" class="setting-inline-row setting-group-inline-colors">
+                                <div class="setting-item mini">
+                                    <label for="highlight-pause-enabled">В паузах между репликами</label>
+                                    <input type="checkbox" id="highlight-pause-enabled">
+                                </div>
+                                <div class="setting-item mini">
+                                    <label for="highlight-pause-bg">Цвет подсветки</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-tile highlight-settings-tile" id="highlight-progress-tile">
+                            <div class="setting-item">
+                                <label for="progress-bar-enabled">Прогресс-бар</label>
+                                <input type="checkbox" id="progress-bar-enabled">
+                            </div>
+                            <div id="highlight-progress-options" class="setting-inline-row setting-group-inline-colors">
+                                <div class="setting-item mini" id="progress-bar-mode-wrapper" style="display:none;">
+                                    <label for="progress-bar-mode">Положение</label>
+                                    <select id="progress-bar-mode">
+                                        <option value="subtitle">Под репликой</option>
+                                        <option value="timecode">Под таймкодом</option>
+                                    </select>
+                                </div>
+                                <div class="setting-item mini">
+                                    <label for="progress-bar-color">Цвет</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                         <div class="settings-tile highlight-settings-tile" id="highlight-click-tile">
-                            <div class="setting-group">
-                                <div class="setting-group-header-flex">
-                                    <p class="setting-group-title">Подсветка по клику на таймкод</p>
-                                    <div class="inline-checkbox">
-                                        <input type="checkbox" id="highlight-click-enabled" aria-label="Включить подсветку по клику">
+                            <div class="setting-item">
+                                <label for="highlight-click-enabled">По клику на таймкод</label>
+                                <input type="checkbox" id="highlight-click-enabled" aria-label="Включить подсветку по клику">
+                            </div>
+                            <div id="highlight-click-options-wrapper" class="setting-inline-row setting-group-inline-colors">
+                                <div class="setting-item mini">
+                                    <label for="highlight-click-bg">Цвет подсветки</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        </button>
                                     </div>
                                 </div>
-                                <div id="highlight-click-options-wrapper" class="setting-inline-row setting-group-inline-colors" style="display: none;">
-                                    <div class="setting-item mini">
-                                        <label for="highlight-click-bg">Фон</label>
-                                            <div class="input-with-button">
-                                                <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
-                                                <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="setting-item mini">
-                                        <label for="highlight-click-duration">Длительность (мс)</label>
-                                        <input type="number" id="highlight-click-duration" class="short-input" value="800" min="50" max="60000" step="50">
-                                    </div>
+                                <div class="setting-item mini">
+                                    <label for="highlight-click-duration">Длительность (мс)</label>
+                                    <input type="number" id="highlight-click-duration" class="short-input" value="800" min="50" max="60000" step="50">
                                 </div>
                             </div>
                         </div>
@@ -328,10 +377,21 @@
                             </div>
                         </div>
                         <div class="settings-tile general-settings-tile" id="general-layout-tile">
+                            <label>Навигационная панель</label>
                             <div class="setting-item">
-                                <label for="navigation-panel-position">Навигационная панель сверху</label>
+                                <label for="navigation-panel-position">Разместить сверху</label>
                                 <input type="checkbox" id="navigation-panel-position">
                             </div>
+                            <div class="setting-item">
+                                <label for="navigation-compact-mode">Компактный вид</label>
+                                <input type="checkbox" id="navigation-compact-mode">
+                            </div>
+                            <div class="setting-item">
+                                <label for="transport-timecode-visible">Показывать статус транспорта и таймкод</label>
+                                <input type="checkbox" id="transport-timecode-visible">
+                            </div>
+                        </div>
+                        <div class="settings-tile general-settings-tile" id="general-jump-tile">
                             <div class="setting-item">
                                 <label for="timecode-display-format">Формат таймкода</label>
                                 <select id="timecode-display-format">
