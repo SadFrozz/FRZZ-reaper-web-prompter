@@ -19,18 +19,21 @@
             
             <div class="panel-controls">
                 <div class="controls-left">
-                    <label for="track-selector">Дорожка:</label>
+                    <label for="track-selector" class="track-selector-label" title="Дорожка">
+                        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-track" xlink:href="icons.svg#icon-track"></use></svg>
+                        <span class="visually-hidden">Дорожка</span>
+                    </label>
                     <select id="track-selector"></select>
                     <button id="refresh-button" title="Обновить список дорожек">
-                        <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                        <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><use href="icons.svg#icon-refresh" xlink:href="icons.svg#icon-refresh"></use></svg>
                     </button>
                 </div>
                 
                 <div id="transport-status">
                     <div id="transport-icon-container">
-                        <svg id="icon-play" class="icon-svg" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                        <svg id="icon-stop" class="icon-svg" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
-                        <svg id="icon-record" class="icon-svg" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/></svg>
+                        <svg id="icon-play" class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-play" xlink:href="icons.svg#icon-play"></use></svg>
+                        <svg id="icon-stop" class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-stop" xlink:href="icons.svg#icon-stop"></use></svg>
+                        <svg id="icon-record" class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-record" xlink:href="icons.svg#icon-record"></use></svg>
                     </div>
                     <span id="transport-state-text">Стоп</span>
                     <span id="transport-timecode">00:00:00:00</span>
@@ -41,29 +44,24 @@
                 
                 <div class="controls-right">
                     <button id="navigation-compact-toggle" title="Свернуть панель" aria-label="Свернуть панель" aria-expanded="true">
-                        <svg class="icon-svg icon-collapse" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 10l5 5 5-5H7z"/></svg>
-                        <svg class="icon-svg icon-expand" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14l5-5 5 5H7z"/></svg>
+                        <svg class="icon-svg icon-collapse" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-chevron-down" xlink:href="icons.svg#icon-chevron-down"></use></svg>
+                        <svg class="icon-svg icon-expand" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-chevron-up" xlink:href="icons.svg#icon-chevron-up"></use></svg>
+                    </button>
+                    <button id="navigation-fullscreen-toggle" title="На весь экран" aria-label="На весь экран" aria-pressed="false">
+                        <svg class="icon-svg icon-enter" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-enter" xlink:href="icons.svg#icon-fullscreen-enter"></use></svg>
+                        <svg class="icon-svg icon-exit" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-exit" xlink:href="icons.svg#icon-fullscreen-exit"></use></svg>
                     </button>
                     <!-- Actors coloring button placed BEFORE stats/settings -->
                     <button id="actors-button" title="Раскраска актёров (цвета)">
                         <!-- Brush icon (geometry preserved) -->
-                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
-                            <g transform="translate(-99 -154) scale(1)">
-                                <path d="M128.735,157.585 L116.047,170.112 L114.65,168.733 L127.339,156.206 C127.725,155.825 128.35,155.825 128.735,156.206 C129.121,156.587 129.121,157.204 128.735,157.585 L128.735,157.585 Z M112.556,173.56 C112.427,173.433 111.159,172.181 111.159,172.181 L113.254,170.112 L114.65,171.491 L112.556,173.56 L112.556,173.56 Z M110.461,178.385 C109.477,179.298 105.08,181.333 102.491,179.36 C102.491,179.36 103.392,178.657 104.074,177.246 C105.703,172.919 109.763,173.56 109.763,173.56 L111.159,174.938 C111.173,174.952 112.202,176.771 110.461,178.385 L110.461,178.385 Z M130.132,154.827 C128.975,153.685 127.099,153.685 125.942,154.827 L108.764,171.788 C106.661,171.74 103.748,172.485 102.491,176.603 C101.53,178.781 99,178.671 99,178.671 C104.253,184.498 110.444,181.196 111.857,179.764 C113.1,178.506 113.279,176.966 113.146,175.734 L130.132,158.964 C131.289,157.821 131.289,155.969 130.132,154.827 L130.132,154.827 Z"/>
-                            </g>
-                        </svg>
+                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-actors" xlink:href="icons.svg#icon-actors"></use></svg>
                     </button>
                     <button id="stats-button" title="Статистика" style="display:none;">
                         <!-- Stats icon centered -->
-                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
-                            <!-- Shifted 3px right -->
-                            <g transform="translate(3 0) scale(1)">
-                                <path d="M14 0h-2c-1.1 0-2 .9-2 2v28c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V2c0-1.1-.9-2-2-2zm10 16h-2c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V18c0-1.1-.9-2-2-2zM4 9H2c-1.1 0-2 .9-2 2v19c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2V11c0-1.1-.9-2-2-2z"/>
-                            </g>
-                        </svg>
+                        <svg class="icon-svg" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-stats" xlink:href="icons.svg#icon-stats"></use></svg>
                     </button>
                     <button id="settings-button" title="Настройки">
-                        <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43,12.98c0.04,-0.32 0.07,-0.64 0.07,-0.98s-0.03,-0.66 -0.07,-0.98l2.11,-1.65c0.19,-0.15 0.24,-0.42 0.12,-0.64l-2,-3.46c-0.12,-0.22 -0.39,-0.3 -0.61,-0.22l-2.49,1c-0.52,-0.4 -1.08,-0.73 -1.69,-0.98l-0.38,-2.65C14.46,2.18 14.25,2 14,2h-4c-0.25,0 -0.46,0.18 -0.49,0.42l-0.38,2.65c-0.61,0.25 -1.17,0.59 -1.69,0.98l-2.49,-1c-0.23,0.09 -0.49,0 -0.61,0.22l-2,3.46c-0.13,0.22 -0.07,0.49 0.12,0.64l2.11,1.65c-0.04,0.32 -0.07,0.65 -0.07,0.98s0.03,0.66 0.07,0.98l-2.11,1.65c-0.19,0.15 -0.24,0.42 -0.12,0.64l2,3.46c0.12,0.22 0.39,0.3 0.61,0.22l2.49,-1c0.52,0.4 1.08,0.73 1.69,0.98l0.38,2.65c0.03,0.24 0.24,0.42 0.49,0.42h4c0.25,0 0.46,-0.18 0.49,-0.42l0.38,-2.65c0.61,-0.25 1.17,-0.59 1.69,-0.98l2.49,1c0.23,0.09 0.49,0 0.61,-0.22l2,-3.46c0.12,-0.22 0.07,-0.49 -0.12,-0.64L19.43,12.98zM12,15.5c-1.93,0 -3.5,-1.57 -3.5,-3.5s1.57,-3.5 3.5,-3.5s3.5,1.57 3.5,3.5S13.93,15.5 12,15.5z" /></svg>
+                        <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><use href="icons.svg#icon-settings" xlink:href="icons.svg#icon-settings"></use></svg>
                     </button>
                 </div>
             </div>
@@ -71,10 +69,14 @@
 
         <div id="navigation-floating-controls" class="navigation-floating-controls" aria-hidden="true">
             <button id="navigation-floating-expand" type="button" title="Развернуть панель" aria-label="Развернуть панель">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14l5-5 5 5H7z"/></svg>
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-chevron-up" xlink:href="icons.svg#icon-chevron-up"></use></svg>
+            </button>
+            <button id="navigation-floating-fullscreen" type="button" title="На весь экран" aria-label="На весь экран" aria-pressed="false">
+                <svg class="icon-svg icon-enter" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-enter" xlink:href="icons.svg#icon-fullscreen-enter"></use></svg>
+                <svg class="icon-svg icon-exit" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-exit" xlink:href="icons.svg#icon-fullscreen-exit"></use></svg>
             </button>
             <button id="navigation-floating-settings" type="button" title="Настройки" aria-label="Настройки">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.43,12.98c0.04,-0.32 0.07,-0.64 0.07,-0.98s-0.03,-0.66 -0.07,-0.98l2.11,-1.65c0.19,-0.15 0.24,-0.42 0.12,-0.64l-2,-3.46c-0.12,-0.22 -0.39,-0.3 -0.61,-0.22l-2.49,1c-0.52,-0.4 -1.08,-0.73 -1.69,-0.98l-0.38,-2.65C14.46,2.18 14.25,2 14,2h-4c-0.25,0 -0.46,0.18 -0.49,0.42l-0.38,2.65c-0.61,0.25 -1.17,0.59 -1.69,0.98l-2.49,-1c-0.23,0.09 -0.49,0 -0.61,0.22l-2,3.46c-0.13,0.22 -0.07,0.49 0.12,0.64l2.11,1.65c-0.04,0.32 -0.07,0.65 -0.07,0.98s0.03,0.66 0.07,0.98l-2.11,1.65c-0.19,0.15 -0.24,0.42 -0.12,0.64l2,3.46c0.12,0.22 0.39,0.3 0.61,0.22l2.49,-1c0.52,0.4 1.08,0.73 1.69,0.98l0.38,2.65c0.03,0.24 0.24,0.42 0.49,0.42h4c0.25,0 0.46,-0.18 0.49,-0.42l0.38,-2.65c0.61,-0.25 1.17,-0.59 1.69,-0.98l2.49,1c0.23,0.09 0.49,0 0.61,-0.22l2,-3.46c0.12,-0.22 0.07,-0.49 -0.12,-0.64L19.43,12.98zM12,15.5c-1.93,0 -3.5,-1.57 -3.5,-3.5s1.57,-3.5 3.5,-3.5s3.5,1.57 3.5,3.5S13.93,15.5 12,15.5z"/></svg>
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-settings" xlink:href="icons.svg#icon-settings"></use></svg>
             </button>
         </div>
 
@@ -173,14 +175,14 @@
                                         <label for="checkerboard-bg1">Фон 1</label>
                                         <div class="input-with-button">
                                             <input type="text" id="checkerboard-bg1" value="rgba(34,34,34,1)">
-                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-bg2">Фон 2</label>
                                         <div class="input-with-button">
                                             <input type="text" id="checkerboard-bg2" value="rgba(42,42,42,1)">
-                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
                                 </div>
@@ -190,15 +192,15 @@
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-font1">Шрифт 1</label>
                                         <div class="input-with-button">
-                                            <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
-                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                            <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-font2">Шрифт 2</label>
                                         <div class="input-with-button">
-                                            <input type="text" id="checkerboard-font2" value="rgba(238,238,238,1)">
-                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>
+                                            <input type="text" id="checkerboard-font1" value="rgba(238,238,238,1)">
+                                            <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
                                 </div>
@@ -221,7 +223,7 @@
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-current-bg" value="rgba(80, 80, 0, 0.4)">
                                         <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
                                     </div>
                                 </div>
@@ -234,7 +236,7 @@
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
                                         <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
                                     </div>
                                 </div>
@@ -255,7 +257,7 @@
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
                                         <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
                                     </div>
                                 </div>
@@ -279,7 +281,7 @@
                                     <div class="input-with-button">
                                         <input type="text" id="progress-bar-color" value="rgba(255,193,7,1)">
                                         <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
                                     </div>
                                 </div>
@@ -296,7 +298,7 @@
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-click-bg" value="rgba(120, 0, 120, 0.4)">
                                         <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
                                     </div>
                                 </div>

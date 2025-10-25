@@ -566,8 +566,10 @@ $(document).ready(function() {
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
     const navigationCompactToggle = $('#navigation-compact-toggle');
+    const navigationFullscreenToggle = $('#navigation-fullscreen-toggle');
     const navigationFloatingControls = $('#navigation-floating-controls');
     const navigationFloatingExpandButton = $('#navigation-floating-expand');
+    const navigationFloatingFullscreenButton = $('#navigation-floating-fullscreen');
     const navigationFloatingSettingsButton = $('#navigation-floating-settings');
     const transportStatus = $('#transport-status');
     const transportStateText = $('#transport-state-text');
@@ -763,6 +765,103 @@ $(document).ready(function() {
         }
         updateNavigationCollapsedUI();
         scheduleTransportWrapEvaluation();
+    }
+
+    const fullscreenTarget = document.documentElement || document.body || null;
+    const fullscreenChangeEvents = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'msfullscreenchange'];
+    const fullscreenErrorEvents = ['fullscreenerror', 'webkitfullscreenerror', 'mozfullscreenerror', 'msfullscreenerror'];
+    const fullscreenAvailable = Boolean(
+        fullscreenTarget && (
+            fullscreenTarget.requestFullscreen ||
+            fullscreenTarget.webkitRequestFullscreen ||
+            fullscreenTarget.mozRequestFullScreen ||
+            fullscreenTarget.msRequestFullscreen
+        )
+    );
+
+    function getActiveFullscreenElement() {
+        return document.fullscreenElement ||
+            document.webkitFullscreenElement ||
+            document.mozFullScreenElement ||
+            document.msFullscreenElement ||
+            null;
+    }
+
+    function isFullscreenActive() {
+        return !!getActiveFullscreenElement();
+    }
+
+    function enterFullscreenMode() {
+        if (!fullscreenAvailable || !fullscreenTarget) {
+            return;
+        }
+        const request = fullscreenTarget.requestFullscreen ||
+            fullscreenTarget.webkitRequestFullscreen ||
+            fullscreenTarget.mozRequestFullScreen ||
+            fullscreenTarget.msRequestFullscreen;
+        if (typeof request === 'function') {
+            try {
+                const result = request.call(fullscreenTarget);
+                if (result && typeof result.catch === 'function') {
+                    result.catch(err => console.warn('[Prompter] fullscreen entry failed', err));
+                }
+            } catch (err) {
+                console.warn('[Prompter] fullscreen entry threw', err);
+            }
+        }
+    }
+
+    function exitFullscreenMode() {
+        if (!fullscreenAvailable) {
+            return;
+        }
+        const exit = document.exitFullscreen ||
+            document.webkitExitFullscreen ||
+            document.mozCancelFullScreen ||
+            document.msExitFullscreen;
+        if (typeof exit === 'function') {
+            try {
+                const result = exit.call(document);
+                if (result && typeof result.catch === 'function') {
+                    result.catch(err => console.warn('[Prompter] fullscreen exit failed', err));
+                }
+            } catch (err) {
+                console.warn('[Prompter] fullscreen exit threw', err);
+            }
+        }
+    }
+
+    function updateFullscreenToggleUI() {
+        const active = isFullscreenActive();
+        const enterLabel = 'На весь экран';
+        const exitLabel = 'Выйти из полноэкранного режима';
+        $('body').toggleClass('prompter-fullscreen-active', active);
+        if (navigationFullscreenToggle && navigationFullscreenToggle.length) {
+            navigationFullscreenToggle.toggleClass('is-active', active);
+            navigationFullscreenToggle.attr('aria-pressed', active ? 'true' : 'false');
+            navigationFullscreenToggle.attr('title', active ? exitLabel : enterLabel);
+            navigationFullscreenToggle.attr('aria-label', active ? exitLabel : enterLabel);
+        }
+        if (navigationFloatingFullscreenButton && navigationFloatingFullscreenButton.length) {
+            navigationFloatingFullscreenButton.toggleClass('is-active', active);
+            navigationFloatingFullscreenButton.attr('aria-pressed', active ? 'true' : 'false');
+            navigationFloatingFullscreenButton.attr('title', active ? exitLabel : enterLabel);
+            navigationFloatingFullscreenButton.attr('aria-label', active ? exitLabel : enterLabel);
+        }
+    }
+
+    function handleFullscreenToggle(event) {
+        if (event) {
+            event.preventDefault();
+        }
+        if (!fullscreenAvailable) {
+            return;
+        }
+        if (isFullscreenActive()) {
+            exitFullscreenMode();
+        } else {
+            enterFullscreenMode();
+        }
     }
 
     updateNavigationCollapsedUI();
@@ -6043,6 +6142,28 @@ $(document).ready(function() {
                 navigationCompactToggle.trigger('focus');
             }
         });
+    }
+    if (fullscreenAvailable) {
+        if (navigationFullscreenToggle && navigationFullscreenToggle.length) {
+            navigationFullscreenToggle.on('click', handleFullscreenToggle);
+        }
+        if (navigationFloatingFullscreenButton && navigationFloatingFullscreenButton.length) {
+            navigationFloatingFullscreenButton.on('click', handleFullscreenToggle);
+        }
+        fullscreenChangeEvents.forEach(evt => {
+            document.addEventListener(evt, updateFullscreenToggleUI, false);
+        });
+        fullscreenErrorEvents.forEach(evt => {
+            document.addEventListener(evt, updateFullscreenToggleUI, false);
+        });
+        updateFullscreenToggleUI();
+    } else {
+        if (navigationFullscreenToggle && navigationFullscreenToggle.length) {
+            navigationFullscreenToggle.prop('disabled', true).attr('aria-hidden', 'true').hide();
+        }
+        if (navigationFloatingFullscreenButton && navigationFloatingFullscreenButton.length) {
+            navigationFloatingFullscreenButton.prop('disabled', true).attr('aria-hidden', 'true').hide();
+        }
     }
     if (navigationFloatingSettingsButton && navigationFloatingSettingsButton.length) {
         navigationFloatingSettingsButton.on('click', function(event) {
