@@ -1,4 +1,4 @@
-const SETTINGS_SCHEMA_VERSION = 6;
+const SETTINGS_SCHEMA_VERSION = 7;
 const DATA_MODEL_VERSION = 2;
 const DEFAULT_PROJECT_FPS = 24;
 const MAX_JUMP_PRE_ROLL_SECONDS = 10;
@@ -35,8 +35,8 @@ function normalizeTimecodeDisplayFormatValue(value, fallback = 'auto') {
         : fallbackNormalized === 'frames' ? 'frames'
         : 'auto';
     if (typeof value === 'string') {
-        const normalized = value.trim().toLowerCase();
-        if (normalized === 'milliseconds' || normalized === 'millisecond' || normalized === 'millis' || normalized === 'ms') {
+            const normalized = value.trim().toLowerCase();
+            if (normalized === 'milliseconds' || normalized === 'millisecond' || normalized === 'millis' || normalized === 'ms') {
             return 'milliseconds';
         }
         if (normalized === 'frames' || normalized === 'frame' || normalized === 'ff') {
@@ -61,9 +61,9 @@ function sanitizeJumpPreRollSeconds(value, fallback = 0) {
 
 function sanitizeAutoScrollMode(value, fallback = 'page') {
     if (typeof value === 'string') {
-        const normalized = value.trim().toLowerCase();
-        if (normalized === 'line') return 'line';
-        if (normalized === 'page') return 'page';
+          const normalized = value.trim().toLowerCase();
+          if (normalized === 'line') return 'line';
+          if (normalized === 'page') return 'page';
     }
     return typeof fallback === 'string' ? fallback : 'page';
 }
@@ -93,7 +93,7 @@ function sanitizeAutoScrollPercent(value, fallback, min = 0, max = 100) {
 function sanitizeAutoScrollLineEasingBaseMs(value, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) {
-        return clampNumber(fallback, 50, MAX_AUTO_SCROLL_ANIMATION_MS);
+          return clampNumber(fallback, 50, MAX_AUTO_SCROLL_ANIMATION_MS);
     }
     return clampNumber(Math.round(numeric), 50, MAX_AUTO_SCROLL_ANIMATION_MS);
 }
@@ -326,6 +326,12 @@ const defaultSettings = {
     swapColumns: false,
     roleFontColorEnabled: true,
     deduplicateRoles: true, // ++ НОВАЯ НАСТРОЙКА ++
+    filterHiddenBehavior: 'hide',
+    filterDimPercent: 60,
+    filterSoloRoles: [],
+    filterMuteRoles: [],
+    filterSoloActors: [],
+    filterMuteActors: [],
     checkerboardEnabled: false,
     checkerboardMode: 'by_role',
     checkerboardBg1: 'rgba(34, 34, 34, 1)',
@@ -871,11 +877,35 @@ $(document).ready(function() {
         if (!roleOptionsWrapper.length) return;
         roleOptionsWrapper.toggleClass('is-hidden', !enabled);
     };
+    const updateFilterHiddenControlsVisibility = (mode) => {
+        if (!filterDimPercentWrapper.length) return;
+        const visible = (mode || '').toLowerCase() === FILTER_BEHAVIOR_DIM;
+        filterDimPercentWrapper.css('display', '');
+        filterDimPercentWrapper.toggleClass('is-hidden', !visible);
+        if (visible && filterDimPercentSlider.length) {
+            const dimPercent = sanitizeFilterDimPercent(settings.filterDimPercent, defaultSettings.filterDimPercent);
+            filterDimPercentSlider.val(dimPercent);
+            filterDimPercentValue.text(`${dimPercent}%`);
+            refreshFrzzSliderFill(filterDimPercentSlider);
+        } else if (!visible && filterDimPercentValue.length) {
+            const dimPercent = sanitizeFilterDimPercent(settings.filterDimPercent, defaultSettings.filterDimPercent);
+            if (filterDimPercentSlider.length) {
+                filterDimPercentSlider.val(dimPercent);
+                refreshFrzzSliderFill(filterDimPercentSlider);
+            }
+            filterDimPercentValue.text(`${dimPercent}%`);
+        }
+        scheduleSettingsTileReflow();
+    };
     const roleDisplayStyleSelect = $('#role-display-style');
     const enableColorSwatchesCheckbox = $('#enable-color-swatches');
     const roleColumnScaleWrapper = $('#role-column-scale-wrapper');
     const roleColumnScaleSlider = $('#role-column-scale');
     const roleColumnScaleValue = $('#role-column-scale-value');
+    const filterHiddenBehaviorSelect = $('#filter-hidden-behavior');
+    const filterDimPercentWrapper = $('#filter-dim-percent-wrapper');
+    const filterDimPercentSlider = $('#filter-dim-percent');
+    const filterDimPercentValue = $('#filter-dim-percent-value');
     const checkerboardEnabledCheckbox = $('#checkerboard-enabled');
     const checkerboardOptionsWrapper = $('#checkerboard-options-wrapper');
     const setCheckerboardOptionsVisibility = (enabled) => {
@@ -914,6 +944,7 @@ $(document).ready(function() {
     let subtitleTimeProgressElements = [];
     let subtitlePaintStates = [];
     let subtitleStyleMetadata = [];
+    let subtitleFilterStates = [];
     let paintGeneration = 0;
     let paintScheduled = false;
     let lastVisibleStart = 0;
@@ -1273,6 +1304,20 @@ $(document).ready(function() {
     speedSteps.push(500);
     scrollSpeedSlider.attr('min', 0).attr('max', speedSteps.length - 1).attr('step', 1);
 
+    const FILTER_BEHAVIOR_HIDE = 'hide';
+    const FILTER_BEHAVIOR_DIM = 'dim';
+    const filterRuntime = {
+        behavior: defaultSettings.filterHiddenBehavior,
+        dimPercent: defaultSettings.filterDimPercent,
+        dimOpacity: computeFilterDimOpacity(defaultSettings.filterDimPercent),
+        soloRoles: new Set(),
+        muteRoles: new Set(),
+        soloActors: new Set(),
+        muteActors: new Set(),
+        hasFilters: false
+    };
+    let filtersApplied = false;
+
     // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
     // Simple debounce helper
     function debounce(fn, ms) {
@@ -1378,7 +1423,7 @@ $(document).ready(function() {
             return result;
         }
         if (typeof value !== 'string') {
-            return result;
+                    candidates = value.split(/[;,\r\n]+/);
         }
         const trimmed = value.trim();
         if (!trimmed) {
@@ -3539,6 +3584,27 @@ $(document).ready(function() {
             $('body').toggleClass('columns-swapped', tempSettings.swapColumns);
             $('body').toggleClass('hide-empty-role-column', tempSettings.autoHideEmptyColumn);
             textDisplay.css({'font-family': tempSettings.fontFamily});
+            const sanitizedFilterBehavior = sanitizeFilterHiddenBehavior(
+                tempSettings.filterHiddenBehavior,
+                settings.filterHiddenBehavior || defaultSettings.filterHiddenBehavior
+            );
+            const sanitizedFilterDimPercent = sanitizeFilterDimPercent(
+                tempSettings.filterDimPercent,
+                settings.filterDimPercent || defaultSettings.filterDimPercent
+            );
+            tempSettings.filterHiddenBehavior = sanitizedFilterBehavior;
+            tempSettings.filterDimPercent = sanitizedFilterDimPercent;
+            settings.filterHiddenBehavior = sanitizedFilterBehavior;
+            settings.filterDimPercent = sanitizedFilterDimPercent;
+            if (filterHiddenBehaviorSelect.length) {
+                filterHiddenBehaviorSelect.val(sanitizedFilterBehavior);
+            }
+            if (filterDimPercentSlider.length) {
+                filterDimPercentSlider.val(sanitizedFilterDimPercent);
+                filterDimPercentValue.text(sanitizedFilterDimPercent + '%');
+                refreshFrzzSliderFill(filterDimPercentSlider);
+            }
+            updateFilterHiddenControlsVisibility(sanitizedFilterBehavior);
 
             if (!useSubtitleProgress) {
                 detachSharedProgress();
@@ -3620,6 +3686,8 @@ $(document).ready(function() {
             if (transportProgressBarEl) {
                 transportProgressBarEl.style.backgroundColor = tempSettings.progressBarColor || defaultSettings.progressBarColor;
             }
+            updateFilterRuntimeFromSettings();
+            recomputeFilteringState({ reason: 'settings_apply', force: true });
             // After applying font/UI scale, re-evaluate navigation panel wrapping
             scheduleTransportWrapEvaluation();
             // Ensure visual title reflects authoritative settings + currentProjectName
@@ -3681,6 +3749,15 @@ $(document).ready(function() {
         // font family select
         const fontFamilySelect = $('#font-family');
         if (fontFamilySelect.length) { ensureSelectValue(fontFamilySelect, s.fontFamily || defaultSettings.fontFamily); }
+        if (filterHiddenBehaviorSelect.length) {
+            ensureSelectValue(filterHiddenBehaviorSelect, s.filterHiddenBehavior || defaultSettings.filterHiddenBehavior);
+        }
+        if (filterDimPercentSlider.length) {
+            const dimPercent = sanitizeFilterDimPercent(s.filterDimPercent, defaultSettings.filterDimPercent);
+            filterDimPercentSlider.val(dimPercent);
+            filterDimPercentValue.text(dimPercent + '%');
+            refreshFrzzSliderFill(filterDimPercentSlider);
+        }
 
         // Reflect navigation panel position into checkbox
         const navPosCheckbox = $('#navigation-panel-position');
@@ -3707,6 +3784,7 @@ $(document).ready(function() {
         }
     setRoleOptionsVisibility(s.processRoles);
     setCheckerboardOptionsVisibility(s.checkerboardEnabled);
+    updateFilterHiddenControlsVisibility(s.filterHiddenBehavior || defaultSettings.filterHiddenBehavior);
         highlightClickOptionsWrapper.toggle(s.highlightClickEnabled);
         highlightRoleColorWrapper.toggle(s.highlightCurrentRoleEnabled);
         applyHighlightUIStateFromValues(s, { syncControls: false });
@@ -3791,6 +3869,7 @@ $(document).ready(function() {
             setProjectFps(settings.frameRate, { source: 'settings', forceEmit: true });
             $('#ui-scale').attr({ min:50, max:300, step:25 });
             initializeColorPickers();
+            updateFilterRuntimeFromSettings();
             updateUIFromSettings();
             applySettings();
             console.info('[Prompter][loadSettings] EMU: skip root settings.json; defaults applied');
@@ -3844,6 +3923,7 @@ $(document).ready(function() {
                 settings.highlightClickDuration = defaultSettings.highlightClickDuration;
                 migrationMeta.changed = true;
             }
+            updateFilterRuntimeFromSettings();
 
             try {
                 localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
@@ -5091,10 +5171,12 @@ $(document).ready(function() {
             subtitleTimeProgressElements = new Array(total);
             subtitlePaintStates = new Array(total);
             subtitleStyleMetadata = new Array(total);
+            subtitleFilterStates = new Array(total);
             if (total === 0) {
                 subtitleTimeElements = [];
                 subtitleTimeLabelElements = [];
                 subtitleTimeProgressElements = [];
+                subtitleFilterStates = [];
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 finalizeDataModelUpdate();
                 return;
@@ -5144,7 +5226,10 @@ $(document).ready(function() {
             const fragment = document.createDocumentFragment();
             for (let index = 0; index < total; index++) {
                 const line = subtitleData[index];
-                if (!line) continue;
+                if (!line) {
+                    subtitleFilterStates[index] = null;
+                    continue;
+                }
 
                 subtitleStyleMetadata[index] = null;
 
@@ -5347,8 +5432,9 @@ $(document).ready(function() {
                 const durationSeconds = Math.max(0, endSeconds - startSeconds);
                 const startMs = Math.max(0, Math.round(startSeconds * 1000));
                 const endMs = Math.max(startMs, Math.round(endSeconds * 1000));
+                const lineId = resolveDataModelLineId(line, index);
                 recordDataModelLine({
-                    id: resolveDataModelLineId(line, index),
+                    id: lineId,
                     index,
                     startSeconds,
                     endSeconds,
@@ -5367,6 +5453,13 @@ $(document).ready(function() {
                     lineColor,
                     resolvedColor: finalRoleColorCandidate || null
                 });
+                subtitleFilterStates[index] = {
+                    roleId: role || null,
+                    actorId: actor || null,
+                    lineId,
+                    filtered: false,
+                    reason: null
+                };
 
                 container.appendChild(timeElement);
 
@@ -5430,6 +5523,8 @@ $(document).ready(function() {
                 if (wrapperNode && window.__vwinWheelHandler) { wrapperNode.removeEventListener('wheel', window.__vwinWheelHandler); window.__vwinWheelHandler = null; }
                 if (wrapperNode && window.__vwinTouchHandler) { wrapperNode.removeEventListener('touchmove', window.__vwinTouchHandler); window.__vwinTouchHandler = null; }
             } catch(_){}
+            updateFilterRuntimeFromSettings();
+            recomputeFilteringState({ reason: 'data_load', force: true });
             updateTeleprompter(latestTimecode);
         } catch (e) { console.error("Error in handleTextResponse:", e); }
     }
@@ -5723,6 +5818,215 @@ $(document).ready(function() {
                 idx++;
             }
         });
+    }
+
+    function computeFilterDimOpacity(percent) {
+        const numeric = Number(percent);
+        const bounded = Number.isFinite(numeric) ? Math.max(10, Math.min(95, numeric)) : defaultSettings.filterDimPercent;
+        const opacity = 1 - (bounded / 100);
+        return Number(Math.max(0.05, Math.min(1, opacity)).toFixed(3));
+    }
+
+    function normalizeFilterList(value) {
+        if (!value) return [];
+        let candidates = [];
+        if (Array.isArray(value)) {
+            candidates = value;
+        } else if (typeof value === 'string') {
+            candidates = value.split(/[;,\r\n]+/);
+        } else if (typeof value === 'object') {
+            candidates = Object.keys(value).filter(key => {
+                const val = value[key];
+                if (typeof val === 'boolean') return val;
+                if (typeof val === 'number') return Number.isFinite(val) ? val !== 0 : false;
+                if (typeof val === 'string') return val.trim().length > 0;
+                return false;
+            });
+        }
+        const normalized = [];
+        const seen = new Set();
+        candidates.forEach(entry => {
+            if (entry == null) return;
+            const token = String(entry).trim();
+            if (!token || seen.has(token)) return;
+            seen.add(token);
+            normalized.push(token);
+        });
+        return normalized;
+    }
+
+    function sanitizeFilterHiddenBehavior(value, fallback) {
+        const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (raw === FILTER_BEHAVIOR_DIM || raw === 'shade' || raw === 'dim') {
+            return FILTER_BEHAVIOR_DIM;
+        }
+        if (raw === FILTER_BEHAVIOR_HIDE || raw === 'hidden' || raw === 'hide') {
+            return FILTER_BEHAVIOR_HIDE;
+        }
+        const fallbackRaw = typeof fallback === 'string' ? fallback.trim().toLowerCase() : '';
+        return fallbackRaw === FILTER_BEHAVIOR_DIM ? FILTER_BEHAVIOR_DIM : FILTER_BEHAVIOR_HIDE;
+    }
+
+    function sanitizeFilterDimPercent(value, fallback) {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) {
+            return Math.max(10, Math.min(90, Math.round(numeric)));
+        }
+        const fallbackNumeric = Number(fallback);
+        if (Number.isFinite(fallbackNumeric)) {
+            return Math.max(10, Math.min(90, Math.round(fallbackNumeric)));
+        }
+        return Math.max(10, Math.min(90, defaultSettings.filterDimPercent));
+    }
+
+    function updateFilterRuntimeFromSettings() {
+        try {
+            const behavior = sanitizeFilterHiddenBehavior(settings.filterHiddenBehavior, defaultSettings.filterHiddenBehavior);
+            const dimPercent = sanitizeFilterDimPercent(settings.filterDimPercent, defaultSettings.filterDimPercent);
+            settings.filterHiddenBehavior = behavior;
+            settings.filterDimPercent = dimPercent;
+            filterRuntime.behavior = behavior;
+            filterRuntime.dimPercent = dimPercent;
+            filterRuntime.dimOpacity = computeFilterDimOpacity(dimPercent);
+
+            const soloRoles = normalizeFilterList(settings.filterSoloRoles);
+            const muteRoles = normalizeFilterList(settings.filterMuteRoles);
+            const soloActors = normalizeFilterList(settings.filterSoloActors);
+            const muteActors = normalizeFilterList(settings.filterMuteActors);
+            settings.filterSoloRoles = soloRoles;
+            settings.filterMuteRoles = muteRoles;
+            settings.filterSoloActors = soloActors;
+            settings.filterMuteActors = muteActors;
+            filterRuntime.soloRoles = new Set(soloRoles);
+            filterRuntime.muteRoles = new Set(muteRoles);
+            filterRuntime.soloActors = new Set(soloActors);
+            filterRuntime.muteActors = new Set(muteActors);
+            filterRuntime.hasFilters = filterRuntime.soloRoles.size > 0 || filterRuntime.muteRoles.size > 0 || filterRuntime.soloActors.size > 0 || filterRuntime.muteActors.size > 0;
+
+            if (typeof document !== 'undefined' && document.body) {
+                document.body.setAttribute('data-filter-hidden-behavior', behavior);
+                document.body.style.setProperty('--filter-dim-opacity', String(filterRuntime.dimOpacity));
+            }
+        } catch (err) {
+            console.error('[Prompter][filters] runtime update failed', err);
+        }
+    }
+
+    function evaluateFilterOutcome(meta) {
+        if (!meta) return { filtered: false, reason: null };
+        const actor = meta.actorId || '';
+        const role = meta.roleId || '';
+        const hasSoloActor = filterRuntime.soloActors.size > 0;
+        const hasSoloRole = filterRuntime.soloRoles.size > 0;
+        if (hasSoloActor) {
+            if (actor && filterRuntime.soloActors.has(actor)) {
+                return { filtered: false, reason: null };
+            }
+            return { filtered: true, reason: 'actor_solo_exclusive' };
+        }
+        if (actor && filterRuntime.muteActors.has(actor)) {
+            return { filtered: true, reason: 'actor_muted' };
+        }
+        if (hasSoloRole) {
+            if (role && filterRuntime.soloRoles.has(role)) {
+                return { filtered: false, reason: null };
+            }
+            return { filtered: true, reason: 'role_solo_exclusive' };
+        }
+        if (role && filterRuntime.muteRoles.has(role)) {
+            return { filtered: true, reason: 'role_muted' };
+        }
+        return { filtered: false, reason: null };
+    }
+
+    function applyFilterOutcomeToElement(index, outcome) {
+        const container = subtitleElements[index];
+        if (!container) return;
+        const hide = outcome.filtered && filterRuntime.behavior === FILTER_BEHAVIOR_HIDE;
+        const dim = outcome.filtered && filterRuntime.behavior === FILTER_BEHAVIOR_DIM;
+        container.classList.toggle('filter-active', outcome.filtered);
+        container.classList.toggle('filter-hidden', hide);
+        container.classList.toggle('filter-dimmed', dim);
+        if (hide) {
+            if (container.style.display !== 'none') container.style.display = 'none';
+            container.setAttribute('aria-hidden', 'true');
+        } else {
+            if (container.style.display) container.style.display = '';
+            if (container.getAttribute('aria-hidden') === 'true') {
+                container.removeAttribute('aria-hidden');
+            }
+        }
+        if (!dim && container.classList.contains('filter-dimmed')) {
+            container.classList.remove('filter-dimmed');
+        }
+        const meta = subtitleFilterStates[index];
+        if (meta) {
+            meta.filtered = outcome.filtered;
+            meta.reason = outcome.filtered ? (outcome.reason || null) : null;
+            const record = meta.lineId ? dataModel.lines.get(meta.lineId) : null;
+            if (record) {
+                record.isFiltered = meta.filtered;
+                record.filterReason = meta.reason;
+            }
+        }
+        if (outcome.filtered) {
+            container.setAttribute('data-filter-reason', outcome.reason || '');
+        } else {
+            container.removeAttribute('data-filter-reason');
+        }
+    }
+
+    function clearFilterClasses() {
+        if (!subtitleElements || !subtitleElements.length) return;
+        for (let index = 0; index < subtitleElements.length; index++) {
+            const container = subtitleElements[index];
+            if (!container) continue;
+            container.classList.remove('filter-active', 'filter-hidden', 'filter-dimmed');
+            if (container.style.display) container.style.display = '';
+            container.removeAttribute('aria-hidden');
+            container.removeAttribute('data-filter-reason');
+            const meta = subtitleFilterStates[index];
+            if (meta) {
+                meta.filtered = false;
+                meta.reason = null;
+                const record = meta.lineId ? dataModel.lines.get(meta.lineId) : null;
+                if (record) {
+                    record.isFiltered = false;
+                    record.filterReason = null;
+                }
+            }
+        }
+        filtersApplied = false;
+    }
+
+    function recomputeFilteringState(options = {}) {
+        try {
+            const force = options.force === true;
+            if (!subtitleElements || !subtitleElements.length) {
+                if (force) {
+                    clearFilterClasses();
+                }
+                return;
+            }
+            if (!filterRuntime.hasFilters) {
+                if (filtersApplied || force) {
+                    clearFilterClasses();
+                }
+                return;
+            }
+            for (let index = 0; index < subtitleFilterStates.length; index++) {
+                const meta = subtitleFilterStates[index];
+                if (!meta) continue;
+                const outcome = evaluateFilterOutcome(meta);
+                if (!force && meta.filtered === outcome.filtered && meta.reason === outcome.reason) {
+                    continue;
+                }
+                applyFilterOutcomeToElement(index, outcome);
+            }
+            filtersApplied = true;
+        } catch (err) {
+            console.error('[Prompter][filters] recompute failed', err);
+        }
     }
 
     function regenerateActorColorListUI() {
@@ -6349,6 +6653,21 @@ $(document).ready(function() {
         highlightClickOptionsWrapper.toggle($(this).is(':checked'));
         scheduleSettingsTileReflow();
     });
+    if (filterHiddenBehaviorSelect.length) {
+        filterHiddenBehaviorSelect.on('change', function() {
+            const mode = $(this).val();
+            updateFilterHiddenControlsVisibility(mode);
+            if (filterDimPercentSlider.length) {
+                let rangedValue = sanitizeFilterDimPercent(
+                    filterDimPercentSlider.val(),
+                    settings.filterDimPercent || defaultSettings.filterDimPercent
+                );
+                filterDimPercentSlider.val(rangedValue);
+                filterDimPercentValue.text(rangedValue + '%');
+                refreshFrzzSliderFill(filterDimPercentSlider);
+            }
+        });
+    }
     const syncHighlightFeatureState = () => {
         applyHighlightUIStateFromValues(getHighlightFeatureValuesFromUI(), { syncControls: false });
     };
@@ -6393,6 +6712,17 @@ $(document).ready(function() {
         roleColumnScaleValue.text($(this).val() + '%');
         refreshFrzzSliderFill(roleColumnScaleSlider);
     });
+    if (filterDimPercentSlider.length) {
+        filterDimPercentSlider.on('input change', function() {
+            let dimValue = sanitizeFilterDimPercent(
+                $(this).val(),
+                settings.filterDimPercent || defaultSettings.filterDimPercent
+            );
+            filterDimPercentSlider.val(dimValue);
+            filterDimPercentValue.text(dimValue + '%');
+            refreshFrzzSliderFill(filterDimPercentSlider);
+        });
+    }
     if (autoScrollWindowTopInput.length && autoScrollWindowBottomInput.length) {
         const syncWindowBounds = (source) => {
             updateAutoScrollWindowUI(
@@ -6414,6 +6744,7 @@ $(document).ready(function() {
     if (uiScaleSlider.length) { refreshFrzzSliderFill(uiScaleSlider); }
     if (lineSpacingSlider.length) { refreshFrzzSliderFill(lineSpacingSlider); }
     if (roleColumnScaleSlider.length) { refreshFrzzSliderFill(roleColumnScaleSlider); }
+    if (filterDimPercentSlider.length) { refreshFrzzSliderFill(filterDimPercentSlider); }
     if (autoScrollLineAnchorInput.length) { refreshFrzzSliderFill(autoScrollLineAnchorInput); }
     
     // Обработчики для более сложных действий

@@ -133,17 +133,33 @@
                                     <input type="checkbox" id="auto-hide-empty-column">
                                 </div>
                             </div>
+                            <div class="settings-tile role-settings-tile settings-tile-slider" id="role-filter-mode-tile">
+                                <div class="setting-item">
+                                    <label for="filter-hidden-behavior">Скрытые роли/актёры</label>
+                                    <select id="filter-hidden-behavior">
+                                        <option value="hide">Скрывать</option>
+                                        <option value="dim">Затемнять</option>
+                                    </select>
+                                </div>
+                                <div id="filter-dim-percent-wrapper" class="filter-dim-controls is-hidden">
+                                    <label class="settings-tile-title" for="filter-dim-percent">Процент затемнения</label>
+                                    <div class="settings-slider-row">
+                                        <input type="range" id="filter-dim-percent" class="frzz-slider" min="10" max="90" step="1">
+                                        <span id="filter-dim-percent-value" class="settings-slider-value">60%</span>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="settings-tile role-settings-tile" id="role-layout-tile">
                                 <div class="setting-item">
                                     <label for="swap-columns">Поменять колонки местами</label>
                                     <input type="checkbox" id="swap-columns">
                                 </div>
                             </div>
-                            <div class="settings-tile role-settings-tile" id="role-scale-tile">
-                                <div class="setting-item" id="role-column-scale-wrapper">
-                                    <label for="role-column-scale">Масштаб колонки</label>
+                            <div class="settings-tile role-settings-tile settings-tile-slider" id="role-scale-tile">
+                                <label class="settings-tile-title" for="role-column-scale">Масштаб колонки</label>
+                                <div class="settings-slider-row" id="role-column-scale-wrapper">
                                     <input type="range" id="role-column-scale" class="frzz-slider" min="50" max="200" step="25">
-                                    <span id="role-column-scale-value">100%</span>
+                                    <span id="role-column-scale-value" class="settings-slider-value">100%</span>
                                 </div>
                             </div>
                         </div>

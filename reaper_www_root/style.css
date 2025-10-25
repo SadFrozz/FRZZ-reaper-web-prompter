@@ -10,6 +10,7 @@ body {
     padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
     overflow: hidden;
+    --filter-dim-opacity: 0.4;
 }
 body.title-hidden h1 { display: none; }
 .container { font-size: 0.75em; }
@@ -168,6 +169,12 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
 .subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; }
+.subtitle-container.filter-active { transition: background-color 0.3s, color 0.3s, opacity 0.3s ease; }
+.subtitle-container.filter-hidden { display: none !important; }
+.subtitle-container.filter-dimmed { opacity: var(--filter-dim-opacity, 0.4); }
+.subtitle-container.filter-dimmed.current-line,
+.subtitle-container.filter-dimmed.pause-highlight,
+.subtitle-container.filter-dimmed.previous-line { opacity: 1; }
 .subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.3em 0.4em 0.65em; order: 0; display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
 .subtitle-time-label { flex: 1 1 auto; text-align: left; white-space: nowrap; }
 .subtitle-time-progress { position: absolute; left: 0.4em; right: 0.4em; bottom: 0.22em; height: 0.22rem; background-color: #ffc107; border-radius: 0.1875rem; transform-origin: left; transform: scaleX(0); transition: transform 0.1s linear, opacity 0.15s ease-in-out; opacity: 0; pointer-events: none; }
@@ -728,6 +735,14 @@ input[type="checkbox"]:active::after {
 .settings-slider-row .frzz-slider {
     width: 100%;
     margin: 0;
+}
+.filter-dim-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+.filter-dim-controls.is-hidden {
+    display: none;
 }
 .settings-slider-value {
     min-width: 3.5ch;
