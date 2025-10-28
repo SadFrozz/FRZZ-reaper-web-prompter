@@ -511,12 +511,42 @@
                 <fieldset>
                     <legend>Цвета актёров</legend>
                     <div id="actor-color-list" class="actor-color-list"></div>
+                    <details id="role-filter-section" class="role-filter-section">
+                        <summary class="role-filter-summary">
+                            <span class="role-filter-summary-leading-icon" aria-hidden="true">
+                                <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor">
+                                    <use href="icons.svg#icon-filter" xlink:href="icons.svg#icon-filter"></use>
+                                </svg>
+                            </span>
+                            <span class="role-filter-summary-label">Фильтрация по ролям<span id="role-filter-count" class="role-filter-count"></span></span>
+                            <span class="role-filter-summary-toggle" aria-hidden="true">
+                                <svg class="role-filter-summary-toggle-icon role-filter-toggle-expand" viewBox="0 0 24 24" fill="currentColor">
+                                    <use href="icons.svg#icon-chevron-down" xlink:href="icons.svg#icon-chevron-down"></use>
+                                </svg>
+                                <svg class="role-filter-summary-toggle-icon role-filter-toggle-collapse" viewBox="0 0 24 24" fill="currentColor">
+                                    <use href="icons.svg#icon-chevron-up" xlink:href="icons.svg#icon-chevron-up"></use>
+                                </svg>
+                            </span>
+                        </summary>
+                        <div class="role-filter-chips-wrapper">
+                            <div id="role-filter-chips" class="role-filter-chips" aria-live="polite"></div>
+                            <button type="button" id="role-filter-reset-button" class="role-filter-reset" hidden>
+                                <span class="role-filter-reset-icon" aria-hidden="true">
+                                    <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor">
+                                        <use href="icons.svg#icon-role-reset" xlink:href="icons.svg#icon-role-reset"></use>
+                                    </svg>
+                                </span>
+                                <span class="role-filter-reset-label">Сбросить роли</span>
+                            </button>
+                        </div>
+                    </details>
                 </fieldset>
                 <fieldset>
                     <legend>Роли без актёра</legend>
                     <div id="unassigned-roles-list" class="unassigned-roles-list" aria-live="polite"></div>
                 </fieldset>
                 <div class="modal-footer-buttons">
+                    <button id="reset-actor-filters-button" class="button-danger">Сбросить фильтрацию</button>
                     <button id="save-actors-button">Сохранить раскраску</button>
                 </div>
             </div>

@@ -1306,10 +1306,12 @@ $(document).ready(function() {
 
     const FILTER_BEHAVIOR_HIDE = 'hide';
     const FILTER_BEHAVIOR_DIM = 'dim';
+    const defaultDimOpacity = computeFilterDimOpacity(defaultSettings.filterDimPercent);
     const filterRuntime = {
         behavior: defaultSettings.filterHiddenBehavior,
         dimPercent: defaultSettings.filterDimPercent,
-        dimOpacity: computeFilterDimOpacity(defaultSettings.filterDimPercent),
+        dimOpacity: defaultDimOpacity,
+        dimOverlayAlpha: Number((1 - defaultDimOpacity).toFixed(3)),
         soloRoles: new Set(),
         muteRoles: new Set(),
         soloActors: new Set(),
@@ -5523,6 +5525,7 @@ $(document).ready(function() {
                 if (wrapperNode && window.__vwinWheelHandler) { wrapperNode.removeEventListener('wheel', window.__vwinWheelHandler); window.__vwinWheelHandler = null; }
                 if (wrapperNode && window.__vwinTouchHandler) { wrapperNode.removeEventListener('touchmove', window.__vwinTouchHandler); window.__vwinTouchHandler = null; }
             } catch(_){}
+            renderRoleFilterChips();
             updateFilterRuntimeFromSettings();
             recomputeFilteringState({ reason: 'data_load', force: true });
             updateTeleprompter(latestTimecode);
@@ -5888,16 +5891,20 @@ $(document).ready(function() {
             filterRuntime.behavior = behavior;
             filterRuntime.dimPercent = dimPercent;
             filterRuntime.dimOpacity = computeFilterDimOpacity(dimPercent);
+            const overlayAlpha = Math.max(0, Math.min(0.95, 1 - filterRuntime.dimOpacity));
+            filterRuntime.dimOverlayAlpha = Number(overlayAlpha.toFixed(3));
 
             const soloRoles = normalizeFilterList(settings.filterSoloRoles);
             const muteRoles = normalizeFilterList(settings.filterMuteRoles);
             const soloActors = normalizeFilterList(settings.filterSoloActors);
             const muteActors = normalizeFilterList(settings.filterMuteActors);
-            settings.filterSoloRoles = soloRoles;
+            const mutedRolesFromActors = collectRolesForActors(new Set(muteActors));
+            const filteredSoloRoles = soloRoles.filter(role => !mutedRolesFromActors.has(role));
+            settings.filterSoloRoles = filteredSoloRoles;
             settings.filterMuteRoles = muteRoles;
             settings.filterSoloActors = soloActors;
             settings.filterMuteActors = muteActors;
-            filterRuntime.soloRoles = new Set(soloRoles);
+            filterRuntime.soloRoles = new Set(filteredSoloRoles);
             filterRuntime.muteRoles = new Set(muteRoles);
             filterRuntime.soloActors = new Set(soloActors);
             filterRuntime.muteActors = new Set(muteActors);
@@ -5906,6 +5913,7 @@ $(document).ready(function() {
             if (typeof document !== 'undefined' && document.body) {
                 document.body.setAttribute('data-filter-hidden-behavior', behavior);
                 document.body.style.setProperty('--filter-dim-opacity', String(filterRuntime.dimOpacity));
+                document.body.style.setProperty('--filter-dim-overlay-alpha', String(filterRuntime.dimOverlayAlpha));
             }
         } catch (err) {
             console.error('[Prompter][filters] runtime update failed', err);
@@ -5918,20 +5926,23 @@ $(document).ready(function() {
         const role = meta.roleId || '';
         const hasSoloActor = filterRuntime.soloActors.size > 0;
         const hasSoloRole = filterRuntime.soloRoles.size > 0;
-        if (hasSoloActor) {
-            if (actor && filterRuntime.soloActors.has(actor)) {
+        const actorSoloMatch = hasSoloActor && actor && filterRuntime.soloActors.has(actor);
+        const roleSoloMatch = hasSoloRole && role && filterRuntime.soloRoles.has(role);
+        const soloModeActive = hasSoloActor || hasSoloRole;
+        if (soloModeActive) {
+            if (actorSoloMatch || roleSoloMatch) {
                 return { filtered: false, reason: null };
             }
-            return { filtered: true, reason: 'actor_solo_exclusive' };
+            let reason = 'role_solo_exclusive';
+            if (hasSoloActor && !hasSoloRole) {
+                reason = 'actor_solo_exclusive';
+            } else if (hasSoloActor && hasSoloRole) {
+                reason = 'actor_role_solo_exclusive';
+            }
+            return { filtered: true, reason };
         }
         if (actor && filterRuntime.muteActors.has(actor)) {
             return { filtered: true, reason: 'actor_muted' };
-        }
-        if (hasSoloRole) {
-            if (role && filterRuntime.soloRoles.has(role)) {
-                return { filtered: false, reason: null };
-            }
-            return { filtered: true, reason: 'role_solo_exclusive' };
         }
         if (role && filterRuntime.muteRoles.has(role)) {
             return { filtered: true, reason: 'role_muted' };
@@ -6029,6 +6040,307 @@ $(document).ready(function() {
         }
     }
 
+    function getMutedActorsSet() {
+        const source = Array.isArray(settings.filterMuteActors) ? settings.filterMuteActors : [];
+        const normalized = source.filter(Boolean);
+        return new Set(normalized);
+    }
+
+    function getSoloActorsSet() {
+        const list = Array.isArray(settings.filterSoloActors) ? settings.filterSoloActors : [];
+        const filtered = list.filter(Boolean);
+        return new Set(filtered);
+    }
+
+    function getSoloRolesSet() {
+        const list = Array.isArray(settings.filterSoloRoles) ? settings.filterSoloRoles : [];
+        const filtered = list.filter(Boolean);
+        return new Set(filtered);
+    }
+
+    function collectRolesForActors(actorSet) {
+        const result = new Set();
+        if (!actorSet || typeof actorSet.forEach !== 'function') return result;
+        buildActorRoleMaps();
+        actorSet.forEach(actor => {
+            if (!actor) return;
+            const roles = actorToRoles[actor];
+            if (!roles || typeof roles.forEach !== 'function') return;
+            roles.forEach(role => {
+                if (role) result.add(role);
+            });
+        });
+        return result;
+    }
+
+    function refreshActorFilterControlsUI() {
+        const container = $('#actor-color-list');
+        if (!container.length) return;
+        const muteSet = getMutedActorsSet();
+        const soloSet = getSoloActorsSet();
+        const soloActive = soloSet.size > 0;
+        container.toggleClass('solo-mode-active', soloActive);
+        container.find('.actor-color-item').each(function(){
+            const row = $(this);
+            const actor = String(row.data('actor') || '');
+            const isMuted = muteSet.has(actor);
+            const isSolo = soloSet.has(actor);
+            row.attr('data-muted', isMuted ? 'true' : 'false');
+            row.attr('data-solo', isSolo ? 'true' : 'false');
+            row.toggleClass('is-muted', isMuted && !isSolo);
+            row.toggleClass('is-solo-active', isSolo);
+            row.toggleClass('is-solo-dimmed', soloActive && !isSolo);
+            const muteBtn = row.find('.actor-filter-btn[data-action="mute"]');
+            const soloBtn = row.find('.actor-filter-btn[data-action="solo"]');
+            muteBtn.attr('aria-pressed', isMuted ? 'true' : 'false');
+            soloBtn.attr('aria-pressed', isSolo ? 'true' : 'false');
+        });
+    }
+
+    function buildRoleSyncStateFromActors() {
+        buildActorRoleMaps();
+        const roleState = new Map();
+        const soloActors = getSoloActorsSet();
+        const muteActors = getMutedActorsSet();
+        Object.keys(actorToRoles).forEach(actor => {
+            const roles = actorToRoles[actor];
+            if (!roles || typeof roles.forEach !== 'function') return;
+            roles.forEach(role => {
+                if (!role) return;
+                let entry = roleState.get(role);
+                if (!entry) {
+                    entry = { actorSolo: false, actorMuted: false };
+                    roleState.set(role, entry);
+                }
+                if (soloActors.has(actor)) entry.actorSolo = true;
+                if (muteActors.has(actor)) entry.actorMuted = true;
+            });
+        });
+        return roleState;
+    }
+
+    function collectAvailableRolesForFilter() {
+        buildActorRoleMaps();
+        const roleSet = new Set();
+        Object.keys(actorToRoles).forEach(actor => {
+            const roles = actorToRoles[actor];
+            if (!roles || typeof roles.forEach !== 'function') return;
+            roles.forEach(role => { if (role) roleSet.add(role); });
+        });
+        const unassigned = computeUnassignedRoles();
+        if (Array.isArray(unassigned)) {
+            unassigned.forEach(role => { if (role) roleSet.add(role); });
+        }
+        return Array.from(roleSet).sort((a, b) => a.localeCompare(b, 'ru'));
+    }
+
+    function refreshRoleFilterControlsUI() {
+        const manualSoloSet = getSoloRolesSet();
+        const derivedState = buildRoleSyncStateFromActors();
+        const effectiveSoloSet = new Set();
+        manualSoloSet.forEach(role => {
+            const derived = derivedState.get(role);
+            if (!derived || derived.actorMuted !== true) {
+                effectiveSoloSet.add(role);
+            }
+        });
+        derivedState.forEach((state, role) => {
+            if (state.actorSolo && !state.actorMuted) effectiveSoloSet.add(role);
+        });
+
+        const effectiveSoloCount = effectiveSoloSet.size;
+        const countEl = $('#role-filter-count');
+        if (countEl.length) {
+            const countVisible = effectiveSoloCount > 0;
+            countEl.text(countVisible ? `(${effectiveSoloCount})` : '');
+            countEl.toggleClass('is-visible', countVisible);
+        }
+        const labelEl = $('.role-filter-summary-label');
+        if (labelEl.length) {
+            labelEl.toggleClass('has-selection', effectiveSoloCount > 0);
+        }
+        const chips = $('#role-filter-chips');
+        let manualNonDerivedExists = false;
+        if (chips.length) {
+            chips.toggleClass('has-selection', effectiveSoloCount > 0);
+            chips.find('.role-filter-chip').each(function(){
+                const chip = $(this);
+                const role = String(chip.data('role') || '');
+                const derived = derivedState.get(role) || { actorSolo: false, actorMuted: false };
+                const manualActive = manualSoloSet.has(role);
+                const isDisabled = derived.actorMuted === true;
+                const actorProvidesSolo = derived.actorSolo && !derived.actorMuted;
+                const isActive = !isDisabled && (manualActive || actorProvidesSolo);
+                chip.prop('disabled', isDisabled);
+                if (isDisabled) {
+                    chip.attr('aria-disabled', 'true');
+                } else {
+                    chip.removeAttr('aria-disabled');
+                }
+                chip.toggleClass('is-active', isActive);
+                chip.toggleClass('is-muted', derived.actorMuted && !actorProvidesSolo);
+                chip.toggleClass('is-disabled', isDisabled);
+                chip.attr('aria-pressed', isActive ? 'true' : 'false');
+                chip.attr('data-actor-solo', derived.actorSolo ? 'true' : 'false');
+                chip.attr('data-actor-muted', derived.actorMuted ? 'true' : 'false');
+                if (!manualNonDerivedExists && manualActive && !derived.actorSolo && !isDisabled) {
+                    manualNonDerivedExists = true;
+                }
+            });
+        }
+        if (!manualNonDerivedExists) {
+            manualSoloSet.forEach(role => {
+                if (manualNonDerivedExists) return;
+                const derived = derivedState.get(role);
+                if (!derived || !derived.actorSolo) {
+                    manualNonDerivedExists = true;
+                }
+            });
+        }
+        const resetButton = $('#role-filter-reset-button');
+        if (resetButton.length) {
+            const showButton = manualNonDerivedExists;
+            resetButton.prop('hidden', !showButton);
+            resetButton.prop('disabled', !showButton);
+            if (showButton) {
+                resetButton.removeAttr('aria-hidden');
+            } else {
+                resetButton.attr('aria-hidden', 'true');
+            }
+        }
+    }
+
+    function renderRoleFilterChips() {
+        const chips = $('#role-filter-chips');
+        if (!chips.length) return;
+        const roles = collectAvailableRolesForFilter();
+        chips.empty();
+        if (!roles.length) {
+            chips.append('<span class="role-filter-empty">Роли не обнаружены</span>');
+            refreshRoleFilterControlsUI();
+            return;
+        }
+        const soloSet = getSoloRolesSet();
+        roles.forEach(role => {
+            const chip = $('<button type="button" class="role-filter-chip" aria-pressed="false"></button>');
+            chip.attr('data-role', role);
+            chip.attr('aria-label', `Роль ${role}`);
+            chip.text(role);
+            if (soloSet.has(role)) {
+                chip.addClass('is-active');
+                chip.attr('aria-pressed', 'true');
+            }
+            chips.append(chip);
+        });
+        refreshRoleFilterControlsUI();
+    }
+
+    function syncActorFilterSettings(options = {}) {
+        try {
+            updateFilterRuntimeFromSettings();
+            recomputeFilteringState({ force: true });
+        } catch (err) {
+            console.error('[Prompter][filters] sync failed', err);
+        }
+        if (options.persistToLocalStorage !== false) {
+            try {
+                localStorage.setItem('teleprompterSettings', JSON.stringify(settings));
+            } catch (storageErr) {
+                console.debug('[Prompter][filters] localStorage persist skipped', storageErr);
+            }
+        }
+        if (options.persistBackend === true && !isEmuMode()) {
+            settings.dataModelVersion = DATA_MODEL_VERSION;
+            settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
+            persistSettingsToBackend(settings, { reason: options.reason || 'actor_filter_update' });
+        }
+        refreshRoleFilterControlsUI();
+        refreshActorFilterControlsUI();
+    }
+
+    function setActorMuteState(actor, shouldMute) {
+        if (!actor) return;
+        const muteSet = getMutedActorsSet();
+        if (shouldMute) {
+            muteSet.add(actor);
+        } else {
+            muteSet.delete(actor);
+        }
+        settings.filterMuteActors = Array.from(muteSet);
+        refreshActorFilterControlsUI();
+        refreshRoleFilterControlsUI();
+    }
+
+    function toggleActorMuteState(actor) {
+        if (!actor) return;
+        const muteSet = getMutedActorsSet();
+        const shouldMute = !muteSet.has(actor);
+        setActorMuteState(actor, shouldMute);
+        syncActorFilterSettings({ reason: 'actor_mute_toggle' });
+    }
+
+    function setSoloActorsSet(soloSet) {
+        settings.filterSoloActors = Array.from(soloSet);
+        refreshActorFilterControlsUI();
+    }
+
+    function removeSoloActor(actor) {
+        if (!actor) return;
+        const soloSet = getSoloActorsSet();
+        if (soloSet.delete(actor)) {
+            setSoloActorsSet(soloSet);
+        }
+    }
+
+    function toggleActorSoloState(actor) {
+        if (!actor) return;
+        const soloSet = getSoloActorsSet();
+        if (soloSet.has(actor)) {
+            soloSet.delete(actor);
+        } else {
+            soloSet.add(actor);
+        }
+        setSoloActorsSet(soloSet);
+        syncActorFilterSettings({ reason: 'actor_solo_toggle' });
+    }
+
+    function setSoloRolesSet(soloSet, options = {}) {
+        settings.filterSoloRoles = Array.from(soloSet);
+        if (options.skipRefresh !== true) {
+            refreshRoleFilterControlsUI();
+        }
+    }
+
+    function toggleRoleSoloState(role) {
+        if (!role) return;
+        const mutedRoles = collectRolesForActors(getMutedActorsSet());
+        if (mutedRoles.has(role)) return;
+        const soloSet = getSoloRolesSet();
+        if (soloSet.has(role)) {
+            soloSet.delete(role);
+        } else {
+            soloSet.add(role);
+        }
+        setSoloRolesSet(soloSet);
+        syncActorFilterSettings({ reason: 'role_filter_toggle' });
+    }
+
+    function clearManualRoleSoloFilters(options = {}) {
+        const hasManualRoles = Array.isArray(settings.filterSoloRoles) && settings.filterSoloRoles.length > 0;
+        if (!hasManualRoles) return false;
+        setSoloRolesSet(new Set());
+        syncActorFilterSettings({ reason: options.reason || 'role_filters_manual_reset' });
+        return true;
+    }
+
+    function resetActorFilters() {
+        settings.filterMuteActors = [];
+        settings.filterSoloActors = [];
+        settings.filterSoloRoles = [];
+        settings.filterMuteRoles = [];
+        syncActorFilterSettings({ reason: 'actor_filters_reset' });
+    }
+
     function regenerateActorColorListUI() {
         const container = $('#actor-color-list');
         if (!container.length) return;
@@ -6040,10 +6352,16 @@ $(document).ready(function() {
             const colorVal = (settings.actorColors && settings.actorColors[actor]) || 'rgba(60,60,60,0.6)';
             const row = $(`
                 <div class="actor-color-item" data-actor="${actor}">
-                    <div class="actor-color-item-label">${actor}</div>
+                    <div class="actor-color-item-label"><span class="actor-name">${actor}</span></div>
+                    <div class="actor-filter-controls" role="group" aria-label="Управление Solo/Mute">
+                        <button type="button" class="actor-filter-btn actor-filter-btn-mute" data-action="mute" aria-pressed="false" title="Mute актёра">M</button>
+                        <button type="button" class="actor-filter-btn actor-filter-btn-solo" data-action="solo" aria-pressed="false" title="Solo актёра">S</button>
+                    </div>
                     <div class="actor-color-item-roles">${roles}</div>
-                    <input type="text" class="actor-color-input" value="${colorVal}" />
-                    <button class="delete-actor-color" title="Удалить актёра">✕</button>
+                    <div class="actor-color-picker">
+                        <input type="text" class="actor-color-input" value="${colorVal}" />
+                    </div>
+                    <button type="button" class="delete-actor-color" title="Удалить актёра">✕</button>
                 </div>`);
             container.append(row);
         });
@@ -6055,7 +6373,9 @@ $(document).ready(function() {
                 change: function(color){ if(color){ $(this).val(color.toRgbString()); } }
             });
         });
+        refreshActorFilterControlsUI();
         updateUnassignedRolesUI();
+        renderRoleFilterChips();
         scheduleStatsButtonEvaluation();
         updateActorRoleWarningBanner();
     }
@@ -6140,7 +6460,6 @@ $(document).ready(function() {
             // Используем уже занятые цвета для смещения индекса
             let idx = 0;
             const usedActors = Object.keys(newColors);
-            // Берём стартовый индекс = числу уже известных актёров (стабильный порядок добавления)
             idx = usedActors.length;
             allActors.forEach(actor => {
                 if (!newColors[actor]) {
@@ -6151,8 +6470,25 @@ $(document).ready(function() {
             });
         } catch(err){ console.error('[Prompter][roles] auto-color generation failed', err); }
         settings.actorColors = newColors;
+
+        const muteActors = [];
+        const soloActors = [];
+        $('#actor-color-list .actor-color-item').each(function(){
+            const actor = $(this).data('actor');
+            if (!actor) return;
+            if ($(this).attr('data-muted') === 'true') {
+                muteActors.push(actor);
+            }
+            if ($(this).attr('data-solo') === 'true') {
+                soloActors.push(actor);
+            }
+        });
+        settings.filterMuteActors = muteActors;
+        settings.filterSoloActors = soloActors;
+
         rolesLoaded = Object.keys(newColors).length > 0 || (settings.actorRoleMappingText || '').trim().length > 0;
         saveRoles();
+        syncActorFilterSettings({ persistBackend: true, reason: 'actors_modal_save' });
         // Перепарсим и перерисуем текст если уже загружен
         if (subtitleData.length > 0) handleTextResponse(subtitleData);
         updateActorRoleWarningBanner();
@@ -6602,10 +6938,43 @@ $(document).ready(function() {
     $(document).on('keydown.rwv_stats_escape', function(e){
         if(e.key === 'Escape') { const m = $('#stats-modal:visible'); if(m.length) m.hide(); }
     });
+    $(document).on('click', '.actor-filter-btn', function(event){
+        event.preventDefault();
+        const action = $(this).data('action');
+        const actor = $(this).closest('.actor-color-item').data('actor');
+        if (!actor || typeof action !== 'string') return;
+        if (action === 'mute') {
+            toggleActorMuteState(actor);
+        } else if (action === 'solo') {
+            toggleActorSoloState(actor);
+        }
+    });
+    $(document).on('click', '.role-filter-chip', function(event){
+        event.preventDefault();
+        if ($(this).prop('disabled')) return;
+        const role = $(this).data('role');
+        if (!role) return;
+        toggleRoleSoloState(String(role));
+    });
+    $('#role-filter-reset-button').on('click', function(event){
+        event.preventDefault();
+        clearManualRoleSoloFilters({ source: 'button' });
+    });
     $(document).on('click', '.delete-actor-color', function(){
-        $(this).closest('.actor-color-item').remove();
+        const row = $(this).closest('.actor-color-item');
+        const actor = row.data('actor');
+        if (actor) {
+            setActorMuteState(actor, false);
+            removeSoloActor(actor);
+        }
+        row.remove();
+        syncActorFilterSettings({ reason: 'actor_row_deleted' });
     });
     $('#save-actors-button').on('click', function(){ saveActorsFromUI(); $('#actors-modal').hide(); });
+    $('#reset-actor-filters-button').on('click', function(event){
+        event.preventDefault();
+        resetActorFilters();
+    });
 
     // Live preview отключён: изменения применяются только по кнопке Сохранить / Сбросить.
     // Если нужно вернуть мгновенное применение, раскомментировать строку ниже.
@@ -6657,6 +7026,13 @@ $(document).ready(function() {
         filterHiddenBehaviorSelect.on('change', function() {
             const mode = $(this).val();
             updateFilterHiddenControlsVisibility(mode);
+            const sanitized = sanitizeFilterHiddenBehavior(mode, settings.filterHiddenBehavior || defaultSettings.filterHiddenBehavior);
+            if (sanitized !== settings.filterHiddenBehavior) {
+                settings.filterHiddenBehavior = sanitized;
+                updateFilterRuntimeFromSettings();
+                recomputeFilteringState({ force: true });
+                refreshActorFilterControlsUI();
+            }
             if (filterDimPercentSlider.length) {
                 let rangedValue = sanitizeFilterDimPercent(
                     filterDimPercentSlider.val(),
@@ -6721,6 +7097,11 @@ $(document).ready(function() {
             filterDimPercentSlider.val(dimValue);
             filterDimPercentValue.text(dimValue + '%');
             refreshFrzzSliderFill(filterDimPercentSlider);
+            if (dimValue !== settings.filterDimPercent) {
+                settings.filterDimPercent = dimValue;
+                updateFilterRuntimeFromSettings();
+                recomputeFilteringState({ force: true });
+            }
         });
     }
     if (autoScrollWindowTopInput.length && autoScrollWindowBottomInput.length) {

@@ -11,6 +11,7 @@ body {
     box-sizing: border-box;
     overflow: hidden;
     --filter-dim-opacity: 0.4;
+    --filter-dim-overlay-alpha: 0.6;
 }
 body.title-hidden h1 { display: none; }
 .container { font-size: 0.75em; }
@@ -168,13 +169,23 @@ body.progress-disabled #transport-progress-container { display: none !important;
 main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #1e1e1e; border-radius: 0.5rem; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.3); order: 0; }
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
-.subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; }
+.subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; position: relative; }
+.subtitle-container::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: rgba(0, 0, 0, var(--filter-dim-overlay-alpha, 0.6));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+    /* Overlay keeps dimming visible above highlight backgrounds */
+}
+.subtitle-container.filter-dimmed::after {
+    opacity: 1;
+}
 .subtitle-container.filter-active { transition: background-color 0.3s, color 0.3s, opacity 0.3s ease; }
 .subtitle-container.filter-hidden { display: none !important; }
-.subtitle-container.filter-dimmed { opacity: var(--filter-dim-opacity, 0.4); }
-.subtitle-container.filter-dimmed.current-line,
-.subtitle-container.filter-dimmed.pause-highlight,
-.subtitle-container.filter-dimmed.previous-line { opacity: 1; }
 .subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.3em 0.4em 0.65em; order: 0; display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
 .subtitle-time-label { flex: 1 1 auto; text-align: left; white-space: nowrap; }
 .subtitle-time-progress { position: absolute; left: 0.4em; right: 0.4em; bottom: 0.22em; height: 0.22rem; background-color: #ffc107; border-radius: 0.1875rem; transform-origin: left; transform: scaleX(0); transition: transform 0.1s linear, opacity 0.15s ease-in-out; opacity: 0; pointer-events: none; }
@@ -863,32 +874,108 @@ body[data-auto-scroll-mode="line"] #auto-scroll-dynamic-speed-tile {
 #actors-modal .modal-warning code { background: rgba(255, 193, 7, 0.12); color: #ffe082; padding: 0 0.35rem; border-radius: 0.25rem; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; font-size: 0.95em; }
 #save-settings-button { background-color: #007acc; color: white; }
 #save-settings-button:hover { background-color: #006bb3; }
-.button-danger { background-color: #5a5a5a; color: #eee; }
-.button-danger:hover { background-color: #dc3545; color: white; }
-.light-theme .button-danger { background-color: #dcdcdc; color: #333; }
-.light-theme .button-danger:hover { background-color: #dc3545; color: white; }
+.button-danger { background-color: #b02a37; color: #fff; }
+.button-danger:hover { background-color: #dc3545; color: #fff; }
+.light-theme .button-danger { background-color: #f7d7d9; color: #6b141d; }
+.light-theme .button-danger:hover { background-color: #dc3545; color: #fff; }
 
 /* ===== Actors coloring modal ===== */
 #actors-modal .modal-content { max-width: 50rem; }
 textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: vertical; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 0.5em; font-family: monospace; font-size: 0.9em; }
 .actor-color-list { display: flex; flex-direction: column; gap: 0.75rem; }
-.actor-color-item { display: flex; align-items: center; gap: 0.75rem; background: #2b2b2b; padding: 0.5rem 0.75rem; border-radius: 0.5rem; }
+.actor-color-item { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.2fr) auto auto; grid-template-rows: auto auto; grid-template-areas: "label roles picker delete" "filters roles picker delete"; gap: 0.4rem 0.75rem; background: #2b2b2b; padding: 0.75rem; border-radius: 0.5rem; transition: opacity 0.2s ease, box-shadow 0.2s ease; }
 .light-theme .actor-color-item { background: #ddd; }
-.actor-color-item-label { flex: 0 0 12rem; font-weight: 600; }
-.actor-color-item-roles { flex: 1; font-size: 0.8em; opacity: 0.8; }
-.actor-color-item .sp-replacer { margin-left: auto; }
+.actor-color-item-label { grid-area: label; font-weight: 600; display: flex; align-items: center; }
+.actor-filter-controls { grid-area: filters; display: flex; gap: 0.5rem; align-items: center; }
+.actor-color-item-roles { grid-area: roles; font-size: 0.82em; opacity: 0.8; align-self: start; }
+.actor-color-picker { grid-area: picker; display: flex; align-items: center; justify-self: end; }
+.actor-color-picker .actor-color-input { width: 8rem; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 0.5em; font-size: inherit; }
+.light-theme .actor-color-picker .actor-color-input { background-color: #e9e9e9; color: #111; border-color: #ccc; }
 .actor-color-item .sp-replacer { padding: 0; background: transparent; border: 0; display: flex; align-items: center; }
-.actor-color-item .sp-preview { width: 2.5rem; height: 2.5rem; border-radius: 4px; border: 1px solid #555; margin-right: 0.5rem; }
-.actor-color-item .sp-preview-inner, .actor-color-item .sp-alpha-inner { border-radius: 3px; }
-.actor-color-item input[type="text"] { width: 70px; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 0.5em; font-size: inherit; }
+.actor-color-picker .sp-replacer { margin-left: 0.5rem; }
+.actor-color-item .sp-preview { width: 2.5rem; height: 2.5rem; border-radius: 4px; border: 1px solid #555; margin-right: 0.4rem; }
 .light-theme .actor-color-item .sp-preview { border-color: #ccc; }
-.light-theme .actor-color-item input[type="text"] { background-color: #e9e9e9; color: #111; border-color: #ccc; }
-.actor-color-item input[type="text"] { width: 8rem; }
-.actor-color-item .delete-actor-color { background: #444; color: #eee; border: none; border-radius: 0.25rem; padding: 0.4em; cursor: pointer; }
+.actor-color-item .sp-preview-inner,
+.actor-color-item .sp-alpha-inner { border-radius: 3px; }
+.actor-color-item .delete-actor-color { grid-area: delete; background: #444; color: #eee; border: none; border-radius: 0.25rem; padding: 0.4em; cursor: pointer; align-self: center; display: flex; align-items: center; justify-content: center; }
 .actor-color-item .delete-actor-color:hover { background: #c0392b; }
 .light-theme .actor-color-item .delete-actor-color { background: #bbb; color: #222; }
 .light-theme .actor-color-item .delete-actor-color:hover { background: #e74c3c; color: #fff; }
+.actor-filter-btn { width: 2.1rem; height: 2.1rem; border-radius: 0.35rem; border: 1px solid #555; background: #3a3a3a; color: #c9c9c9; font-weight: 700; font-size: 0.95rem; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease; }
+.actor-filter-btn:hover { background: #4a4a4a; }
+.actor-filter-btn[aria-pressed="true"] { background: #242424; color: #f0f0f0; }
+.actor-filter-btn-mute[aria-pressed="true"] { color: #ff4d4f; border-color: #ff4d4f; }
+.actor-filter-btn-solo[aria-pressed="true"] { color: #ffd462; border-color: #ffd462; }
+.light-theme .actor-filter-btn { background: #efefef; color: #404040; border-color: #bdbdbd; }
+.light-theme .actor-filter-btn:hover { background: #dedede; }
+.light-theme .actor-filter-btn[aria-pressed="true"] { background: #f6f6d6; }
+.light-theme .actor-filter-btn-mute[aria-pressed="true"] { color: #d84040; border-color: #d84040; }
+.light-theme .actor-filter-btn-solo[aria-pressed="true"] { color: #d0a600; border-color: #d0a600; }
+.actor-color-item.is-muted .actor-color-item-label,
+.actor-color-item.is-muted .actor-color-item-roles,
+.actor-color-item.is-muted .actor-color-picker,
+.actor-color-item.is-muted .delete-actor-color { opacity: 0.4; }
+.actor-color-item.is-solo-dimmed .actor-color-item-label,
+.actor-color-item.is-solo-dimmed .actor-color-item-roles,
+.actor-color-item.is-solo-dimmed .actor-color-picker,
+.actor-color-item.is-solo-dimmed .delete-actor-color { opacity: 0.4; }
+.actor-color-list.solo-mode-active .actor-filter-btn { opacity: 0.35; }
+.actor-color-list.solo-mode-active .actor-filter-btn-solo[aria-pressed="true"] { opacity: 1; }
+.actor-color-item.is-solo-active { opacity: 1; box-shadow: 0 0 0 1px rgba(255, 212, 98, 0.35); }
+.light-theme .actor-color-item.is-solo-active { box-shadow: 0 0 0 1px rgba(208, 166, 0, 0.45); }
 .actor-color-item .color-preview-box { width: 2rem; height: 2rem; border-radius: 0.4rem; border: 1px solid #555; }
+@media (max-width: 720px) {
+    .actor-color-item { grid-template-columns: 1fr; grid-template-areas: "label" "filters" "roles" "picker" "delete"; justify-items: stretch; }
+    .actor-color-picker { justify-self: stretch; }
+    .actor-color-picker .actor-color-input { width: 100%; }
+    .actor-filter-controls { justify-content: flex-start; }
+}
+
+.role-filter-section { margin-top: 0.75rem; border: 1px solid #3a3a3a; border-radius: 0.5rem; background: #252525; overflow: hidden; transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+.role-filter-section[open] { box-shadow: 0 0 0 1px rgba(255, 212, 98, 0.08); }
+.role-filter-summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.55rem; padding: 0.6rem 0.75rem; font-weight: 600; color: #e0e0e0; }
+.role-filter-summary::-webkit-details-marker { display: none; }
+.role-filter-summary-leading-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.25rem; height: 1.25rem; color: #ffd462; }
+.role-filter-summary-leading-icon .icon-svg { width: 100%; height: 100%; }
+.role-filter-summary-label { display: inline-flex; align-items: center; gap: 0.3rem; font-weight: 600; }
+.role-filter-summary-label.has-selection { color: #ffd462; }
+.role-filter-count { display: none; font-size: 0.9em; color: inherit; }
+.role-filter-count.is-visible { display: inline; }
+.role-filter-summary-toggle { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; }
+.role-filter-summary-toggle-icon { width: 1.2rem; height: 1.2rem; display: none; color: #ffd462; }
+.role-filter-section[open] .role-filter-toggle-collapse { display: block; }
+.role-filter-section:not([open]) .role-filter-toggle-expand { display: block; }
+.role-filter-chips-wrapper { padding: 0.5rem 0.75rem 0.75rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.role-filter-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; flex: 1 1 auto; min-width: 0; }
+.role-filter-chip { background: #333; color: #ddd; border: 1px solid #4a4a4a; border-radius: 999px; padding: 0.35rem 0.8rem; cursor: pointer; font-size: 0.85rem; line-height: 1; transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; }
+.role-filter-chip:hover { background: #3f3f3f; }
+.role-filter-chip:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255, 212, 98, 0.35); }
+.role-filter-chip.is-active { background: rgba(255, 212, 98, 0.18); border-color: #ffd462; color: #ffd462; box-shadow: 0 0 0 1px rgba(255, 212, 98, 0.35); }
+.role-filter-chip.is-muted { opacity: 0.45; }
+.role-filter-chip.is-disabled,
+.role-filter-chip[disabled] { pointer-events: none; cursor: not-allowed; opacity: 0.3; background: #2a2a2a; color: #777; border-color: #3a3a3a; box-shadow: none; }
+.role-filter-empty { font-size: 0.85rem; color: #777; padding: 0.25rem 0; }
+.role-filter-reset { display: inline-flex; align-items: center; gap: 0.4rem; background: transparent; border: 1px solid #4a4a4a; border-radius: 999px; color: #ffd462; padding: 0.35rem 0.9rem; font-size: 0.85rem; line-height: 1; cursor: pointer; transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease; margin-left: auto; }
+.role-filter-reset-icon { display: inline-flex; align-items: center; justify-content: center; }
+.role-filter-reset-icon .icon-svg { width: 1rem; height: 1rem; }
+.role-filter-reset:hover { background: rgba(255, 212, 98, 0.08); }
+.role-filter-reset:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255, 212, 98, 0.35); }
+.role-filter-reset[hidden] { display: none !important; }
+.light-theme .role-filter-section { background: #f2f2f2; border-color: #cfcfcf; }
+.light-theme .role-filter-section[open] { box-shadow: 0 0 0 1px rgba(208, 166, 0, 0.12); }
+.light-theme .role-filter-summary { color: #333; }
+.light-theme .role-filter-summary-leading-icon { color: #d0a600; }
+.light-theme .role-filter-summary-label.has-selection { color: #d0a600; }
+.light-theme .role-filter-summary-toggle-icon { color: #d0a600; }
+.light-theme .role-filter-chip { background: #f7f7f7; color: #444; border-color: #c8c8c8; }
+.light-theme .role-filter-chip:hover { background: #ececec; }
+.light-theme .role-filter-chip.is-active { background: rgba(208, 166, 0, 0.18); border-color: #d0a600; color: #d0a600; box-shadow: 0 0 0 1px rgba(208, 166, 0, 0.3); }
+.light-theme .role-filter-chip.is-muted { opacity: 0.5; }
+.light-theme .role-filter-chip.is-disabled,
+.light-theme .role-filter-chip[disabled] { background: #e5e5e5; border-color: #cdcdcd; color: #9c9c9c; opacity: 0.35; }
+.light-theme .role-filter-empty { color: #777; }
+.light-theme .role-filter-reset { border-color: #d0a600; color: #a57700; }
+.light-theme .role-filter-reset:hover { background: rgba(208, 166, 0, 0.12); }
 
 /* Unassigned roles list */
 .unassigned-roles-list { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.25rem 0; }
