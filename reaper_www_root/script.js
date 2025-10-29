@@ -347,6 +347,8 @@ const defaultSettings = {
     highlightCurrentRoleEnabled: true,
     highlightCurrentRoleBg: 'rgba(80, 80, 0, 0.4)',
     highlightPauseBg: 'rgba(0, 80, 120, 0.3)',
+    highlightOverlapEnabled: false,
+    highlightOverlapColor: 'rgba(255, 112, 67, 0.75)',
     highlightClickEnabled: true,
     highlightClickBg: 'rgba(120, 0, 120, 0.4)',
     highlightClickDuration: 800,
@@ -386,6 +388,7 @@ const ACTOR_BASE_COLORS = [
 const SETTINGS_CHUNK_SIZE = 800;
 const ROLES_CHUNK_SIZE = 800;
 const MOBILE_UI_SCALE_MULTIPLIER = 0.75;
+const OVERLAP_EPSILON_MS = 1; // минимальная длительность для обнаружения пересечений
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
 const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
@@ -554,18 +557,8 @@ $(document).ready(function() {
     const textDisplayWrapper = $('#text-display-wrapper');
     const textDisplayEl = textDisplay[0] || null;
     const textDisplayWrapperEl = textDisplayWrapper[0] || null;
-    const sharedProgressContainer = document.createElement('div');
-    sharedProgressContainer.className = 'subtitle-progress-container';
-    const sharedProgressBar = document.createElement('div');
-    sharedProgressBar.className = 'subtitle-progress-bar';
-    sharedProgressContainer.appendChild(sharedProgressBar);
     const JUMP_REQUEST_DEBOUNCE_MS = 150;
-    let sharedProgressHost = null;
-    let sharedProgressIndex = -1;
-    let sharedProgressValue = 0;
     let transportProgressValue = 0;
-    let activeTimecodeProgressIndex = -1;
-    let timecodeProgressValue = 0;
     const statusIndicator = $('#status-indicator');
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
@@ -913,9 +906,11 @@ $(document).ready(function() {
     const highlightCurrentTile = $('#highlight-current-tile');
     const highlightPreviousTile = $('#highlight-previous-tile');
     const highlightProgressTile = $('#highlight-progress-tile');
+    const highlightOverlapTile = $('#highlight-overlap-tile');
     const highlightCurrentOptions = $('#highlight-current-options');
     const highlightPreviousOptions = $('#highlight-previous-options');
     const highlightProgressOptions = $('#highlight-progress-options');
+    const highlightOverlapOptions = $('#highlight-overlap-options');
     const highlightCurrentEnabledCheckbox = $('#highlight-current-enabled');
     const highlightPreviousEnabledCheckbox = $('#highlight-previous-enabled');
     const highlightPauseEnabledCheckbox = $('#highlight-pause-enabled');
@@ -927,6 +922,8 @@ $(document).ready(function() {
     const highlightClickEnabledCheckbox = $('#highlight-click-enabled');
     const highlightClickOptionsWrapper = $('#highlight-click-options-wrapper');
     const highlightRoleColorWrapper = $('#highlight-role-color-wrapper');
+    const highlightOverlapEnabledCheckbox = $('#highlight-overlap-enabled');
+    const highlightOverlapColorInput = $('#highlight-overlap-color');
     const roleFontColorEnabledCheckbox = $('#role-font-color-enabled');
     const jumpOnClickCheckbox = $('#jump-on-click-enabled');
     const jumpSettingsWrapper = $('#jump-settings-wrapper');
@@ -943,6 +940,16 @@ $(document).ready(function() {
     let subtitlePaintStates = [];
     let subtitleStyleMetadata = [];
     let subtitleFilterStates = [];
+    let subtitleOverlapIndicators = [];
+    let subtitleOverlapInfo = [];
+    let overlapGroups = [];
+    let subtitleProgressContainers = [];
+    let subtitleProgressBars = [];
+    let subtitleProgressValues = [];
+    let activeSubtitleProgressIndices = new Set();
+    let activeLineIndices = [];
+    let activeTimecodeProgressIndices = new Set();
+    let timecodeProgressValues = [];
     let paintGeneration = 0;
     let paintScheduled = false;
     let lastVisibleStart = 0;
@@ -993,16 +1000,30 @@ $(document).ready(function() {
         inPause,
         highlightPreviousEnabled,
         highlightPauseEnabled,
-        indexChanged
+        indexChanged,
+        activeIndices
     }) {
+        const simultaneousSet = Array.isArray(activeIndices) && activeIndices.length
+            ? new Set(activeIndices)
+            : null;
+        const shouldSkip = (idx) => !!(simultaneousSet && simultaneousSet.has(idx));
+
         if (!highlightPreviousEnabled) {
             clearPreviousLineHighlight();
             return;
         }
 
+        if (simultaneousSet && lastPreviousLineIndex !== -1 && shouldSkip(lastPreviousLineIndex)) {
+            removePreviousLineHighlightAt(lastPreviousLineIndex);
+        }
+
         if (highlightPauseEnabled) {
             if (inPause && newCurrentLineIndex !== -1) {
-                applyPreviousLineHighlight(newCurrentLineIndex);
+                if (shouldSkip(newCurrentLineIndex)) {
+                    removePreviousLineHighlightAt(newCurrentLineIndex);
+                } else {
+                    applyPreviousLineHighlight(newCurrentLineIndex);
+                }
             } else {
                 if (lastPreviousLineIndex !== -1) {
                     removePreviousLineHighlightAt(lastPreviousLineIndex);
@@ -1020,7 +1041,11 @@ $(document).ready(function() {
 
         if (newCurrentLineIndex === -1) {
             if (indexChanged && previousIndex !== -1) {
-                applyPreviousLineHighlight(previousIndex);
+                if (shouldSkip(previousIndex)) {
+                    removePreviousLineHighlightAt(previousIndex);
+                } else {
+                    applyPreviousLineHighlight(previousIndex);
+                }
             } else {
                 clearPreviousLineHighlight();
             }
@@ -1028,13 +1053,21 @@ $(document).ready(function() {
         }
 
         if (inPause) {
-            applyPreviousLineHighlight(newCurrentLineIndex);
+            if (shouldSkip(newCurrentLineIndex)) {
+                removePreviousLineHighlightAt(newCurrentLineIndex);
+            } else {
+                applyPreviousLineHighlight(newCurrentLineIndex);
+            }
             return;
         }
 
         const targetIndex = newCurrentLineIndex - 1;
         if (targetIndex >= 0) {
-            applyPreviousLineHighlight(targetIndex);
+            if (shouldSkip(targetIndex)) {
+                removePreviousLineHighlightAt(targetIndex);
+            } else {
+                applyPreviousLineHighlight(targetIndex);
+            }
         } else {
             clearPreviousLineHighlight();
         }
@@ -1070,6 +1103,10 @@ $(document).ready(function() {
     if (typeof window !== 'undefined') {
         window.PrompterEventBus = eventBus;
         window.PrompterDataModel = () => dataModel;
+        window.PrompterOverlapSummary = () => ({
+            info: subtitleOverlapInfo,
+            groups: overlapGroups
+        });
     }
     // Guards to avoid duplicate loads
     let subtitleLoadInFlight = false;
@@ -1404,6 +1441,77 @@ $(document).ready(function() {
             if (a !== 1) return { bg: `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`, text };
             return { bg: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`, text };
         } catch(e){ console.warn('lightenGeneric failed', e); return { bg: colorStr || '#666', text:'#000'}; }
+    }
+
+    function parseColorToRgba(colorStr) {
+        if (typeof colorStr !== 'string') return null;
+        const input = colorStr.trim();
+        if (!input) return null;
+        try {
+            if (input.startsWith('#')) {
+                let hex = input.slice(1);
+                if (hex.length === 3) {
+                    hex = hex.split('').map(c => c + c).join('');
+                }
+                if (hex.length === 6) {
+                    const r = parseInt(hex.slice(0, 2), 16);
+                    const g = parseInt(hex.slice(2, 4), 16);
+                    const b = parseInt(hex.slice(4, 6), 16);
+                    if ([r, g, b].some(v => Number.isNaN(v))) return null;
+                    return { r, g, b, a: 1 };
+                }
+                if (hex.length === 8) {
+                    const r = parseInt(hex.slice(0, 2), 16);
+                    const g = parseInt(hex.slice(2, 4), 16);
+                    const b = parseInt(hex.slice(4, 6), 16);
+                    const a = parseInt(hex.slice(6, 8), 16) / 255;
+                    if ([r, g, b, a].some(v => Number.isNaN(v))) return null;
+                    return { r, g, b, a };
+                }
+                return null;
+            }
+            if (/^rgba?/i.test(input)) {
+                const match = input.match(/rgba?\(([^)]+)\)/i);
+                if (!match) return null;
+                const parts = match[1].split(',').map(part => part.trim());
+                if (parts.length < 3) return null;
+                const r = clampNumber(parseFloat(parts[0]), 0, 255);
+                const g = clampNumber(parseFloat(parts[1]), 0, 255);
+                const b = clampNumber(parseFloat(parts[2]), 0, 255);
+                const a = parts.length >= 4 ? clampNumber(parseFloat(parts[3]), 0, 1) : 1;
+                if ([r, g, b].some(v => Number.isNaN(v))) return null;
+                return { r, g, b, a: Number.isNaN(a) ? 1 : a };
+            }
+        } catch (err) {
+            console.warn('[Prompter][color] parseColorToRgba failed', { colorStr, err });
+            return null;
+        }
+        return null;
+    }
+
+    function rgbaToCss(rgba) {
+        if (!rgba) return '';
+        const r = clampNumber(Math.round(Number.isFinite(rgba.r) ? rgba.r : 0), 0, 255);
+        const g = clampNumber(Math.round(Number.isFinite(rgba.g) ? rgba.g : 0), 0, 255);
+        const b = clampNumber(Math.round(Number.isFinite(rgba.b) ? rgba.b : 0), 0, 255);
+        const a = Number.isFinite(rgba.a) ? clampNumber(rgba.a, 0, 1) : 1;
+        return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
+    }
+
+    function deriveOverlapColorVariants(colorCandidate) {
+        const fallback = defaultSettings.highlightOverlapColor || 'rgba(255, 112, 67, 0.75)';
+        let parsed = parseColorToRgba(colorCandidate);
+        if (!parsed) {
+            parsed = parseColorToRgba(fallback);
+        }
+        if (!parsed) {
+            parsed = { r: 255, g: 112, b: 67, a: 0.75 };
+        }
+        const baseAlpha = Number.isFinite(parsed.a) ? clampNumber(parsed.a, 0, 1) : 1;
+        const source = rgbaToCss({ ...parsed, a: baseAlpha });
+        const outline = rgbaToCss({ ...parsed, a: clampNumber(baseAlpha * 0.55, 0.2, 1) });
+        const stripe = rgbaToCss({ ...parsed, a: clampNumber(baseAlpha * 0.9, 0.3, 1) });
+        return { source, outline, stripe };
     }
 
     function logReadyStage(stage) {
@@ -1959,6 +2067,352 @@ $(document).ready(function() {
         });
     }
 
+    function buildOverlapAnalysis(lines) {
+        const total = Array.isArray(lines) ? lines.length : 0;
+        if (!total) {
+            return {
+                lineInfo: [],
+                groups: [],
+                summary: {
+                    totalGroups: 0,
+                    totalLines: 0,
+                    affectedLines: 0,
+                    maxGroupSize: 0,
+                    maxOverlapDegree: 0,
+                    peakSimultaneous: 0,
+                    overlapPairs: 0,
+                    computeDurationMs: 0
+                }
+            };
+        }
+
+        const startStamp = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+        const adjacency = Array.from({ length: total }, () => new Set());
+        const startMs = new Array(total);
+        const endMs = new Array(total);
+        const active = [];
+        let peakSimultaneous = 0;
+
+        for (let i = 0; i < total; i++) {
+            const line = lines[i] || {};
+            const rawStart = Number(line.start_time);
+            const rawEnd = Number(line.end_time);
+            const sanitizedStart = Number.isFinite(rawStart) ? Math.max(0, Math.round(rawStart * 1000)) : Math.max(0, i * OVERLAP_EPSILON_MS);
+            let sanitizedEnd = Number.isFinite(rawEnd) ? Math.max(0, Math.round(rawEnd * 1000)) : sanitizedStart;
+            if (sanitizedEnd < sanitizedStart) {
+                sanitizedEnd = sanitizedStart;
+            }
+            if (sanitizedEnd - sanitizedStart < OVERLAP_EPSILON_MS) {
+                sanitizedEnd = sanitizedStart + OVERLAP_EPSILON_MS;
+            }
+            startMs[i] = sanitizedStart;
+            endMs[i] = sanitizedEnd;
+
+            for (let idx = active.length - 1; idx >= 0; idx -= 1) {
+                if (active[idx].endMs <= sanitizedStart + OVERLAP_EPSILON_MS) {
+                    active.splice(idx, 1);
+                }
+            }
+
+            for (let idx = 0; idx < active.length; idx += 1) {
+                const candidate = active[idx];
+                if (sanitizedStart < (candidate.endMs - OVERLAP_EPSILON_MS)
+                    && sanitizedEnd > (candidate.startMs + OVERLAP_EPSILON_MS)) {
+                    adjacency[i].add(candidate.index);
+                    adjacency[candidate.index].add(i);
+                }
+            }
+
+            let insertPos = active.length;
+            while (insertPos > 0 && active[insertPos - 1].endMs > sanitizedEnd) {
+                insertPos -= 1;
+            }
+            active.splice(insertPos, 0, { index: i, startMs: sanitizedStart, endMs: sanitizedEnd });
+            if (active.length > 1) {
+                peakSimultaneous = Math.max(peakSimultaneous, active.length);
+            }
+        }
+
+        const visited = new Array(total).fill(false);
+        const lineInfo = new Array(total).fill(null);
+        const groups = [];
+        let maxGroupSize = 0;
+        let maxOverlapDegree = 0;
+        let affectedLines = 0;
+        let overlapPairs = 0;
+
+        for (let i = 0; i < total; i += 1) {
+            const degree = adjacency[i].size;
+            if (degree > 0) {
+                affectedLines += 1;
+                overlapPairs += degree;
+                if (degree > maxOverlapDegree) {
+                    maxOverlapDegree = degree;
+                }
+            }
+            if (degree === 0 || visited[i]) {
+                continue;
+            }
+
+            const stack = [i];
+            const component = [];
+            let componentMinStart = startMs[i];
+            let componentMaxEnd = endMs[i];
+            let componentMaxDegree = degree;
+
+            while (stack.length) {
+                const idx = stack.pop();
+                if (visited[idx]) {
+                    continue;
+                }
+                visited[idx] = true;
+                component.push(idx);
+                const nodeDegree = adjacency[idx].size;
+                if (nodeDegree > componentMaxDegree) {
+                    componentMaxDegree = nodeDegree;
+                }
+                if (startMs[idx] < componentMinStart) {
+                    componentMinStart = startMs[idx];
+                }
+                if (endMs[idx] > componentMaxEnd) {
+                    componentMaxEnd = endMs[idx];
+                }
+                adjacency[idx].forEach(neighbor => {
+                    if (!visited[neighbor]) {
+                        stack.push(neighbor);
+                    }
+                });
+            }
+
+            if (!component.length) {
+                continue;
+            }
+
+            const sorted = component.slice().sort((a, b) => {
+                if (startMs[a] === startMs[b]) {
+                    return a - b;
+                }
+                return startMs[a] - startMs[b];
+            });
+
+            const groupId = groups.length;
+            const groupSize = sorted.length;
+            maxGroupSize = Math.max(maxGroupSize, groupSize);
+
+            sorted.forEach((idx, order) => {
+                const nodeDegree = adjacency[idx].size;
+                lineInfo[idx] = {
+                    groupId,
+                    groupSize,
+                    overlapCount: nodeDegree,
+                    startMs: startMs[idx],
+                    endMs: endMs[idx],
+                    minGroupStartMs: componentMinStart,
+                    maxGroupEndMs: componentMaxEnd,
+                    isStart: order === 0,
+                    isEnd: order === sorted.length - 1,
+                    order,
+                    maxDegreeInGroup: componentMaxDegree
+                };
+            });
+
+            groups.push({
+                id: groupId,
+                indices: sorted,
+                size: groupSize,
+                minStartMs: componentMinStart,
+                maxEndMs: componentMaxEnd,
+                maxDegree: componentMaxDegree
+            });
+        }
+
+        const computeDurationMs = Math.round(((typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()) - startStamp);
+
+        return {
+            lineInfo,
+            groups,
+            summary: {
+                totalGroups: groups.length,
+                totalLines: total,
+                affectedLines,
+                maxGroupSize,
+                maxOverlapDegree,
+                peakSimultaneous,
+                overlapPairs: Math.round(overlapPairs / 2),
+                computeDurationMs
+            }
+        };
+    }
+
+    function applyOverlapAnnotations(result) {
+        const displayNode = textDisplayEl || (textDisplay && textDisplay[0]) || null;
+        if (displayNode) {
+            const existingBlocks = displayNode.querySelectorAll('.overlap-block');
+            existingBlocks.forEach(block => {
+                if (!block || !block.parentNode) return;
+                while (block.firstChild) {
+                    block.parentNode.insertBefore(block.firstChild, block);
+                }
+                block.parentNode.removeChild(block);
+            });
+        }
+        const total = subtitleElements.length;
+        for (let i = 0; i < total; i += 1) {
+            const container = subtitleElements[i];
+            if (!container) continue;
+            container.classList.remove('overlap-active', 'overlap-start', 'overlap-end');
+            container.removeAttribute('data-overlap-size');
+            container.removeAttribute('data-overlap-count');
+            container.removeAttribute('data-overlap-window');
+            if (container.getAttribute && container.getAttribute('data-overlap-title') === '1') {
+                container.removeAttribute('title');
+                container.removeAttribute('data-overlap-title');
+            }
+            const indicator = subtitleOverlapIndicators[i];
+            if (indicator) {
+                indicator.classList.remove('is-visible');
+                indicator.removeAttribute('data-count');
+                indicator.removeAttribute('title');
+                indicator.textContent = '';
+            }
+        }
+
+        if (!result || !Array.isArray(result.lineInfo) || !result.lineInfo.length) {
+            return result ? result.summary : null;
+        }
+
+        const overlapVisualsEnabled = settings.highlightOverlapEnabled !== false;
+        if (!overlapVisualsEnabled) {
+            return result.summary;
+        }
+
+        const frameRate = getActiveFrameRate();
+        const groupMembers = new Map();
+
+        for (let i = 0; i < result.lineInfo.length; i += 1) {
+            const entry = result.lineInfo[i];
+            if (!entry) continue;
+            const container = subtitleElements[i];
+            if (!container) continue;
+
+            container.classList.add('overlap-active');
+            if (entry.isStart) {
+                container.classList.add('overlap-start');
+            }
+            if (entry.isEnd) {
+                container.classList.add('overlap-end');
+            }
+            container.dataset.overlapSize = String(entry.groupSize);
+            container.dataset.overlapCount = String(entry.overlapCount);
+            container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
+
+            const rangeStartSec = entry.minGroupStartMs / 1000;
+            const rangeEndSec = entry.maxGroupEndMs / 1000;
+            const tooltipBase = entry.groupSize > 2
+                ? `Пересечения: ${entry.groupSize} реплик`
+                : 'Пересечения: 2 реплики';
+            const startTimecode = formatTimecode(rangeStartSec, frameRate);
+            const endTimecode = formatTimecode(rangeEndSec, frameRate);
+            const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
+            const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
+            const tooltipLines = [
+                tooltipBase,
+                `Интервал: ${startTimecode} → ${endTimecode}`,
+                `Длительность: ${durationText}`
+            ];
+            if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
+                tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
+            }
+            if (entry.overlapCount > 0) {
+                tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
+            }
+            container.setAttribute('title', tooltipLines.join('\n'));
+            container.setAttribute('data-overlap-title', '1');
+            if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
+                const existing = groupMembers.get(entry.groupId) || [];
+                existing.push(i);
+                groupMembers.set(entry.groupId, existing);
+            }
+        }
+
+        if (displayNode && groupMembers.size) {
+            groupMembers.forEach((indices, groupId) => {
+                if (!Array.isArray(indices) || indices.length <= 1) {
+                    return;
+                }
+                const sorted = indices.slice().sort((a, b) => a - b);
+                const firstElement = subtitleElements[sorted[0]];
+                if (!firstElement || !firstElement.parentNode) {
+                    return;
+                }
+                const parent = firstElement.parentNode;
+                const block = document.createElement('div');
+                block.className = 'overlap-block';
+                block.dataset.groupId = String(groupId);
+                block.dataset.overlapSize = String(sorted.length);
+                parent.insertBefore(block, firstElement);
+                sorted.forEach(idx => {
+                    const el = subtitleElements[idx];
+                    if (!el) return;
+                    block.appendChild(el);
+                });
+            });
+        }
+
+        return result.summary;
+    }
+
+    function computeAndApplyOverlaps(options = {}) {
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            subtitleOverlapInfo = [];
+            overlapGroups = [];
+            const summaryPayload = applyOverlapAnnotations({ lineInfo: [], summary: {
+                totalGroups: 0,
+                totalLines: 0,
+                affectedLines: 0,
+                maxGroupSize: 0,
+                maxOverlapDegree: 0,
+                peakSimultaneous: 0,
+                overlapPairs: 0,
+                computeDurationMs: 0
+            } });
+            eventBus.emit('overlaps:update', {
+                totalGroups: 0,
+                totalLines: 0,
+                affectedLines: 0,
+                maxGroupSize: 0,
+                maxOverlapDegree: 0,
+                peakSimultaneous: 0,
+                overlapPairs: 0,
+                computeDurationMs: 0,
+                reason: options.reason || 'empty'
+            });
+            return summaryPayload;
+        }
+
+        const analysis = buildOverlapAnalysis(subtitleData);
+        subtitleOverlapInfo = analysis.lineInfo;
+        overlapGroups = analysis.groups;
+        const summary = applyOverlapAnnotations(analysis) || analysis.summary;
+        const payload = {
+            totalGroups: summary.totalGroups,
+            totalLines: summary.totalLines,
+            affectedLines: summary.affectedLines,
+            linesWithOverlap: summary.affectedLines,
+            maxGroupSize: summary.maxGroupSize,
+            maxOverlapDegree: summary.maxOverlapDegree,
+            peakSimultaneous: summary.peakSimultaneous,
+            overlapPairs: summary.overlapPairs,
+            computeDurationMs: summary.computeDurationMs,
+            reason: options.reason || 'compute'
+        };
+        eventBus.emit('overlaps:update', payload);
+        console.info('[Prompter][overlaps] analysis', payload);
+        return payload;
+    }
+
     function encodeEventPayload(payload) {
         if (!payload || typeof payload !== 'object') return '';
         return Object.keys(payload).map(key => `${encodeURIComponent(key)}=${encodeURIComponent(String(payload[key]))}`).join('&');
@@ -2231,7 +2685,6 @@ $(document).ready(function() {
         if (options.highlight !== false) {
             applyClickHighlight(element, options.highlightOptions || {});
         }
-        attachSharedProgressToIndex(targetIndex);
         paintLine(targetIndex, true);
         schedulePaintVisible();
     }
@@ -2375,7 +2828,7 @@ $(document).ready(function() {
                 return;
             }
             const emitted = requestJumpToLine(index, line.start_time);
-            focusLineElement(index, { element: container });
+            focusLineElement(index, { element: container, scroll: false });
             if (!emitted) {
                 console.debug('[Prompter][jump] request not emitted (backend unavailable or throttled)');
             }
@@ -2384,19 +2837,81 @@ $(document).ready(function() {
         }
     }
 
-    function detachSharedProgress() {
-        if (sharedProgressContainer.parentNode) {
-            if (sharedProgressContainer.parentNode.classList) {
-                sharedProgressContainer.parentNode.classList.remove('has-progress');
+    function resetSubtitleProgressAt(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleProgressContainers.length) {
+            return;
+        }
+        const container = subtitleProgressContainers[index];
+        const bar = subtitleProgressBars[index];
+        const contentEl = subtitleContentElements[index];
+        if (bar) {
+            bar.style.transform = 'scaleX(0)';
+        }
+        subtitleProgressValues[index] = 0;
+        if (contentEl && contentEl.classList) {
+            contentEl.classList.remove('has-progress');
+        }
+        if (container) {
+            const parent = container.parentNode;
+            if (parent && parent === contentEl) {
+                parent.removeChild(container);
+            } else if (parent) {
+                parent.removeChild(container);
             }
-            sharedProgressContainer.parentNode.removeChild(sharedProgressContainer);
         }
-        sharedProgressHost = null;
-        sharedProgressIndex = -1;
-        if (sharedProgressValue !== 0) {
-            sharedProgressBar.style.transform = 'scaleX(0)';
+        activeSubtitleProgressIndices.delete(index);
+    }
+
+    function clearSubtitleProgress(index) {
+        if (typeof index === 'number') {
+            resetSubtitleProgressAt(index);
+            return;
         }
-        sharedProgressValue = 0;
+        const indices = Array.from(activeSubtitleProgressIndices);
+        indices.forEach(resetSubtitleProgressAt);
+        activeSubtitleProgressIndices.clear();
+    }
+
+    function setSubtitleProgress(index, fraction) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleProgressContainers.length) {
+            return;
+        }
+        const container = subtitleProgressContainers[index];
+        const bar = subtitleProgressBars[index];
+        const contentEl = subtitleContentElements[index];
+        if (!container || !bar || !contentEl) {
+            return;
+        }
+        if (container.parentNode !== contentEl) {
+            contentEl.appendChild(container);
+        }
+        if (contentEl.classList) {
+            contentEl.classList.add('has-progress');
+        }
+        const clamped = Math.max(0, Math.min(1, Number(fraction) || 0));
+        const previous = typeof subtitleProgressValues[index] === 'number'
+            ? subtitleProgressValues[index]
+            : 0;
+        if (Math.abs(clamped - previous) > 0.001) {
+            bar.style.transform = `scaleX(${clamped})`;
+        }
+        subtitleProgressValues[index] = clamped;
+        activeSubtitleProgressIndices.add(index);
+    }
+
+    function computeLineProgressFraction(line, currentTime) {
+        if (!line) return 0;
+        const start = Number(line.start_time);
+        const end = Number(line.end_time);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) {
+            return 0;
+        }
+        const duration = end - start;
+        if (duration <= 0) {
+            return currentTime >= end ? 1 : 0;
+        }
+        const raw = (Number(currentTime) - start) / duration;
+        return Math.max(0, Math.min(1, raw));
     }
 
     function resetTransportProgress() {
@@ -2409,48 +2924,60 @@ $(document).ready(function() {
         }
     }
 
-    function clearTimecodeProgress() {
-        if (activeTimecodeProgressIndex === -1) {
-            timecodeProgressValue = 0;
+    function resetTimecodeProgressAt(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleTimeElements.length) {
             return;
         }
-        const wrapper = subtitleTimeElements[activeTimecodeProgressIndex] || null;
-        const progressEl = subtitleTimeProgressElements[activeTimecodeProgressIndex] || null;
+        const wrapper = subtitleTimeElements[index] || null;
+        const progressEl = subtitleTimeProgressElements[index] || null;
         if (wrapper && wrapper.classList) {
             wrapper.classList.remove('has-time-progress');
         }
         if (progressEl) {
             progressEl.style.transform = 'scaleX(0)';
         }
-        activeTimecodeProgressIndex = -1;
-        timecodeProgressValue = 0;
+        activeTimecodeProgressIndices.delete(index);
+        timecodeProgressValues[index] = 0;
+    }
+
+    function clearTimecodeProgress(index) {
+        if (typeof index === 'number') {
+            resetTimecodeProgressAt(index);
+            return;
+        }
+        const indices = Array.from(activeTimecodeProgressIndices);
+        indices.forEach(resetTimecodeProgressAt);
+        activeTimecodeProgressIndices.clear();
     }
 
     function setTimecodeProgress(index, fraction) {
         if (!Number.isInteger(index) || index < 0 || index >= subtitleTimeElements.length) {
-            clearTimecodeProgress();
             return;
         }
         const wrapper = subtitleTimeElements[index];
         const progressEl = subtitleTimeProgressElements[index];
         if (!wrapper || !progressEl) {
-            clearTimecodeProgress();
             return;
         }
-        if (activeTimecodeProgressIndex !== index) {
-            clearTimecodeProgress();
-            activeTimecodeProgressIndex = index;
-            timecodeProgressValue = -1;
+        if (!activeTimecodeProgressIndices.has(index)) {
+            activeTimecodeProgressIndices.add(index);
             if (wrapper.classList) {
                 wrapper.classList.add('has-time-progress');
             }
+            if (typeof timecodeProgressValues[index] !== 'number') {
+                timecodeProgressValues[index] = 0;
+            }
         }
         const clamped = Math.max(0, Math.min(1, Number(fraction) || 0));
-        if (Math.abs(clamped - timecodeProgressValue) < 0.001) {
+        const previous = typeof timecodeProgressValues[index] === 'number'
+            ? timecodeProgressValues[index]
+            : 0;
+        if (Math.abs(clamped - previous) < 0.001) {
+            timecodeProgressValues[index] = clamped;
             return;
         }
-        timecodeProgressValue = clamped;
         progressEl.style.transform = `scaleX(${clamped})`;
+        timecodeProgressValues[index] = clamped;
     }
 
     function setTransportProgress(fraction) {
@@ -2462,19 +2989,6 @@ $(document).ready(function() {
         if (transportProgressContainer && transportProgressContainer.length) {
             transportProgressContainer.toggleClass('is-active', clamped > 0);
         }
-    }
-
-    function attachSharedProgressToIndex(index) {
-        if (index < 0 || index >= subtitleContentElements.length) { detachSharedProgress(); return; }
-        const contentEl = subtitleContentElements[index];
-        if (!contentEl) { detachSharedProgress(); return; }
-        if (sharedProgressIndex === index && sharedProgressHost === contentEl) return;
-        detachSharedProgress();
-        contentEl.appendChild(sharedProgressContainer);
-        contentEl.classList.add('has-progress');
-        sharedProgressHost = contentEl;
-        sharedProgressIndex = index;
-        sharedProgressValue = -1;
     }
 
     function extractLeadingRole(rawText, trimInline) {
@@ -3140,7 +3654,8 @@ $(document).ready(function() {
             highlightPreviousEnabled: raw.highlightPreviousEnabled !== false,
             highlightPauseEnabled: raw.highlightPauseEnabled !== false,
             progressBarEnabled: raw.progressBarEnabled !== false,
-            progressBarMode: sanitizeProgressBarMode(raw.progressBarMode, defaultSettings.progressBarMode)
+            progressBarMode: sanitizeProgressBarMode(raw.progressBarMode, defaultSettings.progressBarMode),
+            highlightOverlapEnabled: raw.highlightOverlapEnabled !== false
         };
     }
 
@@ -3162,6 +3677,9 @@ $(document).ready(function() {
             }
             if (progressBarModeSelect.length) {
                 progressBarModeSelect.val(normalized.progressBarMode);
+            }
+            if (highlightOverlapEnabledCheckbox.length) {
+                highlightOverlapEnabledCheckbox.prop('checked', normalized.highlightOverlapEnabled);
             }
         }
 
@@ -3204,6 +3722,19 @@ $(document).ready(function() {
                 copyButton.prop('disabled', !normalized.progressBarEnabled);
             }
         }
+        if (highlightOverlapOptions && highlightOverlapOptions.length) {
+            highlightOverlapOptions.toggle(normalized.highlightOverlapEnabled);
+        }
+        if (highlightOverlapColorInput && highlightOverlapColorInput.length) {
+            highlightOverlapColorInput.prop('disabled', !normalized.highlightOverlapEnabled);
+            if (typeof highlightOverlapColorInput.data === 'function' && highlightOverlapColorInput.data('spectrum')) {
+                highlightOverlapColorInput.spectrum(normalized.highlightOverlapEnabled ? 'enable' : 'disable');
+            }
+            const copyButton = highlightOverlapColorInput.closest('.input-with-button').find('.copy-color-btn');
+            if (copyButton && copyButton.length) {
+                copyButton.prop('disabled', !normalized.highlightOverlapEnabled);
+            }
+        }
         if ((!normalized.highlightPreviousEnabled) || (normalized.highlightPauseEnabled && normalized.highlightCurrentEnabled)) {
             if (subtitleElements && subtitleElements.length) {
                 subtitleElements.forEach(el => {
@@ -3224,7 +3755,8 @@ $(document).ready(function() {
             highlightPreviousEnabled: !highlightPreviousEnabledCheckbox.length || highlightPreviousEnabledCheckbox.is(':checked'),
             highlightPauseEnabled: !highlightPauseEnabledCheckbox.length || highlightPauseEnabledCheckbox.is(':checked'),
             progressBarEnabled: !progressBarEnabledCheckbox.length || progressBarEnabledCheckbox.is(':checked'),
-            progressBarMode: progressBarModeSelect.length ? progressBarModeSelect.val() : defaultSettings.progressBarMode
+            progressBarMode: progressBarModeSelect.length ? progressBarModeSelect.val() : defaultSettings.progressBarMode,
+            highlightOverlapEnabled: !highlightOverlapEnabledCheckbox.length || highlightOverlapEnabledCheckbox.is(':checked')
         };
     }
 
@@ -3560,12 +4092,20 @@ $(document).ready(function() {
             tempSettings.progressBarEnabled = progressBarEnabled;
             settings.progressBarEnabled = progressBarEnabled;
 
+            const highlightOverlapEnabled = tempSettings.highlightOverlapEnabled !== false;
+            tempSettings.highlightOverlapEnabled = highlightOverlapEnabled;
+            settings.highlightOverlapEnabled = highlightOverlapEnabled;
+
             const sanitizedProgressBarMode = sanitizeProgressBarMode(
                 tempSettings.progressBarMode,
                 settings.progressBarMode || defaultSettings.progressBarMode
             );
             tempSettings.progressBarMode = sanitizedProgressBarMode;
             settings.progressBarMode = sanitizedProgressBarMode;
+
+            const overlapColorVariants = deriveOverlapColorVariants(tempSettings.highlightOverlapColor);
+            tempSettings.highlightOverlapColor = overlapColorVariants.source;
+            settings.highlightOverlapColor = overlapColorVariants.source;
 
             const highlightFeatureState = applyHighlightUIStateFromValues(tempSettings);
             const useSubtitleProgress = highlightFeatureState.progressBarEnabled && highlightFeatureState.progressBarMode === 'subtitle';
@@ -3594,6 +4134,7 @@ $(document).ready(function() {
             $('body').toggleClass('transport-timecode-hidden', !transportTimecodeVisible);
             $('body').toggleClass('progress-disabled', !highlightFeatureState.progressBarEnabled);
             $('body').toggleClass('progress-mode-timecode', useTimecodeProgress);
+            $('body').toggleClass('overlap-highlight-disabled', !highlightOverlapEnabled);
             updateAutoScrollWindowTrackGradient(
                 tempSettings.autoScrollWindowTopPercent ?? sanitizedWindowTop,
                 tempSettings.autoScrollWindowBottomPercent ?? sanitizedWindowBottom
@@ -3629,7 +4170,7 @@ $(document).ready(function() {
             updateFilterHiddenControlsVisibility(sanitizedFilterBehavior);
 
             if (!useSubtitleProgress) {
-                detachSharedProgress();
+                clearSubtitleProgress();
             }
             resetTransportProgress();
             clearTimecodeProgress();
@@ -3707,6 +4248,18 @@ $(document).ready(function() {
             styleText += generateHighlightRules('previous-line', tempSettings.highlightPauseBg, false, null);
             styleText += generateHighlightRules('click-highlight', tempSettings.highlightClickBg, tempSettings.highlightCurrentRoleEnabled, tempSettings.highlightCurrentRoleBg);
             styleText += `.subtitle-progress-bar, .subtitle-time-progress { background-color: ${tempSettings.progressBarColor}; }`;
+            const overlapOutlineColor = highlightOverlapEnabled ? overlapColorVariants.outline : 'transparent';
+            const overlapStripeColor = highlightOverlapEnabled ? overlapColorVariants.stripe : 'transparent';
+            const overlapStripeOpacity = highlightOverlapEnabled ? '1' : '0';
+            let overlapFillColor = highlightOverlapEnabled ? 'rgba(255, 112, 67, 0.08)' : 'transparent';
+            if (highlightOverlapEnabled) {
+                const parsedSource = parseColorToRgba(overlapColorVariants.source);
+                if (parsedSource) {
+                    const fillAlpha = clampNumber((Number.isFinite(parsedSource.a) ? parsedSource.a : 1) * 0.18, 0.04, 0.35);
+                    overlapFillColor = rgbaToCss({ ...parsedSource, a: fillAlpha });
+                }
+            }
+            styleText += `:root { --frzz-overlap-outline: ${overlapOutlineColor}; --frzz-overlap-fill: ${overlapFillColor}; --frzz-overlap-stripe: ${overlapStripeColor}; --frzz-overlap-stripe-opacity: ${overlapStripeOpacity}; }`;
             
             settingsStyle.text(styleText);
             if (transportProgressBarEl) {
@@ -3722,6 +4275,9 @@ $(document).ready(function() {
                 updateTeleprompter(lastPlaybackTimeSeconds);
             }
             invalidateAllLinePaint({ schedule: true });
+            if (Array.isArray(subtitleData) && subtitleData.length) {
+                computeAndApplyOverlaps({ reason: 'settings_update' });
+            }
             console.debug('[Prompter][applySettings] done');
             updateJumpControlsState(tempSettings.jumpOnClickEnabled);
         } catch (e) { console.error("Error in applySettings:", e); }
@@ -5329,8 +5885,7 @@ $(document).ready(function() {
             currentLineIndex = -1;
             if (textDisplayEl) { textDisplayEl.textContent = ''; }
             else { textDisplay.empty(); }
-            detachSharedProgress();
-            sharedProgressBar.style.transform = 'scaleX(0)';
+            clearSubtitleProgress();
             clearTimecodeProgress();
             disconnectVisibilityObserver();
             resetVisibilityTracking();
@@ -5344,13 +5899,31 @@ $(document).ready(function() {
             subtitlePaintStates = new Array(total);
             subtitleStyleMetadata = new Array(total);
             subtitleFilterStates = new Array(total);
+            subtitleOverlapIndicators = new Array(total);
+            subtitleOverlapInfo = new Array(total);
+            overlapGroups = [];
+            subtitleProgressContainers = new Array(total);
+            subtitleProgressBars = new Array(total);
+            subtitleProgressValues = new Array(total).fill(0);
+            activeSubtitleProgressIndices = new Set();
+            activeLineIndices = [];
+            activeTimecodeProgressIndices = new Set();
+            timecodeProgressValues = new Array(total).fill(0);
             if (total === 0) {
                 subtitleTimeElements = [];
                 subtitleTimeLabelElements = [];
                 subtitleTimeProgressElements = [];
                 subtitleFilterStates = [];
+                subtitleOverlapIndicators = [];
+                subtitleOverlapInfo = [];
+                overlapGroups = [];
+                subtitleProgressContainers = [];
+                subtitleProgressBars = [];
+                subtitleProgressValues = [];
+                timecodeProgressValues = [];
                 invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
                 finalizeDataModelUpdate();
+                computeAndApplyOverlaps({ reason: 'data_empty' });
                 return;
             }
             // After loading subtitles we may need to refresh stats button visibility
@@ -5495,15 +6068,21 @@ $(document).ready(function() {
                 const timeLabelElement = document.createElement('span');
                 timeLabelElement.className = 'subtitle-time-label';
                 timeLabelElement.textContent = timeString;
+                const overlapIndicator = document.createElement('span');
+                overlapIndicator.className = 'overlap-indicator';
+                overlapIndicator.setAttribute('aria-hidden', 'true');
+                overlapIndicator.textContent = '';
                 const timeProgressElement = document.createElement('span');
                 timeProgressElement.className = 'subtitle-time-progress';
                 timeProgressElement.setAttribute('aria-hidden', 'true');
                 timeProgressElement.style.transform = 'scaleX(0)';
                 timeElement.appendChild(timeLabelElement);
+                timeElement.appendChild(overlapIndicator);
                 timeElement.appendChild(timeProgressElement);
                 subtitleTimeElements[index] = timeElement;
                 subtitleTimeLabelElements[index] = timeLabelElement;
                 subtitleTimeProgressElements[index] = timeProgressElement;
+                subtitleOverlapIndicators[index] = overlapIndicator;
 
                 let checkerboardClass = '';
                 if (checkerboardEnabled) {
@@ -5660,6 +6239,16 @@ $(document).ready(function() {
                 }
 
                 bodyElement.appendChild(textElement);
+                const progressContainer = document.createElement('div');
+                progressContainer.className = 'subtitle-progress-container';
+                progressContainer.setAttribute('aria-hidden', 'true');
+                const progressBar = document.createElement('div');
+                progressBar.className = 'subtitle-progress-bar';
+                progressBar.style.transform = 'scaleX(0)';
+                progressContainer.appendChild(progressBar);
+                subtitleProgressContainers[index] = progressContainer;
+                subtitleProgressBars[index] = progressBar;
+                subtitleProgressValues[index] = 0;
                 container.appendChild(contentElement);
                 fragment.appendChild(container);
             }
@@ -5671,6 +6260,7 @@ $(document).ready(function() {
             setupVisibilityObserver();
             invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
             schedulePaintVisible();
+            computeAndApplyOverlaps({ reason: 'data_load' });
             const t1 = performance.now();
             const renderMs = t1 - t0;
             const renderSeconds = renderMs / 1000;
@@ -6746,6 +7336,171 @@ $(document).ready(function() {
         const fallbackLine = subtitleData[fallbackIdx];
         return { index: fallbackIdx, inPause: currentTime >= fallbackLine.end_time };
     }
+
+    function resolveActiveLineIndices(currentTime, primaryIndex) {
+        if (!Array.isArray(subtitleData) || subtitleData.length === 0) {
+            return [];
+        }
+        if (!Number.isFinite(currentTime)) {
+            return [];
+        }
+        const total = subtitleData.length;
+        const resultSet = new Set();
+
+        const addIfActive = (index) => {
+            if (!Number.isInteger(index) || index < 0 || index >= total || resultSet.has(index)) {
+                return;
+            }
+            const line = subtitleData[index];
+            if (!line) {
+                return;
+            }
+            const start = Number(line.start_time);
+            const end = Number(line.end_time);
+            if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                return;
+            }
+            if (currentTime >= start && currentTime < end) {
+                resultSet.add(index);
+            }
+        };
+
+        if (Number.isInteger(primaryIndex) && primaryIndex >= 0) {
+            addIfActive(primaryIndex);
+            const overlapEntry = subtitleOverlapInfo && subtitleOverlapInfo[primaryIndex];
+            if (overlapEntry && typeof overlapEntry.groupId === 'number' && overlapGroups && overlapGroups[overlapEntry.groupId]) {
+                const group = overlapGroups[overlapEntry.groupId];
+                if (group && Array.isArray(group.indices)) {
+                    for (let i = 0; i < group.indices.length; i += 1) {
+                        addIfActive(group.indices[i]);
+                    }
+                }
+            } else {
+                let left = primaryIndex - 1;
+                while (left >= 0) {
+                    const line = subtitleData[left];
+                    if (!line) {
+                        left -= 1;
+                        continue;
+                    }
+                    const start = Number(line.start_time);
+                    const end = Number(line.end_time);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                        left -= 1;
+                        continue;
+                    }
+                    if (currentTime >= start && currentTime < end) {
+                        addIfActive(left);
+                        left -= 1;
+                        continue;
+                    }
+                    if (currentTime >= end) {
+                        break;
+                    }
+                    left -= 1;
+                }
+                let right = primaryIndex + 1;
+                while (right < total) {
+                    const line = subtitleData[right];
+                    if (!line) {
+                        right += 1;
+                        continue;
+                    }
+                    const start = Number(line.start_time);
+                    const end = Number(line.end_time);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                        right += 1;
+                        continue;
+                    }
+                    if (currentTime >= start && currentTime < end) {
+                        addIfActive(right);
+                        right += 1;
+                        continue;
+                    }
+                    if (currentTime < start) {
+                        break;
+                    }
+                    right += 1;
+                }
+            }
+        } else {
+            let lo = 0;
+            let hi = total - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                const line = subtitleData[mid];
+                if (!line) {
+                    break;
+                }
+                const start = Number(line.start_time);
+                const end = Number(line.end_time);
+                if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                    break;
+                }
+                if (currentTime < start) {
+                    hi = mid - 1;
+                    continue;
+                }
+                if (currentTime >= end) {
+                    lo = mid + 1;
+                    continue;
+                }
+                addIfActive(mid);
+                let left = mid - 1;
+                while (left >= 0) {
+                    const prevLine = subtitleData[left];
+                    if (!prevLine) {
+                        left -= 1;
+                        continue;
+                    }
+                    const prevStart = Number(prevLine.start_time);
+                    const prevEnd = Number(prevLine.end_time);
+                    if (!Number.isFinite(prevStart) || !Number.isFinite(prevEnd)) {
+                        left -= 1;
+                        continue;
+                    }
+                    if (currentTime >= prevStart && currentTime < prevEnd) {
+                        addIfActive(left);
+                        left -= 1;
+                        continue;
+                    }
+                    if (currentTime >= prevEnd) {
+                        break;
+                    }
+                    left -= 1;
+                }
+                let right = mid + 1;
+                while (right < total) {
+                    const nextLine = subtitleData[right];
+                    if (!nextLine) {
+                        right += 1;
+                        continue;
+                    }
+                    const nextStart = Number(nextLine.start_time);
+                    const nextEnd = Number(nextLine.end_time);
+                    if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd)) {
+                        right += 1;
+                        continue;
+                    }
+                    if (currentTime >= nextStart && currentTime < nextEnd) {
+                        addIfActive(right);
+                        right += 1;
+                        continue;
+                    }
+                    if (currentTime < nextStart) {
+                        break;
+                    }
+                    right += 1;
+                }
+                break;
+            }
+        }
+
+        if (!resultSet.size) {
+            return [];
+        }
+        return Array.from(resultSet).sort((a, b) => a - b);
+    }
     
     function updateTeleprompter(currentTime) {
         try {
@@ -6767,7 +7522,6 @@ $(document).ready(function() {
             const oldCurrentIndex = currentLineIndex;
             const indexChanged = newCurrentLineIndex !== oldCurrentIndex;
             const autoScrollEnabled = !!settings.autoScroll;
-            const activeAutoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
             let autoScrollPlan;
             let autoScrollPlanComputed = false;
             let autoScrollPlanWasUndefined = false;
@@ -6782,35 +7536,57 @@ $(document).ready(function() {
                 }
             }
 
-            if (indexChanged && oldCurrentIndex !== -1) {
-                const previousElement = subtitleElements[oldCurrentIndex];
-                if (previousElement) {
-                    previousElement.classList.remove('current-line');
-                    previousElement.classList.remove('pause-highlight');
-                    previousElement.classList.remove('previous-line');
+            const activeIndices = resolveActiveLineIndices(currentTime, newCurrentLineIndex);
+            const activeSet = new Set(activeIndices);
+            const previousActiveIndices = Array.isArray(activeLineIndices) ? activeLineIndices : [];
+
+            previousActiveIndices.forEach(idx => {
+                if (!activeSet.has(idx)) {
+                    const element = subtitleElements[idx];
+                    if (element) {
+                        element.classList.remove('current-line');
+                        element.classList.remove('pause-highlight');
+                    }
                 }
-            }
+            });
+
+            activeIndices.forEach(idx => {
+                const element = subtitleElements[idx];
+                if (!element) return;
+                const line = subtitleData[idx];
+                const start = Number(line && line.start_time);
+                const end = Number(line && line.end_time);
+                const isActive = Number.isFinite(start) && Number.isFinite(end) && currentTime >= start && currentTime < end;
+                if (element.classList) {
+                    element.classList.toggle('current-line', highlightCurrentEnabled && isActive);
+                    element.classList.remove('pause-highlight');
+                    element.classList.remove('previous-line');
+                }
+            });
+
+            activeLineIndices = activeIndices;
 
             if (newCurrentLineIndex !== -1) {
-                const newElement = subtitleElements[newCurrentLineIndex];
-                if (newElement) {
-                    // Always strip current-related classes first.
-                    newElement.classList.remove('current-line');
-                    if (!highlightPauseEnabled || !inPause || !highlightPreviousEnabled) {
-                        newElement.classList.remove('pause-highlight');
-                    }
-                    if (!inPause || !highlightPreviousEnabled) {
-                        newElement.classList.remove('previous-line');
-                    }
-
-                    if (!inPause) {
-                        if (highlightCurrentEnabled) {
-                            newElement.classList.add('current-line');
+                const primaryElement = subtitleElements[newCurrentLineIndex];
+                if (primaryElement && primaryElement.classList) {
+                    if (inPause) {
+                        if (highlightPauseEnabled && !highlightPreviousEnabled) {
+                            primaryElement.classList.add('pause-highlight');
+                        } else {
+                            primaryElement.classList.remove('pause-highlight');
                         }
-                    } else if (highlightPauseEnabled) {
+                        primaryElement.classList.remove('current-line');
                         if (!highlightPreviousEnabled) {
-                            newElement.classList.add('pause-highlight');
+                            primaryElement.classList.remove('previous-line');
                         }
+                    } else if (!activeSet.has(newCurrentLineIndex)) {
+                        primaryElement.classList.remove('current-line');
+                        if (!highlightPauseEnabled) {
+                            primaryElement.classList.remove('pause-highlight');
+                        }
+                    }
+                    if (!highlightCurrentEnabled) {
+                        primaryElement.classList.remove('current-line');
                     }
                 }
             }
@@ -6821,29 +7597,19 @@ $(document).ready(function() {
                 inPause,
                 highlightPreviousEnabled,
                 highlightPauseEnabled,
-                indexChanged
+                indexChanged,
+                activeIndices
             });
 
             if (indexChanged) {
-                if (useSubtitleProgress && newCurrentLineIndex !== -1) {
-                    attachSharedProgressToIndex(newCurrentLineIndex);
-                } else {
-                    detachSharedProgress();
-                }
                 resetTransportProgress();
-                clearTimecodeProgress();
                 const previousIndex = oldCurrentIndex;
                 currentLineIndex = newCurrentLineIndex;
-                // Limit expensive painting to lines that are currently visible.
-                // Off-screen lines are left dirty and will be painted by the
-                // IntersectionObserver / paintVisibleRange pipeline when they
-                // enter the viewport. This prevents forced reflows in rAF.
                 try {
                     if (previousIndex !== -1) {
                         if (visibleIndices.has(previousIndex)) {
                             paintLine(previousIndex, true);
                         } else if (subtitlePaintStates && previousIndex < subtitlePaintStates.length) {
-                            // mark as dirty so it will be painted when visible
                             subtitlePaintStates[previousIndex] = -1;
                         }
                     }
@@ -6851,7 +7617,6 @@ $(document).ready(function() {
                         if (visibleIndices.has(currentLineIndex)) {
                             paintLine(currentLineIndex, true);
                         } else if (subtitlePaintStates && currentLineIndex < subtitlePaintStates.length) {
-                            // ensure it will be painted later by the visibility pipeline
                             subtitlePaintStates[currentLineIndex] = -1;
                         }
                     }
@@ -6869,14 +7634,8 @@ $(document).ready(function() {
                 }
                 resetSubtReaderInertiaState();
             } else {
-                if (!useSubtitleProgress && sharedProgressIndex !== -1) {
-                    detachSharedProgress();
-                }
                 if (!useTimecodeProgress && transportProgressValue !== 0) {
                     resetTransportProgress();
-                }
-                if (!useTimecodeProgress) {
-                    clearTimecodeProgress();
                 }
                 if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime)) {
                     applySubtReaderInertia(currentLineIndex, currentTime);
@@ -6885,44 +7644,54 @@ $(document).ready(function() {
                 }
             }
 
-            if (currentLineIndex !== -1) {
-                const activeElement = subtitleElements[currentLineIndex];
-                if (activeElement) {
-                    if (useSubtitleProgress) {
-                        if (sharedProgressIndex !== currentLineIndex) {
-                            attachSharedProgressToIndex(currentLineIndex);
-                        }
-                    }
-                    if (!inPause) {
-                        const currentSub = subtitleData[currentLineIndex];
-                        const lineDuration = currentSub.end_time - currentSub.start_time;
-                        const rawFraction = lineDuration > 0 ? ((currentTime - currentSub.start_time) / lineDuration) : 0;
-                        const clampedFraction = Math.max(0, Math.min(1, rawFraction));
-                        if (useSubtitleProgress && Math.abs(clampedFraction - sharedProgressValue) > 0.001) {
-                            sharedProgressValue = clampedFraction;
-                            sharedProgressBar.style.transform = `scaleX(${clampedFraction})`;
-                        }
-                        if (useTimecodeProgress) {
-                            setTimecodeProgress(currentLineIndex, clampedFraction);
-                        }
-                    } else {
-                        if (useSubtitleProgress && sharedProgressValue !== 0) {
-                            sharedProgressValue = 0;
-                            sharedProgressBar.style.transform = 'scaleX(0)';
-                        }
-                        if (useTimecodeProgress) {
-                            setTimecodeProgress(currentLineIndex, 0);
-                        }
-                    }
+            const nextProgressSet = new Set();
+            if (useSubtitleProgress) {
+                activeIndices.forEach(idx => nextProgressSet.add(idx));
+                if (inPause && newCurrentLineIndex !== -1) {
+                    nextProgressSet.add(newCurrentLineIndex);
                 }
-            } else {
-                if (sharedProgressIndex !== -1) {
-                    detachSharedProgress();
+            }
+            const prevProgressSet = new Set(activeSubtitleProgressIndices);
+            prevProgressSet.forEach(idx => {
+                if (!nextProgressSet.has(idx)) {
+                    resetSubtitleProgressAt(idx);
                 }
-                if (useTimecodeProgress && transportProgressValue !== 0) {
-                    resetTransportProgress();
+            });
+            if (useSubtitleProgress) {
+                nextProgressSet.forEach(idx => {
+                    const line = subtitleData[idx];
+                    const fraction = activeSet.has(idx) ? computeLineProgressFraction(line, currentTime) : 0;
+                    setSubtitleProgress(idx, fraction);
+                });
+            } else if (prevProgressSet.size) {
+                clearSubtitleProgress();
+            }
+
+            const nextTimeSet = new Set();
+            if (useTimecodeProgress) {
+                activeIndices.forEach(idx => nextTimeSet.add(idx));
+                if (inPause && newCurrentLineIndex !== -1) {
+                    nextTimeSet.add(newCurrentLineIndex);
                 }
+            }
+            const prevTimeSet = new Set(activeTimecodeProgressIndices);
+            prevTimeSet.forEach(idx => {
+                if (!nextTimeSet.has(idx)) {
+                    clearTimecodeProgress(idx);
+                }
+            });
+            if (useTimecodeProgress) {
+                nextTimeSet.forEach(idx => {
+                    const line = subtitleData[idx];
+                    const fraction = activeSet.has(idx) ? computeLineProgressFraction(line, currentTime) : 0;
+                    setTimecodeProgress(idx, fraction);
+                });
+            } else if (prevTimeSet.size) {
                 clearTimecodeProgress();
+            }
+
+            if (!useTimecodeProgress && transportProgressValue !== 0) {
+                resetTransportProgress();
             }
         } catch (e) { console.error("Error in updateTeleprompter:", e); }
     }
@@ -7218,7 +7987,7 @@ $(document).ready(function() {
     const syncHighlightFeatureState = () => {
         applyHighlightUIStateFromValues(getHighlightFeatureValuesFromUI(), { syncControls: false });
     };
-    [highlightCurrentEnabledCheckbox, highlightPreviousEnabledCheckbox, highlightPauseEnabledCheckbox, progressBarEnabledCheckbox].forEach($el => {
+    [highlightCurrentEnabledCheckbox, highlightPreviousEnabledCheckbox, highlightPauseEnabledCheckbox, progressBarEnabledCheckbox, highlightOverlapEnabledCheckbox].forEach($el => {
         if ($el && $el.length) {
             $el.on('change', syncHighlightFeatureState);
         }
