@@ -361,6 +361,7 @@ const defaultSettings = {
     dataModelVersion: 2,
     timecodeDisplayFormat: 'auto'
 };
+const FILTER_STATE_KEYS = ['filterSoloRoles', 'filterMuteRoles', 'filterSoloActors', 'filterMuteActors'];
 let settings = {};
 let currentProjectName = '';
 let animationFrameId = null;
@@ -384,6 +385,7 @@ const ACTOR_BASE_COLORS = [
 // Conservative chunk size for Web Remote extstate path (shorter to avoid transport truncation)
 const SETTINGS_CHUNK_SIZE = 800;
 const ROLES_CHUNK_SIZE = 800;
+const MOBILE_UI_SCALE_MULTIPLIER = 0.75;
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
 const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
@@ -463,12 +465,8 @@ async function fetchProjectDataChunks() {
 function parseProjectDataStatus(raw) {
     const result = {
         raw: typeof raw === 'string' ? raw : '',
-        normalized: 'unknown',
-        state: typeof raw === 'string' ? raw : '',
-        timestamp: null,
-        detail: ''
+        normalized: 'unknown'
     };
-
     if (typeof raw !== 'string') {
         return result;
     }
@@ -1051,6 +1049,9 @@ $(document).ready(function() {
     // When roles.json is successfully loaded, prefer actor colors over per-line color entirely
     let rolesLoaded = false;
     let rolesSaveInFlight = false;
+    const ROLES_AUTOSAVE_DEBOUNCE_MS = 500;
+    let rolesAutosaveTimer = null;
+    let rolesAutosaveReason = '';
     let rolesSaveStartedAt = 0;
     let rolesStatusPollTimer = null;
     let rolesStatusFallbackTimer = null;
@@ -1319,6 +1320,25 @@ $(document).ready(function() {
         hasFilters: false
     };
     let filtersApplied = false;
+
+    const coarsePointerDetected = (() => {
+        try {
+            return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+        } catch (err) {
+            return false;
+        }
+    })();
+    const mobileUserAgentDetected = (() => {
+        if (typeof navigator === 'undefined' || !navigator.userAgent) {
+            return false;
+        }
+        const ua = navigator.userAgent;
+        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+    })();
+    const isLikelyMobileDevice = coarsePointerDetected || mobileUserAgentDetected;
+    if (typeof document !== 'undefined' && document.body) {
+        document.body.setAttribute('data-device-profile', isLikelyMobileDevice ? 'mobile' : 'desktop');
+    }
 
     // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
     // Simple debounce helper
@@ -3633,12 +3653,16 @@ $(document).ready(function() {
                 lastPreviousLineIndex = -1;
             }
 
-            // Apply UI scale: baseline 100 => 100% root. Additional 0.75 scaling will be applied via CSS on main container.
+            // Apply UI scale: baseline 100 => 100% root. Mobile devices receive a multiplier for visual parity.
             let rawScale = tempSettings.uiScale || 100;
             rawScale = Math.min(300, Math.max(50, rawScale));
             rawScale = Math.round((rawScale - 50)/25)*25 + 50; if(rawScale>300) rawScale=300;
             const percent = rawScale; // direct mapping
-            $('html').css('font-size', percent + '%').removeClass('ui-scale-clamped');
+            let effectivePercent = percent;
+            if (isLikelyMobileDevice) {
+                effectivePercent = Math.max(50, Math.round(percent * MOBILE_UI_SCALE_MULTIPLIER));
+            }
+            $('html').css('font-size', effectivePercent + '%').removeClass('ui-scale-clamped');
             
             let settingsStyle = $('#dynamic-settings-styles');
             if (settingsStyle.length === 0) { settingsStyle = $('<style id="dynamic-settings-styles"></style>').appendTo('head'); }
@@ -3849,7 +3873,13 @@ $(document).ready(function() {
         delete settingsForFile.actorRoleMappingText;
         delete settingsForFile.actorColors;
         delete settingsForFile.settingsMigratedFrom;
-        const settingsString = JSON.stringify(settingsForFile, null, 2);
+        FILTER_STATE_KEYS.forEach(key => { delete settingsForFile[key]; });
+        const settingsSnapshot = JSON.parse(JSON.stringify(settingsForFile));
+        const settingsPayload = {};
+        if (Object.keys(settingsSnapshot).length > 0) {
+            settingsPayload.settingsData = [settingsSnapshot];
+        }
+        const settingsString = JSON.stringify(settingsPayload, null, 2);
         const b64url = '__B64__' + encodeStringToBase64Url(settingsString);
         const encodedChunks = chunkString(b64url, SETTINGS_CHUNK_SIZE);
         wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/settings_total_encoded_len/${b64url.length}`);
@@ -3881,11 +3911,11 @@ $(document).ready(function() {
         }
         // Attempt to read settings.json from REAPER resource web root.
         // Rule: if file exists -> use it (ignore localStorage). If not -> defaults (optionally merge any localStorage overrides later if desired).
-        let fileSettings = null;
+        let fileSettingsPayload = null;
         try {
             const resp = await fetch('settings.json?_ts=' + Date.now(), { cache: 'no-store' });
             if (resp.ok) {
-                fileSettings = await resp.json();
+                fileSettingsPayload = await resp.json();
                 console.debug('[Prompter][loadSettings] Loaded settings.json');
             } else {
                 console.debug('[Prompter][loadSettings] settings.json not found (status', resp.status, ') using defaults');
@@ -3894,8 +3924,18 @@ $(document).ready(function() {
             console.debug('[Prompter][loadSettings] settings.json fetch error, using defaults:', fetchErr);
         }
         try {
-            if (fileSettings) {
-                settings = { ...defaultSettings, ...fileSettings };
+            const extractedSettings = (() => {
+                if (!fileSettingsPayload || typeof fileSettingsPayload !== 'object') {
+                    return null;
+                }
+                if (Array.isArray(fileSettingsPayload.settingsData) || Array.isArray(fileSettingsPayload.projectData) || Array.isArray(fileSettingsPayload.templatesData)) {
+                    return mergeDataArray(fileSettingsPayload.settingsData);
+                }
+                return { ...fileSettingsPayload };
+            })();
+            const fileContainsFilterState = FILTER_STATE_KEYS.some(key => extractedSettings && Object.prototype.hasOwnProperty.call(extractedSettings, key));
+            if (extractedSettings) {
+                settings = { ...defaultSettings, ...extractedSettings };
             } else {
                 settings = { ...defaultSettings };
             }
@@ -3933,11 +3973,14 @@ $(document).ready(function() {
                 console.debug('[Prompter][loadSettings] localStorage persist failed', storageErr);
             }
 
-            if (fileSettings && migrationMeta.changed) {
-                persistSettingsToBackend(settings, { reason: 'migration', deferMs: 200 });
-                console.info('[Prompter][loadSettings] migrated legacy settings', {
+            if (fileSettingsPayload && (migrationMeta.changed || fileContainsFilterState)) {
+                const persistReason = migrationMeta.changed ? 'migration' : 'filter_state_relocation';
+                persistSettingsToBackend(settings, { reason: persistReason, deferMs: 200 });
+                console.info('[Prompter][loadSettings] persisted settings cleanup', {
+                    reason: persistReason,
                     fromSchema: migrationMeta.migratedFrom,
-                    legacySchema: migrationMeta.legacySchema
+                    legacySchema: migrationMeta.legacySchema,
+                    filterStateRemoved: fileContainsFilterState
                 });
                 delete settings.settingsMigratedFrom;
             }
@@ -4109,6 +4152,30 @@ $(document).ready(function() {
     }
     function chunkString(str,size){ const out=[]; for(let i=0;i<str.length;i+=size) out.push(str.substring(i,i+size)); return out; }
 
+    function mergeDataArray(entries) {
+        const merged = {};
+        if (!entries) {
+            return merged;
+        }
+        if (Array.isArray(entries)) {
+            entries.forEach(entry => {
+                if (!entry || typeof entry !== 'object') {
+                    return;
+                }
+                Object.keys(entry).forEach(key => {
+                    merged[key] = entry[key];
+                });
+            });
+            return merged;
+        }
+        if (typeof entries === 'object') {
+            Object.keys(entries).forEach(key => {
+                merged[key] = entries[key];
+            });
+        }
+        return merged;
+    }
+
     function scheduleExtStateRequests(requests, spacingMs = 35){
         if (!Array.isArray(requests) || requests.length === 0) return 0;
         const interval = Math.max(0, spacingMs | 0);
@@ -4122,6 +4189,7 @@ $(document).ready(function() {
         return interval * Math.max(0, requests.length - 1);
     }
     function invalidateRolesCache(reason = 'manual') {
+        cancelScheduledRolesAutosave();
         rolesLoaded = false;
         console.debug('[Prompter][roles] cache invalidated', { reason });
         settings.actorRoleMappingText = '';
@@ -4178,16 +4246,57 @@ $(document).ready(function() {
         return info;
     }
 
-    function saveRoles(){
+    function cancelScheduledRolesAutosave() {
+        if (rolesAutosaveTimer !== null) {
+            clearTimeout(rolesAutosaveTimer);
+            rolesAutosaveTimer = null;
+            rolesAutosaveReason = '';
+        }
+    }
+
+    function scheduleRolesAutosave(reason = 'filters_updated', delayMs = ROLES_AUTOSAVE_DEBOUNCE_MS) {
+        if (isEmuMode()) {
+            return;
+        }
+        const timeout = Number.isFinite(delayMs) ? Math.max(120, delayMs) : ROLES_AUTOSAVE_DEBOUNCE_MS;
+        cancelScheduledRolesAutosave();
+        rolesAutosaveReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'filters_updated';
+        rolesAutosaveTimer = setTimeout(() => {
+            const triggerReason = rolesAutosaveReason;
+            rolesAutosaveTimer = null;
+            rolesAutosaveReason = '';
+            saveRoles(triggerReason);
+        }, timeout);
+    }
+
+    function saveRoles(reason){
+        cancelScheduledRolesAutosave();
         try {
-            const rolesPayload = {
+            const filterSoloRoles = normalizeFilterList(settings.filterSoloRoles);
+            const filterMuteRoles = normalizeFilterList(settings.filterMuteRoles);
+            const filterSoloActors = normalizeFilterList(settings.filterSoloActors);
+            const filterMuteActors = normalizeFilterList(settings.filterMuteActors);
+            const filtersSnapshot = {};
+            if (filterSoloRoles.length) filtersSnapshot.soloRoles = filterSoloRoles;
+            if (filterMuteRoles.length) filtersSnapshot.muteRoles = filterMuteRoles;
+            if (filterSoloActors.length) filtersSnapshot.soloActors = filterSoloActors;
+            if (filterMuteActors.length) filtersSnapshot.muteActors = filterMuteActors;
+
+            const projectSnapshot = {
                 actorRoleMappingText: settings.actorRoleMappingText || '',
                 actorColors: settings.actorColors || {}
+            };
+            if (Object.keys(filtersSnapshot).length > 0) {
+                projectSnapshot.filters = filtersSnapshot;
+            }
+
+            const rolesPayload = {
+                projectData: [projectSnapshot]
             };
             const jsonPretty = JSON.stringify(rolesPayload, null, 2);
             const b64url = '__B64__' + rolesToBase64Url(jsonPretty);
             const parts = chunkString(b64url, ROLES_CHUNK_SIZE);
-            console.debug('[Prompter][roles][saveRoles] encoded', { encoded_len: b64url.length, decoded_len: jsonPretty.length, chunks: parts.length });
+            console.debug('[Prompter][roles][saveRoles] encoded', { encoded_len: b64url.length, decoded_len: jsonPretty.length, chunks: parts.length, reason: reason || 'unspecified' });
             rolesSaveInFlight = true;
             rolesSaveStartedAt = performance.now();
             rolesStatusRetryCount = 0;
@@ -4692,11 +4801,61 @@ $(document).ready(function() {
                 return;
             }
 
-            const mappingText = typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : '';
-            const actorColorsObj = (parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {};
+            const projectDataMap = mergeDataArray(parsed.projectData);
+            const settingsDataMap = mergeDataArray(parsed.settingsData);
+            const templatesData = Array.isArray(parsed.templatesData) ? parsed.templatesData : [];
+
+            const mappingText = typeof projectDataMap.actorRoleMappingText === 'string'
+                ? projectDataMap.actorRoleMappingText
+                : (typeof settingsDataMap.actorRoleMappingText === 'string'
+                    ? settingsDataMap.actorRoleMappingText
+                    : (typeof parsed.actorRoleMappingText === 'string' ? parsed.actorRoleMappingText : ''));
+            const actorColorsSource = (projectDataMap.actorColors && typeof projectDataMap.actorColors === 'object')
+                ? projectDataMap.actorColors
+                : ((settingsDataMap.actorColors && typeof settingsDataMap.actorColors === 'object')
+                    ? settingsDataMap.actorColors
+                    : ((parsed.actorColors && typeof parsed.actorColors === 'object') ? parsed.actorColors : {}));
 
             settings.actorRoleMappingText = mappingText;
-            settings.actorColors = { ...actorColorsObj };
+            settings.actorColors = { ...actorColorsSource };
+
+            const filtersProjectSection = (projectDataMap.filters && typeof projectDataMap.filters === 'object') ? projectDataMap.filters : null;
+            const filtersSettingsSection = (settingsDataMap.filters && typeof settingsDataMap.filters === 'object') ? settingsDataMap.filters : null;
+            const filtersLegacySection = (parsed.filters && typeof parsed.filters === 'object') ? parsed.filters : null;
+
+            const restoredSoloRoles = normalizeFilterList(
+                projectDataMap.filterSoloRoles ??
+                (filtersProjectSection ? (filtersProjectSection.soloRoles ?? filtersProjectSection.filterSoloRoles) : undefined) ??
+                (filtersSettingsSection ? (filtersSettingsSection.soloRoles ?? filtersSettingsSection.filterSoloRoles) : undefined) ??
+                (filtersLegacySection ? (filtersLegacySection.soloRoles ?? filtersLegacySection.filterSoloRoles) : undefined) ??
+                parsed.filterSoloRoles
+            );
+            const restoredMuteRoles = normalizeFilterList(
+                projectDataMap.filterMuteRoles ??
+                (filtersProjectSection ? (filtersProjectSection.muteRoles ?? filtersProjectSection.filterMuteRoles) : undefined) ??
+                (filtersSettingsSection ? (filtersSettingsSection.muteRoles ?? filtersSettingsSection.filterMuteRoles) : undefined) ??
+                (filtersLegacySection ? (filtersLegacySection.muteRoles ?? filtersLegacySection.filterMuteRoles) : undefined) ??
+                parsed.filterMuteRoles
+            );
+            const restoredSoloActors = normalizeFilterList(
+                projectDataMap.filterSoloActors ??
+                (filtersProjectSection ? (filtersProjectSection.soloActors ?? filtersProjectSection.filterSoloActors) : undefined) ??
+                (filtersSettingsSection ? (filtersSettingsSection.soloActors ?? filtersSettingsSection.filterSoloActors) : undefined) ??
+                (filtersLegacySection ? (filtersLegacySection.soloActors ?? filtersLegacySection.filterSoloActors) : undefined) ??
+                parsed.filterSoloActors
+            );
+            const restoredMuteActors = normalizeFilterList(
+                projectDataMap.filterMuteActors ??
+                (filtersProjectSection ? (filtersProjectSection.muteActors ?? filtersProjectSection.filterMuteActors) : undefined) ??
+                (filtersSettingsSection ? (filtersSettingsSection.muteActors ?? filtersSettingsSection.filterMuteActors) : undefined) ??
+                (filtersLegacySection ? (filtersLegacySection.muteActors ?? filtersLegacySection.filterMuteActors) : undefined) ??
+                parsed.filterMuteActors
+            );
+            settings.filterSoloRoles = restoredSoloRoles;
+            settings.filterMuteRoles = restoredMuteRoles;
+            settings.filterSoloActors = restoredSoloActors;
+            settings.filterMuteActors = restoredMuteActors;
+            updateFilterRuntimeFromSettings();
 
             const mappedRolesCount = buildActorRoleMaps();
             const actorColorsCount = Object.keys(settings.actorColors || {}).length;
@@ -4707,6 +4866,17 @@ $(document).ready(function() {
                 hasMappingText,
                 mappedRoles: mappedRolesCount,
                 actorColors: actorColorsCount,
+                filters: {
+                    soloRoles: settings.filterSoloRoles.length,
+                    muteRoles: settings.filterMuteRoles.length,
+                    soloActors: settings.filterSoloActors.length,
+                    muteActors: settings.filterMuteActors.length
+                },
+                structured: {
+                    projectEntries: Array.isArray(parsed.projectData) ? parsed.projectData.length : (Object.keys(projectDataMap).length > 0 ? 1 : 0),
+                    settingsEntries: Array.isArray(parsed.settingsData) ? parsed.settingsData.length : (Object.keys(settingsDataMap).length > 0 ? 1 : 0),
+                    templatesEntries: templatesData.length
+                },
                 source: meta.source || 'backend'
             });
 
@@ -6249,10 +6419,12 @@ $(document).ready(function() {
                 console.debug('[Prompter][filters] localStorage persist skipped', storageErr);
             }
         }
-        if (options.persistBackend === true && !isEmuMode()) {
-            settings.dataModelVersion = DATA_MODEL_VERSION;
-            settings.settingsSchemaVersion = SETTINGS_SCHEMA_VERSION;
-            persistSettingsToBackend(settings, { reason: options.reason || 'actor_filter_update' });
+        if (!isEmuMode()) {
+            if (options.persistBackend === true) {
+                saveRoles(options.reason || 'filters_immediate');
+            } else if (options.persistRoles !== false) {
+                scheduleRolesAutosave(options.reason || 'filters_update');
+            }
         }
         refreshRoleFilterControlsUI();
         refreshActorFilterControlsUI();
@@ -6487,7 +6659,6 @@ $(document).ready(function() {
         settings.filterSoloActors = soloActors;
 
         rolesLoaded = Object.keys(newColors).length > 0 || (settings.actorRoleMappingText || '').trim().length > 0;
-        saveRoles();
         syncActorFilterSettings({ persistBackend: true, reason: 'actors_modal_save' });
         // Перепарсим и перерисуем текст если уже загружен
         if (subtitleData.length > 0) handleTextResponse(subtitleData);
