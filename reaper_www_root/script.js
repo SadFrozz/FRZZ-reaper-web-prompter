@@ -19,6 +19,16 @@ const SUBTREADER_INERTIA_WINDOW_SECONDS = 0.7; // SubtReader UI.transition_sec w
 const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to prevent jitter
 const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
 
+const APP_NAME = 'Интерактивный текстовый монитор';
+const APP_VERSION = '1.5.0-pre';
+const ORIGINAL_DOCUMENT_TITLE = `${APP_NAME} v${APP_VERSION}`;
+if (typeof document !== 'undefined') {
+    document.title = ORIGINAL_DOCUMENT_TITLE;
+}
+if (typeof window !== 'undefined') {
+    window.FRZZ_PROMPTER_VERSION = APP_VERSION;
+}
+
 function clampNumber(value, min, max) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -372,7 +382,6 @@ let navigationPanelCollapsed = false;
 const NAV_PANEL_ANIMATION_MS = 280; // Keep in sync with CSS transition timings
 let navigationPanelAnimationTimer = null;
 // Removed initialLoad flag: applySettings now, by default, uses in-memory `settings` object (source of truth)
-const ORIGINAL_DOCUMENT_TITLE = document.title;
 // High-contrast actor color palette (distinct hues for quick recognition)
 const ACTOR_BASE_COLORS = [
     'rgba(255, 0, 0, 0.9)',       // Red
@@ -552,6 +561,7 @@ $(document).ready(function() {
     const BASE_ROLE_WIDTH = 9.375;
     const BASE_ROLE_FONT_SIZE = 0.9;
     const mainTitle = $('h1');
+    const settingsAppVersion = $('#settings-app-version');
     const trackSelector = $('#track-selector');
     const textDisplay = $('#text-display');
     const textDisplayWrapper = $('#text-display-wrapper');
@@ -606,6 +616,13 @@ $(document).ready(function() {
     const settingsTileGrids = $('.settings-tile-grid');
     const TILE_GRID_ROW_SIZE = 6; // finer granularity for masonry spans
     let settingsTileReflowRaf = null;
+
+    if (settingsAppVersion.length) {
+        settingsAppVersion.text(`${APP_NAME} v${APP_VERSION}`);
+    }
+    if (mainTitle.length) {
+        mainTitle.text(APP_NAME);
+    }
 
     function computeTileGridRowGap(gridEl) {
         if (!gridEl || typeof window === 'undefined') return 0;
@@ -3314,7 +3331,17 @@ $(document).ready(function() {
             : rawBottomPercent;
         const windowTopFraction = clampNumber(windowTopPercent / 100, 0, 0.95);
         const windowBottomFraction = clampNumber(windowBottomPercent / 100, windowTopFraction + 0.01, 1);
-        const targetOffsetTop = typeof targetNode.offsetTop === 'number' ? targetNode.offsetTop : 0;
+        let targetOffsetTop = typeof targetNode.offsetTop === 'number' ? targetNode.offsetTop : 0;
+        if (typeof targetNode.getBoundingClientRect === 'function' && typeof wrapper.getBoundingClientRect === 'function') {
+            const nodeRect = targetNode.getBoundingClientRect();
+            const wrapperRect = wrapper.getBoundingClientRect();
+            if (nodeRect && wrapperRect) {
+                const relativeTop = (nodeRect.top - wrapperRect.top) + wrapper.scrollTop;
+                if (Number.isFinite(relativeTop)) {
+                    targetOffsetTop = relativeTop;
+                }
+            }
+        }
         const currentScrollTop = wrapper.scrollTop;
         const relativeTop = targetOffsetTop - currentScrollTop;
         const elementHeight = Math.max(targetNode.offsetHeight || 1, 1);
@@ -3631,7 +3658,7 @@ $(document).ready(function() {
                 break;
             }
             default: {
-                mainTitle.text('Интерактивный текстовый монитор');
+                mainTitle.text(APP_NAME);
                 break;
             }
         }
@@ -6264,7 +6291,7 @@ $(document).ready(function() {
             const t1 = performance.now();
             const renderMs = t1 - t0;
             const renderSeconds = renderMs / 1000;
-            statusIndicator.text(`Текст получен, всего ${subtitleData.length} реплик (рендер ${renderSeconds.toFixed(3)} с)`);
+            statusIndicator.text(`Субтитры загружены, всего ${subtitleData.length} реплик`);
             if (firstRenderTs === null) {
                 firstRenderTs = t1;
                 logReadyStage(isEmuMode() ? 'emu_first_render' : 'reaper_first_render');
@@ -7647,9 +7674,6 @@ $(document).ready(function() {
             const nextProgressSet = new Set();
             if (useSubtitleProgress) {
                 activeIndices.forEach(idx => nextProgressSet.add(idx));
-                if (inPause && newCurrentLineIndex !== -1) {
-                    nextProgressSet.add(newCurrentLineIndex);
-                }
             }
             const prevProgressSet = new Set(activeSubtitleProgressIndices);
             prevProgressSet.forEach(idx => {
@@ -7660,7 +7684,11 @@ $(document).ready(function() {
             if (useSubtitleProgress) {
                 nextProgressSet.forEach(idx => {
                     const line = subtitleData[idx];
-                    const fraction = activeSet.has(idx) ? computeLineProgressFraction(line, currentTime) : 0;
+                    if (!activeSet.has(idx)) {
+                        resetSubtitleProgressAt(idx);
+                        return;
+                    }
+                    const fraction = computeLineProgressFraction(line, currentTime);
                     setSubtitleProgress(idx, fraction);
                 });
             } else if (prevProgressSet.size) {
@@ -7670,9 +7698,6 @@ $(document).ready(function() {
             const nextTimeSet = new Set();
             if (useTimecodeProgress) {
                 activeIndices.forEach(idx => nextTimeSet.add(idx));
-                if (inPause && newCurrentLineIndex !== -1) {
-                    nextTimeSet.add(newCurrentLineIndex);
-                }
             }
             const prevTimeSet = new Set(activeTimecodeProgressIndices);
             prevTimeSet.forEach(idx => {
@@ -7683,7 +7708,11 @@ $(document).ready(function() {
             if (useTimecodeProgress) {
                 nextTimeSet.forEach(idx => {
                     const line = subtitleData[idx];
-                    const fraction = activeSet.has(idx) ? computeLineProgressFraction(line, currentTime) : 0;
+                    if (!activeSet.has(idx)) {
+                        clearTimecodeProgress(idx);
+                        return;
+                    }
+                    const fraction = computeLineProgressFraction(line, currentTime);
                     setTimecodeProgress(idx, fraction);
                 });
             } else if (prevTimeSet.size) {

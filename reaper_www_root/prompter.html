@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>REAPER Web Prompter v1.5.0-pre</title>
+    <title>Интерактивный текстовый монитор</title>
     <link rel="stylesheet" href="style.css">
     <script src="jquery.min.js"></script>
     <link rel="stylesheet" type="text/css" href="spectrum.css">
@@ -185,7 +185,7 @@
                                     </select>
                                 </div>
                             </div>
-                            <div class="settings-tile checkerboard-settings-tile " id="checkerboard-backgrounds-tile">
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-backgrounds-tile">
                                 <div class="checkerboard-pair-row wrap setting-group-inline-colors">
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-bg1">Фон 1</label>
@@ -194,6 +194,10 @@
                                             <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
+                                </div>
+                            </div>
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-backgrounds-tile">
+                                <div class="checkerboard-pair-row wrap setting-group-inline-colors">
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-bg2">Фон 2</label>
                                         <div class="input-with-button">
@@ -203,7 +207,7 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="settings-tile checkerboard-settings-tile " id="checkerboard-fonts-tile">
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-fonts-tile">
                                 <div class="checkerboard-pair-row wrap  setting-group-inline-colors">
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-font1">Шрифт 1</label>
@@ -212,6 +216,10 @@
                                             <button class="copy-color-btn" title="Копировать цвет"><svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg></button>
                                         </div>
                                     </div>
+                                </div>
+                            </div>
+                            <div class="settings-tile checkerboard-settings-tile" id="checkerboard-backgrounds-tile">
+                                <div class="checkerboard-pair-row wrap setting-group-inline-colors">
                                     <div class="setting-item responsive">
                                         <label for="checkerboard-font2">Шрифт 2</label>
                                         <div class="input-with-button">
@@ -243,18 +251,20 @@
                                         </button>
                                     </div>
                                 </div>
-                                <div class="setting-item mini">
-                                    <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
-                                    <input type="checkbox" id="highlight-current-role-enabled">
-                                </div>
-                                <div class="setting-item mini" id="highlight-role-color-wrapper" style="display: none;">
-                                    <label for="highlight-current-role-bg">Цвет подсветки</label>
-                                    <div class="input-with-button">
-                                        <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
-                                        <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
-                                        </button>
-                                    </div>
+                            </div>
+                        </div>
+                        <div class="settings-tile highlight-settings-tile" id="highlight-previous-tile">
+                            <div class="setting-item mini">
+                                <label for="highlight-current-role-enabled">Подсвечивать фон роли</label>
+                                <input type="checkbox" id="highlight-current-role-enabled">
+                            </div>
+                            <div class="setting-item mini" id="highlight-role-color-wrapper" style="display: none;">
+                                <label for="highlight-current-role-bg">Цвет подсветки</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="highlight-current-role-bg" value="rgba(80, 80, 0, 0.4)">
+                                    <button class="copy-color-btn" title="Копировать цвет">
+                                        <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -272,23 +282,6 @@
                                     <label for="highlight-pause-bg">Цвет подсветки</label>
                                     <div class="input-with-button">
                                         <input type="text" id="highlight-pause-bg" value="rgba(0, 80, 120, 0.3)">
-                                        <button class="copy-color-btn" title="Копировать цвет">
-                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="settings-tile highlight-settings-tile" id="highlight-overlap-tile">
-                            <div class="setting-item">
-                                <label for="highlight-overlap-enabled">Показывать пересечения</label>
-                                <input type="checkbox" id="highlight-overlap-enabled">
-                            </div>
-                            <div id="highlight-overlap-options" class="setting-inline-row setting-group-inline-colors">
-                                <div class="setting-item mini">
-                                    <label for="highlight-overlap-color">Цвет обводки</label>
-                                    <div class="input-with-button">
-                                        <input type="text" id="highlight-overlap-color" value="rgba(255, 112, 67, 0.75)">
                                         <button class="copy-color-btn" title="Копировать цвет">
                                             <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
                                         </button>
@@ -341,6 +334,23 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="settings-tile highlight-settings-tile" id="highlight-overlap-tile">
+                            <div class="setting-item">
+                                <label for="highlight-overlap-enabled">Показывать пересечения</label>
+                                <input type="checkbox" id="highlight-overlap-enabled">
+                            </div>
+                            <div id="highlight-overlap-options" class="setting-inline-row setting-group-inline-colors">
+                                <div class="setting-item mini">
+                                    <label for="highlight-overlap-color">Цвет обводки</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="highlight-overlap-color" value="rgba(255, 112, 67, 0.75)">
+                                        <button class="copy-color-btn" title="Копировать цвет">
+                                            <svg class="icon-svg" viewBox="0 0 24 24"><use href="icons.svg#icon-copy" xlink:href="icons.svg#icon-copy"></use></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </fieldset>
                 <fieldset class="fieldset-collapsible expanded">
@@ -356,18 +366,6 @@
                                 <option value="page">Постраничный</option>
                                 <option value="line">Построчный</option>
                             </select>
-                        </div>
-                        <div class="settings-tile" id="auto-scroll-window-wrapper">
-                            <label class="settings-tile-title">Границы прокрутки (%)</label>
-                            <div class="setting-range with-side-values">
-                                <span id="auto-scroll-window-top-value">10%</span>
-                                <div class="dual-range" id="auto-scroll-window-range">
-                                    <div class="dual-range-track" id="auto-scroll-window-track"></div>
-                                    <input type="range" id="auto-scroll-window-top-percent" min="0" max="100" step="1" value="10">
-                                    <input type="range" id="auto-scroll-window-bottom-percent" min="0" max="100" step="1" value="85">
-                                </div>
-                                <span id="auto-scroll-window-bottom-value">85%</span>
-                            </div>
                         </div>
                         <div class="settings-tile settings-tile-slider" id="scroll-speed-wrapper">
                             <label class="settings-tile-title" for="scroll-speed">Скорость прокрутки</label>
@@ -389,6 +387,18 @@
                             <div class="settings-slider-row">
                                 <input type="range" id="auto-scroll-line-anchor-percent" class="frzz-slider" min="0" max="100" step="1" value="35">
                                 <span id="auto-scroll-line-anchor-value" class="settings-slider-value">35%</span>
+                            </div>
+                        </div>
+                        <div class="settings-tile" id="auto-scroll-window-wrapper">
+                            <label class="settings-tile-title">Границы прокрутки (%)</label>
+                            <div class="setting-range with-side-values">
+                                <span id="auto-scroll-window-top-value">10%</span>
+                                <div class="dual-range" id="auto-scroll-window-range">
+                                    <div class="dual-range-track" id="auto-scroll-window-track"></div>
+                                    <input type="range" id="auto-scroll-window-top-percent" min="0" max="100" step="1" value="10">
+                                    <input type="range" id="auto-scroll-window-bottom-percent" min="0" max="100" step="1" value="85">
+                                </div>
+                                <span id="auto-scroll-window-bottom-value">85%</span>
                             </div>
                         </div>
                     </div>
@@ -507,6 +517,11 @@
                 <div class="modal-footer-buttons">
                     <button id="reset-settings-button" class="button-danger">Сбросить по умолчанию</button>
                     <button id="save-settings-button">Сохранить</button>
+                </div>
+                <div class="modal-footer-meta" aria-hidden="true">
+                    <p class="modal-footer-meta-line" id="settings-app-version">Интерактивный текстовый монитор vX.X.X</p>
+                    <p class="modal-footer-meta-line">2025 © Andrew "SadFrozz" Brodsky</p>
+                    <p class="modal-footer-meta-line"><a href="https://github.com/SadFrozz/FRZZ-reaper-web-prompter" target="_blank" rel="noopener noreferrer">GitHub</a></p>
                 </div>
             </div>
         </div>

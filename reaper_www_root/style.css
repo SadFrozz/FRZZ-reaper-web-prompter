@@ -44,7 +44,7 @@ h1 { margin: 0; flex-grow: 1; font-size: 2em; }
 .panel-controls.transport-wrapped .controls-left { order: 1; }
 .panel-controls.transport-wrapped .controls-right { order: 2; }
 .controls-left { display: flex; align-items: center; gap: 0.5rem; flex: 0 1 auto; min-width: 0; }
-.controls-right { display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; flex: 0 1 auto; min-width: 0; margin-inline-start: auto; }
+.controls-right { display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; flex: 0 1 auto; min-width: 0; }
 #navigation-panel.compact-mode { flex-direction: row; align-items: center; gap: 0.75rem; padding: 0.75rem; }
 #navigation-panel.compact-mode .panel-header { display: none; }
 #navigation-panel.compact-mode .panel-controls { flex: 1 1 auto; gap: 0.5rem; flex-wrap: wrap; justify-content: space-between; }
@@ -61,7 +61,7 @@ h1 { margin: 0; flex-grow: 1; font-size: 2em; }
 body.nav-panel-collapsed #text-display-wrapper { padding-bottom: 4.5rem; }
 body.nav-panel-collapsed .navigation-floating-controls { pointer-events: auto; }
 #navigation-panel label, #navigation-panel select { font-size: 1.5em; }
-#track-selector { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 0.25rem; }
+#track-selector { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 0.25rem; width: 10rem}
 #refresh-button, #settings-button, #save-settings-button, #actors-button, #stats-button, #navigation-compact-toggle, #navigation-fullscreen-toggle { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
 #refresh-button:hover, #settings-button:hover, #save-settings-button:hover, #actors-button:hover, #stats-button:hover, #navigation-compact-toggle:hover, #navigation-fullscreen-toggle:hover { background-color: #5a5a5a; }
 .icon-svg { width: 1.2rem; height: 1.2rem; fill: currentColor; }
@@ -256,7 +256,7 @@ body.overlap-highlight-disabled .overlap-block::before {
     opacity: 0;
 }
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0, 0, 0, 0.6); }
-.modal-content { background-color: #2f2f2f; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 37.5rem; border-radius: 0.5rem; position: relative; font-size: 0.85em; }
+.modal-content { background-color: #2f2f2f; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 60rem; border-radius: 0.5rem; position: relative; font-size: 0.85em; }
 .modal-close-button { color: #aaa; position: absolute; top: 0.625rem; right: 1.25rem; font-size: 1.75rem; font-weight: bold; cursor: pointer; }
 .modal-close-button:hover, .modal-close-button:focus { color: white; text-decoration: none; }
 .setting-item input[type="text"], .setting-item input[type="number"], .setting-item select {
@@ -819,37 +819,6 @@ input[type="checkbox"]:active::after {
     margin-bottom: 0rem;
 }
 
-#auto-scroll-window-wrapper {
-    order: 2;
-}
-#scroll-speed-wrapper {
-    order: 3;
-}
-#auto-scroll-dynamic-speed-tile {
-    order: 4;
-}
-#auto-scroll-line-anchor-wrapper {
-    order: 5;
-}
-
-body[data-auto-scroll-mode="line"] #auto-scroll-line-anchor-wrapper {
-    order: 3;
-}
-body[data-auto-scroll-mode="line"] #scroll-speed-wrapper {
-    order: 4;
-}
-body[data-auto-scroll-mode="line"] #auto-scroll-dynamic-speed-tile {
-    order: 5;
-}
-
-@media (min-width: 720px) {
-    .settings-tile-grid {
-        grid-template-columns: repeat(2, minmax(15rem, 1fr));
-    }
-    #general-settings-tiles {
-        grid-template-columns: repeat(2, minmax(15rem, 1fr));
-    }
-}
 .auto-scroll-advanced .setting-inline-row {
     margin-bottom: 0;
 }
@@ -902,6 +871,33 @@ body[data-auto-scroll-mode="line"] #auto-scroll-dynamic-speed-tile {
 .modal-footer-buttons { display: flex; gap: 1rem; margin-top: 1.25rem; }
 /* ++ ИЗМЕНЕНО: Добавлено box-sizing для выравнивания высоты кнопок ++ */
 .modal-footer-buttons button { flex: 1; padding: 0.625rem; font-size: 1.1em; border-radius: 0.25rem; border: none; cursor: pointer; transition: background-color 0.2s, color 0.2s; box-sizing: border-box; }
+.modal-footer-meta {
+    padding-top: 0.5rem;
+    border-top: 1px solid #3a3a3a;
+    display: flex;
+    flex-direction: column;
+    font-size: 1em;
+    color: #bbb;
+    text-align: center;
+}
+.modal-footer-meta-line {
+    margin: 0;
+    line-height: 1.4;
+}
+.modal-footer-meta a {
+    color: inherit;
+    text-decoration: underline;
+}
+.modal-footer-meta a:hover {
+    color: #fff;
+}
+.light-theme .modal-footer-meta {
+    color: #474747;
+    border-top-color: #d0d0d0;
+}
+.light-theme .modal-footer-meta a:hover {
+    color: #111;
+}
 #actors-modal .modal-warning { background-color: rgba(255, 193, 7, 0.15); border: 1px solid rgba(255, 193, 7, 0.6); color: #ffca28; padding: 0.75rem; border-radius: 0.375rem; font-size: 0.95em; margin-bottom: 0.75rem; display: block; width: 100%; box-sizing: border-box; }
 #actors-modal .modal-warning code { background: rgba(255, 193, 7, 0.12); color: #ffe082; padding: 0 0.35rem; border-radius: 0.25rem; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; font-size: 0.95em; }
 #save-settings-button { background-color: #007acc; color: white; }
