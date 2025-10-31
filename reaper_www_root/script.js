@@ -20,7 +20,9 @@ const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to
 const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
 
 const APP_NAME = 'Интерактивный текстовый монитор';
-const APP_VERSION = '1.5.0-pre';
+const APP_VERSION = '1.5.0';
+const APP_VERSION_CODENAME = 'PROJECT JOHN CONNOR';
+const APP_CODENAME = 'МОНТАЖКА 2.0';
 const ORIGINAL_DOCUMENT_TITLE = `${APP_NAME} v${APP_VERSION}`;
 if (typeof document !== 'undefined') {
     document.title = ORIGINAL_DOCUMENT_TITLE;
@@ -398,6 +400,21 @@ const SETTINGS_CHUNK_SIZE = 800;
 const ROLES_CHUNK_SIZE = 800;
 const MOBILE_UI_SCALE_MULTIPLIER = 0.75;
 const OVERLAP_EPSILON_MS = 1; // минимальная длительность для обнаружения пересечений
+const OVERLAP_SCRATCH_MIN_CAPACITY = 256;
+
+const overlapScratchStore = {
+    capacity: 0,
+    startMs: null,
+    endMs: null,
+    parent: null,
+    unionSize: null,
+    overlapCount: null,
+    order: [],
+    active: []
+};
+
+let activeOverlapLineIndices = [];
+let activeOverlapBlocks = [];
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
 const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
@@ -616,6 +633,10 @@ $(document).ready(function() {
     const settingsTileGrids = $('.settings-tile-grid');
     const TILE_GRID_ROW_SIZE = 6; // finer granularity for masonry spans
     let settingsTileReflowRaf = null;
+
+    if (textDisplay && typeof textDisplay.on === 'function') {
+        textDisplay.on('click', '.subtitle-container', onSubtitleContainerClick);
+    }
 
     if (settingsAppVersion.length) {
         settingsAppVersion.text(`${APP_NAME} v${APP_VERSION}`);
@@ -2084,6 +2105,52 @@ $(document).ready(function() {
         });
     }
 
+    function ensureOverlapScratchCapacity(required) {
+        const size = Number(required) | 0;
+        if (size <= 0) {
+            return overlapScratchStore;
+        }
+        let capacity = overlapScratchStore.capacity;
+        if (!capacity || capacity < size) {
+            capacity = Math.max(OVERLAP_SCRATCH_MIN_CAPACITY, capacity || OVERLAP_SCRATCH_MIN_CAPACITY);
+            while (capacity < size) {
+                capacity *= 2;
+            }
+            overlapScratchStore.startMs = new Int32Array(capacity);
+            overlapScratchStore.endMs = new Int32Array(capacity);
+            overlapScratchStore.parent = new Int32Array(capacity);
+            overlapScratchStore.unionSize = new Int32Array(capacity);
+            overlapScratchStore.overlapCount = new Int32Array(capacity);
+            overlapScratchStore.capacity = capacity;
+        }
+        return overlapScratchStore;
+    }
+
+    function overlapFindRoot(parent, index) {
+        let node = index;
+        while (parent[node] !== node) {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        return node;
+    }
+
+    function overlapUnionRoots(parent, sizes, a, b) {
+        let rootA = overlapFindRoot(parent, a);
+        let rootB = overlapFindRoot(parent, b);
+        if (rootA === rootB) {
+            return false;
+        }
+        if (sizes[rootA] < sizes[rootB]) {
+            const tmp = rootA;
+            rootA = rootB;
+            rootB = tmp;
+        }
+        parent[rootB] = rootA;
+        sizes[rootA] += sizes[rootB];
+        return true;
+    }
+
     function buildOverlapAnalysis(lines) {
         const total = Array.isArray(lines) ? lines.length : 0;
         if (!total) {
@@ -2103,147 +2170,174 @@ $(document).ready(function() {
             };
         }
 
-        const startStamp = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-        const adjacency = Array.from({ length: total }, () => new Set());
-        const startMs = new Array(total);
-        const endMs = new Array(total);
-        const active = [];
-        let peakSimultaneous = 0;
+        const startStamp = typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : Date.now();
 
-        for (let i = 0; i < total; i++) {
+        const scratch = ensureOverlapScratchCapacity(total);
+        const startMs = scratch.startMs;
+        const endMs = scratch.endMs;
+        const parent = scratch.parent;
+        const sizes = scratch.unionSize;
+        const overlapCount = scratch.overlapCount;
+        const order = scratch.order;
+        const active = scratch.active;
+
+        order.length = total;
+        active.length = 0;
+
+        for (let i = 0; i < total; i += 1) {
             const line = lines[i] || {};
             const rawStart = Number(line.start_time);
             const rawEnd = Number(line.end_time);
-            const sanitizedStart = Number.isFinite(rawStart) ? Math.max(0, Math.round(rawStart * 1000)) : Math.max(0, i * OVERLAP_EPSILON_MS);
-            let sanitizedEnd = Number.isFinite(rawEnd) ? Math.max(0, Math.round(rawEnd * 1000)) : sanitizedStart;
+            const sanitizedStart = Number.isFinite(rawStart)
+                ? Math.max(0, Math.round(rawStart * 1000))
+                : Math.max(0, i * OVERLAP_EPSILON_MS);
+            let sanitizedEnd = Number.isFinite(rawEnd)
+                ? Math.max(0, Math.round(rawEnd * 1000))
+                : sanitizedStart;
             if (sanitizedEnd < sanitizedStart) {
                 sanitizedEnd = sanitizedStart;
             }
-            if (sanitizedEnd - sanitizedStart < OVERLAP_EPSILON_MS) {
+            if ((sanitizedEnd - sanitizedStart) < OVERLAP_EPSILON_MS) {
                 sanitizedEnd = sanitizedStart + OVERLAP_EPSILON_MS;
             }
             startMs[i] = sanitizedStart;
             endMs[i] = sanitizedEnd;
+            parent[i] = i;
+            sizes[i] = 1;
+            overlapCount[i] = 0;
+            order[i] = i;
+        }
 
-            for (let idx = active.length - 1; idx >= 0; idx -= 1) {
-                if (active[idx].endMs <= sanitizedStart + OVERLAP_EPSILON_MS) {
-                    active.splice(idx, 1);
+        order.sort((a, b) => {
+            const delta = startMs[a] - startMs[b];
+            return delta !== 0 ? delta : a - b;
+        });
+
+        let activeCount = 0;
+        let peakSimultaneous = 0;
+        let overlapPairs = 0;
+
+        for (let idx = 0; idx < total; idx += 1) {
+            const lineIndex = order[idx];
+            const currentStart = startMs[lineIndex];
+            const expireThreshold = currentStart + OVERLAP_EPSILON_MS;
+
+            let writePtr = 0;
+            for (let readPtr = 0; readPtr < activeCount; readPtr += 1) {
+                const activeIndex = active[readPtr];
+                if (endMs[activeIndex] <= expireThreshold) {
+                    continue;
                 }
+                active[writePtr] = activeIndex;
+                writePtr += 1;
+            }
+            activeCount = writePtr;
+
+            for (let j = 0; j < activeCount; j += 1) {
+                const otherIndex = active[j];
+                overlapCount[lineIndex] += 1;
+                overlapCount[otherIndex] += 1;
+                overlapUnionRoots(parent, sizes, lineIndex, otherIndex);
+                overlapPairs += 1;
             }
 
-            for (let idx = 0; idx < active.length; idx += 1) {
-                const candidate = active[idx];
-                if (sanitizedStart < (candidate.endMs - OVERLAP_EPSILON_MS)
-                    && sanitizedEnd > (candidate.startMs + OVERLAP_EPSILON_MS)) {
-                    adjacency[i].add(candidate.index);
-                    adjacency[candidate.index].add(i);
-                }
-            }
-
-            let insertPos = active.length;
-            while (insertPos > 0 && active[insertPos - 1].endMs > sanitizedEnd) {
-                insertPos -= 1;
-            }
-            active.splice(insertPos, 0, { index: i, startMs: sanitizedStart, endMs: sanitizedEnd });
-            if (active.length > 1) {
-                peakSimultaneous = Math.max(peakSimultaneous, active.length);
+            active[activeCount] = lineIndex;
+            activeCount += 1;
+            if (activeCount > 1 && activeCount > peakSimultaneous) {
+                peakSimultaneous = activeCount;
             }
         }
 
-        const visited = new Array(total).fill(false);
-        const lineInfo = new Array(total).fill(null);
-        const groups = [];
+        const groupsMap = new Map();
+        let affectedLines = 0;
         let maxGroupSize = 0;
         let maxOverlapDegree = 0;
-        let affectedLines = 0;
-        let overlapPairs = 0;
 
         for (let i = 0; i < total; i += 1) {
-            const degree = adjacency[i].size;
-            if (degree > 0) {
-                affectedLines += 1;
-                overlapPairs += degree;
-                if (degree > maxOverlapDegree) {
-                    maxOverlapDegree = degree;
-                }
-            }
-            if (degree === 0 || visited[i]) {
+            const degree = overlapCount[i];
+            if (degree <= 0) {
                 continue;
             }
-
-            const stack = [i];
-            const component = [];
-            let componentMinStart = startMs[i];
-            let componentMaxEnd = endMs[i];
-            let componentMaxDegree = degree;
-
-            while (stack.length) {
-                const idx = stack.pop();
-                if (visited[idx]) {
-                    continue;
-                }
-                visited[idx] = true;
-                component.push(idx);
-                const nodeDegree = adjacency[idx].size;
-                if (nodeDegree > componentMaxDegree) {
-                    componentMaxDegree = nodeDegree;
-                }
-                if (startMs[idx] < componentMinStart) {
-                    componentMinStart = startMs[idx];
-                }
-                if (endMs[idx] > componentMaxEnd) {
-                    componentMaxEnd = endMs[idx];
-                }
-                adjacency[idx].forEach(neighbor => {
-                    if (!visited[neighbor]) {
-                        stack.push(neighbor);
-                    }
-                });
+            affectedLines += 1;
+            if (degree > maxOverlapDegree) {
+                maxOverlapDegree = degree;
             }
-
-            if (!component.length) {
-                continue;
-            }
-
-            const sorted = component.slice().sort((a, b) => {
-                if (startMs[a] === startMs[b]) {
-                    return a - b;
+            const root = overlapFindRoot(parent, i);
+            let group = groupsMap.get(root);
+            if (!group) {
+                group = {
+                    indices: [],
+                    minStart: startMs[i],
+                    maxEnd: endMs[i],
+                    maxDegree: degree
+                };
+                groupsMap.set(root, group);
+            } else {
+                if (startMs[i] < group.minStart) {
+                    group.minStart = startMs[i];
                 }
-                return startMs[a] - startMs[b];
+                if (endMs[i] > group.maxEnd) {
+                    group.maxEnd = endMs[i];
+                }
+                if (degree > group.maxDegree) {
+                    group.maxDegree = degree;
+                }
+            }
+            group.indices.push(i);
+            if (group.indices.length > maxGroupSize) {
+                maxGroupSize = group.indices.length;
+            }
+        }
+
+        const lineInfo = new Array(total).fill(null);
+        const groups = [];
+        let groupIdCounter = 0;
+
+        groupsMap.forEach(group => {
+            if (!group.indices || group.indices.length <= 1) {
+                return;
+            }
+            const sorted = group.indices.slice().sort((a, b) => {
+                const diff = startMs[a] - startMs[b];
+                return diff !== 0 ? diff : a - b;
             });
-
-            const groupId = groups.length;
+            const groupId = groupIdCounter;
+            groupIdCounter += 1;
             const groupSize = sorted.length;
-            maxGroupSize = Math.max(maxGroupSize, groupSize);
+            const minStart = group.minStart;
+            const maxEnd = group.maxEnd;
+            const groupMaxDegree = group.maxDegree;
 
-            sorted.forEach((idx, order) => {
-                const nodeDegree = adjacency[idx].size;
-                lineInfo[idx] = {
+            for (let orderIdx = 0; orderIdx < groupSize; orderIdx += 1) {
+                const lineIdx = sorted[orderIdx];
+                lineInfo[lineIdx] = {
                     groupId,
                     groupSize,
-                    overlapCount: nodeDegree,
-                    startMs: startMs[idx],
-                    endMs: endMs[idx],
-                    minGroupStartMs: componentMinStart,
-                    maxGroupEndMs: componentMaxEnd,
-                    isStart: order === 0,
-                    isEnd: order === sorted.length - 1,
-                    order,
-                    maxDegreeInGroup: componentMaxDegree
+                    overlapCount: overlapCount[lineIdx],
+                    startMs: startMs[lineIdx],
+                    endMs: endMs[lineIdx],
+                    minGroupStartMs: minStart,
+                    maxGroupEndMs: maxEnd,
+                    isStart: orderIdx === 0,
+                    isEnd: orderIdx === (groupSize - 1),
+                    order: orderIdx,
+                    maxDegreeInGroup: groupMaxDegree
                 };
-            });
+            }
 
             groups.push({
                 id: groupId,
                 indices: sorted,
                 size: groupSize,
-                minStartMs: componentMinStart,
-                maxEndMs: componentMaxEnd,
-                maxDegree: componentMaxDegree
+                minStartMs: minStart,
+                maxEndMs: maxEnd,
+                maxDegree: groupMaxDegree
             });
-        }
+        });
 
-        const computeDurationMs = Math.round(((typeof performance !== 'undefined' && performance.now)
+        const computeDurationMs = Math.round(((typeof performance !== 'undefined' && typeof performance.now === 'function')
             ? performance.now()
             : Date.now()) - startStamp);
 
@@ -2257,7 +2351,7 @@ $(document).ready(function() {
                 maxGroupSize,
                 maxOverlapDegree,
                 peakSimultaneous,
-                overlapPairs: Math.round(overlapPairs / 2),
+                overlapPairs,
                 computeDurationMs
             }
         };
@@ -2265,35 +2359,44 @@ $(document).ready(function() {
 
     function applyOverlapAnnotations(result) {
         const displayNode = textDisplayEl || (textDisplay && textDisplay[0]) || null;
-        if (displayNode) {
-            const existingBlocks = displayNode.querySelectorAll('.overlap-block');
-            existingBlocks.forEach(block => {
-                if (!block || !block.parentNode) return;
-                while (block.firstChild) {
-                    block.parentNode.insertBefore(block.firstChild, block);
+
+        if (activeOverlapBlocks.length) {
+            while (activeOverlapBlocks.length) {
+                const block = activeOverlapBlocks.pop();
+                if (!block || !block.parentNode) {
+                    continue;
                 }
-                block.parentNode.removeChild(block);
-            });
+                const parent = block.parentNode;
+                while (block.firstChild) {
+                    parent.insertBefore(block.firstChild, block);
+                }
+                parent.removeChild(block);
+            }
         }
-        const total = subtitleElements.length;
-        for (let i = 0; i < total; i += 1) {
-            const container = subtitleElements[i];
-            if (!container) continue;
-            container.classList.remove('overlap-active', 'overlap-start', 'overlap-end');
-            container.removeAttribute('data-overlap-size');
-            container.removeAttribute('data-overlap-count');
-            container.removeAttribute('data-overlap-window');
-            if (container.getAttribute && container.getAttribute('data-overlap-title') === '1') {
-                container.removeAttribute('title');
-                container.removeAttribute('data-overlap-title');
+
+        if (activeOverlapLineIndices.length) {
+            for (let idx = 0; idx < activeOverlapLineIndices.length; idx += 1) {
+                const lineIndex = activeOverlapLineIndices[idx];
+                const container = subtitleElements[lineIndex];
+                if (container) {
+                    container.classList.remove('overlap-active', 'overlap-start', 'overlap-end');
+                    container.removeAttribute('data-overlap-size');
+                    container.removeAttribute('data-overlap-count');
+                    container.removeAttribute('data-overlap-window');
+                    if (container.getAttribute && container.getAttribute('data-overlap-title') === '1') {
+                        container.removeAttribute('title');
+                        container.removeAttribute('data-overlap-title');
+                    }
+                }
+                const indicator = subtitleOverlapIndicators[lineIndex];
+                if (indicator) {
+                    indicator.classList.remove('is-visible');
+                    indicator.removeAttribute('data-count');
+                    indicator.removeAttribute('title');
+                    indicator.textContent = '';
+                }
             }
-            const indicator = subtitleOverlapIndicators[i];
-            if (indicator) {
-                indicator.classList.remove('is-visible');
-                indicator.removeAttribute('data-count');
-                indicator.removeAttribute('title');
-                indicator.textContent = '';
-            }
+            activeOverlapLineIndices = [];
         }
 
         if (!result || !Array.isArray(result.lineInfo) || !result.lineInfo.length) {
@@ -2307,12 +2410,15 @@ $(document).ready(function() {
 
         const frameRate = getActiveFrameRate();
         const groupMembers = new Map();
+        const updatedOverlapIndices = [];
 
         for (let i = 0; i < result.lineInfo.length; i += 1) {
             const entry = result.lineInfo[i];
             if (!entry) continue;
             const container = subtitleElements[i];
             if (!container) continue;
+
+            updatedOverlapIndices.push(i);
 
             container.classList.add('overlap-active');
             if (entry.isStart) {
@@ -2347,6 +2453,29 @@ $(document).ready(function() {
             }
             container.setAttribute('title', tooltipLines.join('\n'));
             container.setAttribute('data-overlap-title', '1');
+
+            let indicator = subtitleOverlapIndicators[i];
+            if (!indicator) {
+                const timeEl = subtitleTimeElements[i];
+                if (timeEl) {
+                    indicator = document.createElement('span');
+                    indicator.className = 'overlap-indicator';
+                    indicator.setAttribute('aria-hidden', 'true');
+                    indicator.textContent = '';
+                    const timeProgressEl = subtitleTimeProgressElements[i];
+                    if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
+                        timeEl.insertBefore(indicator, timeProgressEl);
+                    } else {
+                        timeEl.appendChild(indicator);
+                    }
+                    subtitleOverlapIndicators[i] = indicator;
+                }
+            }
+            if (indicator) {
+                indicator.classList.add('is-visible');
+                indicator.setAttribute('data-count', String(entry.overlapCount));
+                indicator.setAttribute('title', tooltipLines[0]);
+            }
             if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
                 const existing = groupMembers.get(entry.groupId) || [];
                 existing.push(i);
@@ -2375,8 +2504,11 @@ $(document).ready(function() {
                     if (!el) return;
                     block.appendChild(el);
                 });
+                activeOverlapBlocks.push(block);
             });
         }
+
+        activeOverlapLineIndices = updatedOverlapIndices;
 
         return result.summary;
     }
@@ -2824,7 +2956,11 @@ $(document).ready(function() {
             if (selection && typeof selection.toString === 'function' && selection.toString().trim().length > 0) {
                 return;
             }
-            const container = event && event.currentTarget ? event.currentTarget : null;
+            const container = event && event.currentTarget
+                ? event.currentTarget
+                : (event && event.target && typeof event.target.closest === 'function'
+                    ? event.target.closest('.subtitle-container')
+                    : null);
             if (!container || !container.dataset) {
                 return;
             }
@@ -2889,12 +3025,38 @@ $(document).ready(function() {
         activeSubtitleProgressIndices.clear();
     }
 
+    function ensureSubtitleProgressElements(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleProgressContainers.length) {
+            return null;
+        }
+        let container = subtitleProgressContainers[index];
+        let bar = subtitleProgressBars[index];
+        if (container && bar) {
+            return { container, bar };
+        }
+        container = document.createElement('div');
+        container.className = 'subtitle-progress-container';
+        container.setAttribute('aria-hidden', 'true');
+        bar = document.createElement('div');
+        bar.className = 'subtitle-progress-bar';
+        bar.style.transform = 'scaleX(0)';
+        container.appendChild(bar);
+        subtitleProgressContainers[index] = container;
+        subtitleProgressBars[index] = bar;
+        subtitleProgressValues[index] = 0;
+        return { container, bar };
+    }
+
     function setSubtitleProgress(index, fraction) {
         if (!Number.isInteger(index) || index < 0 || index >= subtitleProgressContainers.length) {
             return;
         }
-        const container = subtitleProgressContainers[index];
-        const bar = subtitleProgressBars[index];
+        const ensured = ensureSubtitleProgressElements(index);
+        if (!ensured) {
+            return;
+        }
+        const container = ensured.container;
+        const bar = ensured.bar;
         const contentEl = subtitleContentElements[index];
         if (!container || !bar || !contentEl) {
             return;
@@ -6019,12 +6181,6 @@ $(document).ready(function() {
                 const container = document.createElement('div');
                 container.className = 'subtitle-container';
                 container.dataset.index = String(index);
-                if (Number.isFinite(line.start_time)) {
-                    container.dataset.startSeconds = String(line.start_time);
-                } else {
-                    delete container.dataset.startSeconds;
-                }
-                container.addEventListener('click', onSubtitleContainerClick);
 
                 const contentElement = document.createElement('div');
                 contentElement.className = 'subtitle-content';
@@ -6095,21 +6251,16 @@ $(document).ready(function() {
                 const timeLabelElement = document.createElement('span');
                 timeLabelElement.className = 'subtitle-time-label';
                 timeLabelElement.textContent = timeString;
-                const overlapIndicator = document.createElement('span');
-                overlapIndicator.className = 'overlap-indicator';
-                overlapIndicator.setAttribute('aria-hidden', 'true');
-                overlapIndicator.textContent = '';
                 const timeProgressElement = document.createElement('span');
                 timeProgressElement.className = 'subtitle-time-progress';
                 timeProgressElement.setAttribute('aria-hidden', 'true');
                 timeProgressElement.style.transform = 'scaleX(0)';
                 timeElement.appendChild(timeLabelElement);
-                timeElement.appendChild(overlapIndicator);
                 timeElement.appendChild(timeProgressElement);
                 subtitleTimeElements[index] = timeElement;
                 subtitleTimeLabelElements[index] = timeLabelElement;
                 subtitleTimeProgressElements[index] = timeProgressElement;
-                subtitleOverlapIndicators[index] = overlapIndicator;
+                subtitleOverlapIndicators[index] = null;
 
                 let checkerboardClass = '';
                 if (checkerboardEnabled) {
@@ -6266,15 +6417,8 @@ $(document).ready(function() {
                 }
 
                 bodyElement.appendChild(textElement);
-                const progressContainer = document.createElement('div');
-                progressContainer.className = 'subtitle-progress-container';
-                progressContainer.setAttribute('aria-hidden', 'true');
-                const progressBar = document.createElement('div');
-                progressBar.className = 'subtitle-progress-bar';
-                progressBar.style.transform = 'scaleX(0)';
-                progressContainer.appendChild(progressBar);
-                subtitleProgressContainers[index] = progressContainer;
-                subtitleProgressBars[index] = progressBar;
+                subtitleProgressContainers[index] = null;
+                subtitleProgressBars[index] = null;
                 subtitleProgressValues[index] = 0;
                 container.appendChild(contentElement);
                 fragment.appendChild(container);

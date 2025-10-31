@@ -22,21 +22,60 @@ local function read_ini_lines(path)
   return lines
 end
 
-local function get_reaper_ini_path()
-  -- On different platforms the file is named 'reaper.ini'; historically code sometimes used 'REAPER.ini'.
-  -- On case-insensitive FS (Windows) both will work; on macOS with case-sensitive FS only correct case matters.
+local function get_resource_file_path(target_name)
   local base = reaper.GetResourcePath()
-  local candidate1 = base .. sep .. 'reaper.ini'
-  local f1 = io.open(candidate1, 'r')
-  if f1 then f1:close(); return candidate1 end
-  local candidate2 = base .. sep .. 'REAPER.ini'
-  local f2 = io.open(candidate2, 'r')
-  if f2 then f2:close(); return candidate2 end
-  -- Return primary expected lowercase name even if not found (caller will handle error)
-  return candidate1
+  local candidate = base .. sep .. target_name
+  local f = io.open(candidate, 'r')
+  if f then f:close(); return candidate end
+  if type(reaper.EnumerateFiles) == 'function' then
+    local lower_target = target_name:lower()
+    local idx = 0
+    while true do
+      local entry = reaper.EnumerateFiles(base, idx)
+      if not entry or entry == '' then break end
+      if entry:lower() == lower_target then
+        local alt = base .. sep .. entry
+        local fh = io.open(alt, 'r')
+        if fh then fh:close(); return alt end
+      end
+      idx = idx + 1
+    end
+  end
+  return candidate
+end
+
+local function get_reaper_ini_path()
+  -- В портативных сборках имя файла может отличаться регистром.
+  return get_resource_file_path('reaper.ini')
+end
+
+local function get_reaper_kb_ini_path()
+  return get_resource_file_path('reaper-kb.ini')
 end
 
 local function trim(s) return (s:gsub('^%s+', ''):gsub('%s+$','')) end
+
+local function check_action_exists(command_id, keymap_path)
+  if type(reaper.NamedCommandLookup) == 'function' then
+    local token = '_' .. command_id
+    if reaper.NamedCommandLookup(token) ~= 0 then
+      return true, nil
+    end
+  end
+  local f, ferr = io.open(keymap_path, 'rb')
+  if not f then
+    return false, 'файл "' .. keymap_path .. '" недоступен: ' .. (ferr or 'неизвестная ошибка доступа')
+  end
+  for raw_line in f:lines() do
+    local line = raw_line:gsub('%z', '')
+    if line:find(command_id, 1, true) then
+      f:close()
+      return true, nil
+    end
+  end
+  f:close()
+  return false, 'команда отсутствует в "' .. keymap_path .. '"'
+end
 
 local function find_reaper_section(lines)
   local in_section = false
@@ -115,24 +154,14 @@ local function detect_port()
 end
 
 local port, perr = detect_port()
-local resource_path = reaper.GetResourcePath()
-local keymap_file = resource_path .. sep .. 'reaper-kb.ini'
+local keymap_file = get_reaper_kb_ini_path()
 local action_id = 'FRZZ_WEB_NOTES_READER'
-local action_found = false
-do
-  local f = io.open(keymap_file, 'r')
-  if f then
-    for line in f:lines() do
-      if line:find(action_id, 1, true) then action_found = true break end
-    end
-    f:close()
-  end
-end
+local action_found, action_err = check_action_exists(action_id, keymap_file)
 
 if not port or not action_found then
   local reasons = {}
   if not port then table.insert(reasons, 'порт WebUI не найден (csurf_* с prompter.html отсутствует)') end
-  if not action_found then table.insert(reasons, 'action "'..action_id..'" не найден в reaper-kb.ini') end
+  if not action_found then table.insert(reasons, 'action "' .. action_id .. '" не найден: ' .. (action_err or 'причина не определена')) end
   local msg = 'Запуск текстового монитора невозможен:\n - ' .. table.concat(reasons, '\n - ') .. '\n\nПереустановите компонент (инсталлер) или настройте вручную.'
   reaper.ShowMessageBox(msg, 'Web Prompter — ошибка', 0)
   return
@@ -141,9 +170,11 @@ end
 local is_mac = (reaper.GetOS() or ''):match('OSX') ~= nil
 local host = is_mac and '127.0.0.1' or 'localhost'
 
+---@diagnostic disable-next-line: undefined-field
 if reaper.WEBVIEW_Navigate then
   local url = string.format('http://%s:%d', host, port)
   local params = '{"SetTitle":"NotesReader","InstanceId":"wv_NOTES","ShowPanel":"docker"}'
+  ---@diagnostic disable-next-line: undefined-field
   reaper.WEBVIEW_Navigate(url, params)
 else
   reaper.ShowMessageBox("Функция WEBVIEW_Navigate не найдена! Убедитесь, что плагин Reaper WebView обновлен и установлен корректно.", "Ошибка", 0)

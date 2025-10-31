@@ -16,6 +16,9 @@ jobs:
         os: [windows-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
+    env:
+      PROMPTER_VERSION: unknown
+      OS_NAME: ''
 
     steps:
     - name: Checkout repository
@@ -25,8 +28,10 @@ jobs:
       id: extract_version
       shell: bash
       run: |
-        TITLE=$(sed -n 's|.*<title>\(.*\)</title>.*|\1|p' reaper_www_root/prompter.html | xargs)
-        VERSION=$(echo "$TITLE" | grep -o 'v[0-9.]*' || echo "unknown")
+        VERSION=$(sed -n "s/.*const[[:space:]]\+APP_VERSION[[:space:]]*=[[:space:]]*['\"]\([^'\"]\+\)['\"].*/\1/p" reaper_www_root/script.js | head -n 1)
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown"
+        fi
         OS_NAME=""
         if [ "${{ runner.os }}" == "Windows" ]; then
           OS_NAME="win"
@@ -85,6 +90,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      PRODUCT_NAME_RU: ''
+      PRODUCT_NAME_EN: ''
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
