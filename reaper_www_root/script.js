@@ -19,6 +19,517 @@ const SUBTREADER_INERTIA_WINDOW_SECONDS = 0.7; // SubtReader UI.transition_sec w
 const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to prevent jitter
 const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
 
+function isQueryFlagEnabled(paramName) {
+    if (typeof window === 'undefined' || !window.location) return false;
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        if (!params.has(paramName)) return false;
+        const value = params.get(paramName);
+        if (value == null || value === '') return true;
+        return !/^(0|false|no|off)$/i.test(value);
+    } catch (_) {
+        return false;
+    }
+}
+
+const DEBUG_LOG_BOOT_ENABLED = isQueryFlagEnabled('debug') || isQueryFlagEnabled('emumode');
+
+const ConsoleMirror = (() => {
+    const LEVELS = ['log', 'info', 'warn', 'error', 'debug'];
+    const MAX_ENTRIES = 600;
+    const MAX_ARG_LENGTH = 20000;
+    const buffer = [];
+    const listeners = new Set();
+    const originals = {};
+    let installed = false;
+    const SKIP_PREDICATES = [
+        args => args.some(arg => typeof arg === 'string' && /wwr_req/i.test(arg) && /transport/i.test(arg)),
+        args => args.some(arg => typeof arg === 'string' && arg.trim().toUpperCase() === 'TRANSPORT'),
+        args => args.some(arg => isTransportRequestObject(arg))
+    ];
+
+    function install() {
+        if (installed) return true;
+        if (typeof console !== 'object' || console === null) return false;
+        if (console.__FRZZ_PROMPTER_LOG_MIRROR__) {
+            installed = true;
+            return true;
+        }
+        LEVELS.forEach(level => {
+            const original = typeof console[level] === 'function' ? console[level].bind(console) : null;
+            if (!original) return;
+            originals[level] = original;
+            console[level] = function patchedConsoleMethod(...args) {
+                try { capture(level, args); } catch (_) { /* ignore */ }
+                return original(...args);
+            };
+        });
+        if (typeof console.clear === 'function') {
+            const originalClear = console.clear.bind(console);
+            originals.clear = originalClear;
+            console.clear = function patchedConsoleClear(...args) {
+                try { reset(); } catch (_) { /* ignore */ }
+                return originalClear(...args);
+            };
+        }
+        installed = true;
+        Object.defineProperty(console, '__FRZZ_PROMPTER_LOG_MIRROR__', {
+            value: true,
+            configurable: false,
+            enumerable: false,
+            writable: false
+        });
+        return true;
+    }
+
+    function capture(level, args) {
+        if (shouldSkip(args)) return;
+        const entry = {
+            id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+            level,
+            timestamp: Date.now(),
+            args: formatArgs(args)
+        };
+        buffer.push(entry);
+        if (buffer.length > MAX_ENTRIES) buffer.shift();
+        notify({ type: 'append', entry, size: buffer.length });
+    }
+
+    function shouldSkip(args) {
+        if (!Array.isArray(args) || args.length === 0) return false;
+        return SKIP_PREDICATES.some(predicate => {
+            try { return predicate(args); } catch (_) { return false; }
+        });
+    }
+
+    function formatArgs(args) {
+        return args.map(value => truncateArg(formatValue(value)));
+    }
+
+    function formatValue(value) {
+        if (typeof value === 'string') return value;
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+        if (typeof value === 'bigint') return `${value.toString()}n`;
+        if (value === null) return 'null';
+        if (value === undefined) return 'undefined';
+        if (value instanceof Error) {
+            return value.stack || `${value.name || 'Error'}: ${value.message}`;
+        }
+        if (typeof value === 'function') {
+            return `[Function ${value.name || 'anonymous'}]`;
+        }
+        if (typeof value === 'object') {
+            return safeStringify(value);
+        }
+        try { return String(value); } catch (_) { return '[Unserializable]'; }
+    }
+
+    function truncateArg(text) {
+        if (typeof text !== 'string') return '';
+        return text.length > MAX_ARG_LENGTH ? `${text.slice(0, MAX_ARG_LENGTH)} …[truncated]` : text;
+    }
+
+    function safeStringify(value) {
+        const seen = new WeakSet();
+        const replacer = (_key, val) => {
+            if (typeof val === 'function') return `[Function ${val.name || 'anonymous'}]`;
+            if (typeof val === 'bigint') return `${val.toString()}n`;
+            if (val && typeof val === 'object') {
+                if (seen.has(val)) return '[Circular]';
+                seen.add(val);
+            }
+            return val;
+        };
+        try {
+            return JSON.stringify(value, replacer, 2);
+        } catch (_) {
+            try { return String(value); } catch (err) { return `[Unserializable: ${err && err.message ? err.message : 'unknown'}]`; }
+        }
+    }
+
+    function isTransportRequestObject(value, tracker) {
+        if (!value || typeof value !== 'object') return false;
+        const seen = tracker || new WeakSet();
+        if (seen.has(value)) return false;
+        seen.add(value);
+        try {
+            const candidate = value.wwr_req || value.request || value.command || value.type;
+            if (typeof candidate === 'string' && /transport/i.test(candidate)) {
+                return true;
+            }
+            if (Array.isArray(value)) {
+                return value.some(item => isTransportRequestObject(item, seen));
+            }
+            const nestedKeys = ['payload', 'data', 'body', 'args'];
+            for (let idx = 0; idx < nestedKeys.length; idx++) {
+                const nested = value[nestedKeys[idx]];
+                if (nested && typeof nested === 'object' && isTransportRequestObject(nested, seen)) {
+                    return true;
+                }
+            }
+        } catch (_) {
+            return false;
+        }
+        return false;
+    }
+
+    function notify(event) {
+        listeners.forEach(listener => {
+            try { listener(event); } catch (_) { /* ignore listener errors */ }
+        });
+    }
+
+    function subscribe(listener) {
+        if (typeof listener !== 'function') return () => {};
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+    }
+
+    function getEntries() {
+        return buffer.slice();
+    }
+
+    function clear() {
+        reset();
+    }
+
+    function reset() {
+        if (!buffer.length) return;
+        buffer.length = 0;
+        notify({ type: 'reset', size: 0 });
+    }
+
+    return {
+        install,
+        subscribe,
+        getEntries,
+        clear
+    };
+})();
+
+const DebugLogUI = (() => {
+    const EVENT_NAMESPACE = '.frzzDebugLog';
+    let enabled = false;
+    let statusIndicator = null;
+    let modal = null;
+    let scrollArea = null;
+    let entriesContainer = null;
+    let emptyState = null;
+    let clearButton = null;
+    let saveButton = null;
+    let unsubscribe = null;
+
+    function init(options) {
+        enabled = !!(options && options.enabled);
+        statusIndicator = options && options.statusIndicator ? options.statusIndicator : $();
+        modal = options && options.modal ? options.modal : $();
+        scrollArea = options && options.scrollArea ? options.scrollArea : $();
+        entriesContainer = options && options.entriesContainer ? options.entriesContainer : $();
+        emptyState = options && options.emptyState ? options.emptyState : $();
+        clearButton = options && options.clearButton ? options.clearButton : $();
+    saveButton = options && options.saveButton ? options.saveButton : $();
+
+        if (!enabled) {
+            teardownInteractiveState();
+            disableControls();
+            return;
+        }
+
+        ConsoleMirror.install();
+        renderInitial(ConsoleMirror.getEntries());
+        unsubscribe = ConsoleMirror.subscribe(handleConsoleEvent);
+        setupInteractiveState();
+        setupModalHandlers();
+        setupClearButton();
+    setupSaveButton();
+        updateEmptyState();
+    }
+
+    function handleConsoleEvent(event) {
+        if (!enabled || !event || typeof event !== 'object') return;
+        if (event.type === 'append' && event.entry) {
+            appendEntry(event.entry);
+        } else if (event.type === 'reset') {
+            clearRenderedEntries();
+        }
+    }
+
+    function renderInitial(entries) {
+        if (!entriesContainer || !entriesContainer.length) return;
+        entriesContainer.empty();
+        if (Array.isArray(entries) && entries.length) {
+            const fragment = document.createDocumentFragment();
+            entries.forEach(entry => fragment.appendChild(createEntryElement(entry)));
+            entriesContainer[0].appendChild(fragment);
+            updateEmptyState();
+            scrollToBottom();
+        } else {
+            updateEmptyState();
+        }
+    }
+
+    function appendEntry(entry) {
+        if (!entriesContainer || !entriesContainer.length) return;
+        const stickToBottom = isNearBottom();
+        entriesContainer[0].appendChild(createEntryElement(entry));
+        updateEmptyState();
+        if (stickToBottom) scrollToBottom();
+    }
+
+    function createEntryElement(entry) {
+        const wrapper = document.createElement('div');
+        wrapper.className = `debug-log-entry level-${entry.level || 'log'}`;
+
+        const meta = document.createElement('div');
+        meta.className = 'debug-log-meta';
+        const timeSpan = document.createElement('span');
+        timeSpan.textContent = formatTimestamp(entry.timestamp);
+        const levelSpan = document.createElement('span');
+        levelSpan.textContent = String((entry.level || 'log')).toUpperCase();
+        meta.appendChild(timeSpan);
+        meta.appendChild(levelSpan);
+        wrapper.appendChild(meta);
+
+        if (Array.isArray(entry.args) && entry.args.length) {
+            const argsContainer = document.createElement('div');
+            argsContainer.className = 'debug-log-args';
+            entry.args.forEach(argText => {
+                const argBlock = document.createElement('pre');
+                argBlock.className = 'debug-log-arg';
+                argBlock.textContent = argText;
+                argsContainer.appendChild(argBlock);
+            });
+            wrapper.appendChild(argsContainer);
+        }
+
+        return wrapper;
+    }
+
+    function setupInteractiveState() {
+        if (!statusIndicator || !statusIndicator.length) return;
+        statusIndicator.addClass('is-interactive')
+            .attr('role', 'button')
+            .attr('tabindex', '0')
+            .attr('aria-haspopup', 'dialog')
+            .attr('aria-controls', modal && modal.length ? modal.attr('id') : '')
+            .attr('aria-expanded', 'false');
+        if (!statusIndicator.attr('title')) {
+            statusIndicator.attr('title', 'Открыть журнал');
+        }
+        statusIndicator.on(`click${EVENT_NAMESPACE}`, event => {
+            event.preventDefault();
+            openModal();
+        });
+        statusIndicator.on(`keydown${EVENT_NAMESPACE}`, event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openModal();
+            }
+        });
+    }
+
+    function teardownInteractiveState() {
+        if (!statusIndicator || !statusIndicator.length) return;
+        statusIndicator.removeClass('is-interactive')
+            .removeAttr('role tabindex aria-haspopup aria-controls aria-expanded');
+        statusIndicator.off(EVENT_NAMESPACE);
+    }
+
+    function setupModalHandlers() {
+        if (!modal || !modal.length) return;
+    modal.attr('role', 'dialog').attr('aria-modal', 'true').attr('aria-hidden', 'true').hide();
+        modal.on(`click${EVENT_NAMESPACE}`, event => {
+            if (event.target === modal[0]) closeModal();
+        });
+        modal.find('.modal-close-button').on(`click${EVENT_NAMESPACE}`, event => {
+            event.preventDefault();
+            closeModal();
+        });
+        $(document).on(`keydown${EVENT_NAMESPACE}`, event => {
+            if (event.key === 'Escape' && modal.is(':visible')) {
+                event.preventDefault();
+                closeModal();
+            }
+        });
+    }
+
+    function setupClearButton() {
+        if (!clearButton || !clearButton.length) return;
+        clearButton.prop('disabled', entriesContainer && entriesContainer.children().length === 0);
+        clearButton.on(`click${EVENT_NAMESPACE}`, event => {
+            event.preventDefault();
+            ConsoleMirror.clear();
+        });
+    }
+
+    function setupSaveButton() {
+        if (!saveButton || !saveButton.length) return;
+        saveButton.prop('disabled', entriesContainer && entriesContainer.children().length === 0);
+        saveButton.on(`click${EVENT_NAMESPACE}`, event => {
+            event.preventDefault();
+            exportLogToFile();
+        });
+    }
+
+    function disableControls() {
+        if (modal && modal.length) {
+            modal.hide();
+            modal.attr('aria-hidden', 'true');
+        }
+        if (clearButton && clearButton.length) {
+            clearButton.prop('disabled', true).off(EVENT_NAMESPACE);
+        }
+        if (saveButton && saveButton.length) {
+            saveButton.prop('disabled', true).off(EVENT_NAMESPACE);
+        }
+    }
+
+    function clearRenderedEntries() {
+        if (entriesContainer && entriesContainer.length) {
+            entriesContainer.empty();
+        }
+        updateEmptyState();
+    }
+
+    function updateEmptyState() {
+        const hasEntries = entriesContainer && entriesContainer.length && entriesContainer.children().length > 0;
+        if (emptyState && emptyState.length) emptyState.toggle(!hasEntries);
+        if (clearButton && clearButton.length) clearButton.prop('disabled', !hasEntries);
+        if (saveButton && saveButton.length) saveButton.prop('disabled', !hasEntries);
+    }
+
+    function openModal() {
+        if (!modal || !modal.length) return;
+        modal.show();
+        modal.attr('aria-hidden', 'false');
+        if (statusIndicator && statusIndicator.length) statusIndicator.attr('aria-expanded', 'true');
+        scrollToBottom();
+        const closeButton = modal.find('.modal-close-button').first();
+        if (closeButton && closeButton.length) {
+            closeButton.trigger('focus');
+        }
+    }
+
+    function closeModal() {
+        if (!modal || !modal.length) return;
+        modal.hide();
+        modal.attr('aria-hidden', 'true');
+        if (statusIndicator && statusIndicator.length) {
+            statusIndicator.attr('aria-expanded', 'false');
+            statusIndicator.trigger('focus');
+        }
+    }
+
+    function isNearBottom() {
+        if (!scrollArea || !scrollArea.length) return true;
+        const el = scrollArea[0];
+        const threshold = 48;
+        return (el.scrollTop + el.clientHeight + threshold) >= el.scrollHeight;
+    }
+
+    function scrollToBottom() {
+        if (!scrollArea || !scrollArea.length) return;
+        const el = scrollArea[0];
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function formatTimestamp(timestamp) {
+        if (!Number.isFinite(timestamp)) return '—';
+        const date = new Date(Number(timestamp));
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        const millis = String(date.getMilliseconds()).padStart(3, '0');
+        return `${hours}:${minutes}:${seconds}.${millis}`;
+    }
+
+    function exportLogToFile() {
+        const entries = ConsoleMirror.getEntries();
+        if (!Array.isArray(entries) || !entries.length) {
+            return;
+        }
+        const lines = entries.map(formatLogFileLine).join('\n');
+        try {
+            const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const filename = `prompter-log-${buildDownloadTimestamp()}.txt`;
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = filename;
+            const parentNode = document.body || document.documentElement;
+            if (!parentNode) {
+                throw new Error('Cannot access document body to trigger download');
+            }
+            parentNode.appendChild(anchor);
+            anchor.click();
+            const cleanup = () => {
+                anchor.remove();
+                URL.revokeObjectURL(url);
+            };
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(cleanup);
+            } else {
+                setTimeout(cleanup, 0);
+            }
+        } catch (err) {
+            console.error('[Prompter][debugLog] failed to export log', err);
+        }
+    }
+
+    function formatLogFileLine(entry) {
+        const stamp = formatLogFileTimestamp(entry && entry.timestamp);
+        const level = String(entry && entry.level ? entry.level : 'log').toUpperCase();
+        const message = formatLogFileMessage(entry && entry.args);
+        return message ? `${stamp} [${level}] ${message}` : `${stamp} [${level}]`;
+    }
+
+    function formatLogFileTimestamp(timestamp) {
+        const safeTimestamp = Number.isFinite(timestamp) ? Number(timestamp) : Date.now();
+        const date = new Date(safeTimestamp);
+        const year = String(date.getFullYear()).padStart(4, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+    const millis = String(date.getMilliseconds()).padStart(3, '0');
+    const offsetMinutes = -date.getTimezoneOffset();
+    const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+    const offsetTotal = Math.abs(offsetMinutes);
+    const offsetHours = String(Math.floor(offsetTotal / 60)).padStart(2, '0');
+    const offsetMins = String(offsetTotal % 60).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}.${millis} GMT${offsetSign}${offsetHours}${offsetMins}`;
+    }
+
+    function formatLogFileMessage(args) {
+        if (!Array.isArray(args) || !args.length) return '';
+        const pieces = args.map(value => sanitizeLogSegment(value)).filter(segment => segment.length);
+        return pieces.join(' ');
+    }
+
+    function sanitizeLogSegment(value) {
+        if (value == null) return '';
+        const text = typeof value === 'string' ? value : String(value);
+        return text.replace(/\s+/g, ' ').trim();
+    }
+
+    function buildDownloadTimestamp() {
+        const now = new Date();
+        const year = String(now.getFullYear()).padStart(4, '0');
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        const seconds = String(now.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day}T${hours}-${minutes}-${seconds}`;
+    }
+
+    return { init };
+})();
+
+if (DEBUG_LOG_BOOT_ENABLED) {
+    ConsoleMirror.install();
+}
+
 const APP_NAME = 'Интерактивный текстовый монитор';
 const APP_VERSION = '1.5.0';
 const APP_VERSION_CODENAME = 'PROJECT JOHN CONNOR';
@@ -601,6 +1112,12 @@ $(document).ready(function() {
     const transportProgressContainer = $('#transport-progress-container');
     const transportProgressBar = $('#transport-progress-bar');
     const transportProgressBarEl = transportProgressBar.length ? transportProgressBar[0] : null;
+    const debugLogModal = $('#debug-log-modal');
+    const debugLogArea = $('#debug-log-area');
+    const debugLogEntries = $('#debug-log-entries');
+    const debugLogEmpty = $('#debug-log-empty');
+    const debugLogClearButton = $('#debug-log-clear');
+    const debugLogSaveButton = $('#debug-log-save');
     const saveSettingsButton = $('#save-settings-button');
     const resetSettingsButton = $('#reset-settings-button');
     const titleModeSelect = $('#title-mode');
@@ -633,6 +1150,17 @@ $(document).ready(function() {
     const settingsTileGrids = $('.settings-tile-grid');
     const TILE_GRID_ROW_SIZE = 6; // finer granularity for masonry spans
     let settingsTileReflowRaf = null;
+
+    DebugLogUI.init({
+        enabled: DEBUG_LOG_BOOT_ENABLED,
+        statusIndicator,
+        modal: debugLogModal,
+        scrollArea: debugLogArea,
+        entriesContainer: debugLogEntries,
+        emptyState: debugLogEmpty,
+        clearButton: debugLogClearButton,
+        saveButton: debugLogSaveButton
+    });
 
     if (textDisplay && typeof textDisplay.on === 'function') {
         textDisplay.on('click', '.subtitle-container', onSubtitleContainerClick);
@@ -3788,14 +4316,7 @@ $(document).ready(function() {
 
     // Emulation mode detection: enabled if ?emumode present and not explicitly 0/false
     function isEmuMode() {
-        try {
-            const sp = new URLSearchParams(window.location.search);
-            if (!sp.has('emumode')) return false;
-            const v = sp.get('emumode');
-            if (v == null || v === '') return true;
-            if (/^(0|false)$/i.test(v)) return false;
-            return true;
-        } catch (_) { return false; }
+        return isQueryFlagEnabled('emumode');
     }
 
     function renderTitle() {

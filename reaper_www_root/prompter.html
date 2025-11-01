@@ -89,6 +89,21 @@
         </main>
     </div>
 
+    <div id="debug-log-modal" class="modal" aria-hidden="true">
+        <div class="modal-content modal-debug-log">
+            <button type="button" class="modal-close-button" aria-label="Закрыть журнал">&times;</button>
+            <h2>Журнал событий</h2>
+            <div id="debug-log-area" class="debug-log-area" role="log" aria-live="polite" aria-relevant="additions text">
+                <div id="debug-log-empty" class="debug-log-empty">Сообщений пока нет. Новые записи появятся здесь.</div>
+                <div id="debug-log-entries" class="debug-log-entries"></div>
+            </div>
+            <div class="debug-log-actions">
+                <button type="button" id="debug-log-save" class="button-secondary">Сохранить лог</button>
+                <button type="button" id="debug-log-clear" class="button-secondary">Очистить журнал</button>
+            </div>
+        </div>
+    </div>
+
     <div id="settings-modal" class="modal">
         <div class="modal-content">
             <span class="modal-close-button">&times;</span>
