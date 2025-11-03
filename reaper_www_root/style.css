@@ -13,6 +13,9 @@ body {
     --filter-dim-opacity: 0.4;
     --filter-dim-overlay-alpha: 0.6;
 }
+:root {
+    --subtitle-fallback-block-size: 96px;
+}
 body.title-hidden h1 { display: none; }
 .container { font-size: 0.75em; }
 .modal-content { font-size: 1.333333em; }
@@ -173,7 +176,18 @@ body.progress-disabled #transport-progress-container { display: none !important;
 main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #1e1e1e; border-radius: 0.5rem; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.3); order: 0; }
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
-.subtitle-container { display: flex; align-items: center; padding: 0 0.5em; border-radius: 0.25rem; transition: background-color 0.3s, color 0.3s; position: relative;}
+.subtitle-container {
+    display: flex;
+    content-visibility: auto;
+    contain: layout paint style;
+    contain-intrinsic-size: auto var(--subtitle-intrinsic-block-size, var(--subtitle-fallback-block-size, 96px));
+    align-items: center;
+    padding: 0 0.5em;
+    border-radius: 0.25rem;
+    transition: background-color 0.3s, color 0.3s;
+    position: relative;
+}
+
 .subtitle-container::after {
     content: '';
     position: absolute;
@@ -190,14 +204,14 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 }
 .subtitle-container.filter-active { transition: background-color 0.3s, color 0.3s, opacity 0.3s ease; }
 .subtitle-container.filter-hidden { display: none !important; }
-.subtitle-time { min-width: 8.5rem; font-size: 1em; color: #ccc; text-align: right; font-family: monospace; padding: 0.3em 0.4em 0.65em; order: 0; display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
+.subtitle-time { min-width: 7.5rem; font-size: 1em; color: #ccc; text-align: left; font-family: monospace; padding: 0.3em 0.4em 0.65em; order: 0; display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
 .subtitle-time .overlap-indicator {
     display: none !important;
     width: 0;
     margin: 0;
     padding: 0;
 }
-.subtitle-time-label { flex: 1 1 auto; text-align: left; white-space: nowrap; }
+.subtitle-time-label { flex: 1 1 auto; white-space: nowrap; }
 .subtitle-time-progress { position: absolute; left: 0.4em; right: 0.4em; bottom: 0.22em; height: 0.22rem; background-color: #ffc107; border-radius: 0.1875rem; transform-origin: left; transform: scaleX(0); transition: transform 0.1s linear, opacity 0.15s ease-in-out; opacity: 0; pointer-events: none; }
 .subtitle-time.has-time-progress .subtitle-time-progress { opacity: 1; }
 .columns-swapped .subtitle-time { justify-content: flex-end; }
@@ -217,9 +231,9 @@ body[data-role-style='column_with_swatch'] .subtitle-color-swatch { width: 0; ma
 /* ++ ИЗМЕНЕНО: Добавлено правило visibility для исправления разметки ++ */
 .subtitle-role, .subtitle-color-swatch { transition: visibility 0s; }
 .role-hidden { visibility: hidden; }
-.subtitle-role { flex-shrink: 0; padding: 0.2em 0.5em; margin-right: 1.5em; text-align: right; color: #ccc; border-radius: 0.25rem; word-break: break-all; overflow-wrap: break-word; display: flex; align-items: center; justify-content: flex-end; }
+.subtitle-role { flex-shrink: 0; padding: 0.2em 0.5em; margin-right: 0.5em; text-align: right; color: #ccc; border-radius: 0.25rem; word-break: break-all; overflow-wrap: break-word; display: flex; align-items: center; justify-content: flex-end; }
 .subtitle-role:not(.inline-role) { order: 2; }
-.subtitle-separator { width: 0.5rem; height: auto; background-color: #555; margin-right: 0.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; order: 3; }
+.subtitle-separator { width: 0.5rem; height: auto; margin-right: 0.5em; border-radius: 0.25rem; align-self: center; min-height: 2em; order: 3; }
 .subtitle-content { flex: 1; display: flex; flex-direction: column; order: 5; align-self: center; padding-bottom: 0.8125rem; }
 .subtitle-content.has-progress { padding-bottom: 0; }
 .subtitle-content.has-progress .subtitle-progress-container { opacity: 1 !important; }
@@ -421,7 +435,6 @@ input[type="checkbox"]:active::after {
 .light-theme #text-display { background-color: #fdfdfd; }
 .light-theme .subtitle-time { color: #555; }
 .light-theme .subtitle-role { color: #444; }
-.light-theme .subtitle-separator { background-color: #ccc; }
 .light-theme .columns-swapped .subtitle-time::after { background-color: #ccc; }
 .light-theme .subtitle-time .overlap-indicator { display: none !important; }
 .light-theme .modal-content { background-color: #fefefe; border: 1px solid #ccc; }

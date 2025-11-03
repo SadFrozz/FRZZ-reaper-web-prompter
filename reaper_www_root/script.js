@@ -4,17 +4,18 @@ const DEFAULT_PROJECT_FPS = 24;
 const MAX_JUMP_PRE_ROLL_SECONDS = 10;
 const MIN_AUTO_SCROLL_WINDOW_GAP = 5;
 const MAX_AUTO_SCROLL_EASING_PER_PIXEL = 10;
-const MAX_AUTO_SCROLL_ANIMATION_MS = 3000;
-const SPEED_BASELINE_FACTOR = 2;
+const MAX_AUTO_SCROLL_ANIMATION_MS = 12000;
+const SPEED_BASELINE_FACTOR = 1;
 const MIN_SPEED_MULTIPLIER = 0.1;
 const MAX_SPEED_MULTIPLIER = 20;
-const PAGE_DYNAMIC_BASE_DURATION_MS = 540;
-const PAGE_DYNAMIC_DISTANCE_COEFFICIENT = 0.9;
-const DEFAULT_PAGE_STATIC_DURATION_MS = 360;
-const DEFAULT_LINE_STATIC_DURATION_MS = 330;
+const PAGE_BASELINE_DURATION_MS = 700;
+const LINE_BASELINE_DURATION_MS = 2000;
+const PAGE_SCROLL_TOLERANCE_PX = 12;
+const LINE_SCROLL_TOLERANCE_PX = 6;
 const MIN_TIMELINE_SCROLL_MS = 120;
 const TIMELINE_ACTIVE_COMPLETION_RATIO = 0.85;
 const TIMELINE_LOOKAHEAD_COMPLETION_RATIO = 0.65;
+const LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS = 0.1;
 const SUBTREADER_INERTIA_WINDOW_SECONDS = 0.7; // SubtReader UI.transition_sec window
 const SUBTREADER_INERTIA_MIN_DISTANCE_PX = 0.75; // ignore tiny scroll deltas to prevent jitter
 const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
@@ -1509,6 +1510,7 @@ $(document).ready(function() {
     let subtitleOverlapIndicators = [];
     let subtitleOverlapInfo = [];
     let overlapGroups = [];
+    let latestOverlapSummary = null;
     let subtitleProgressContainers = [];
     let subtitleProgressBars = [];
     let subtitleProgressValues = [];
@@ -1517,12 +1519,33 @@ $(document).ready(function() {
     let activeTimecodeProgressIndices = new Set();
     let timecodeProgressValues = [];
     let paintGeneration = 0;
-    let paintScheduled = false;
-    let lastVisibleStart = 0;
-    let lastVisibleEnd = 0;
-    const PAINT_BUFFER = 50;
+    const ANIMATION_VIEWPORT_BUFFER = 6;
+    const CONTENT_VISIBILITY_RADIUS = 80;
     let subtitleObserver = null;
     const visibleIndices = new Set();
+    let visibilityObserverActive = false;
+    const PROGRESS_APPLY_EPSILON = 0.001;
+    let initialAutoScrollPending = false;
+    const OVERLAP_PROCESS_INITIAL_RANGE = 150;
+    const OVERLAP_PROCESS_BUFFER = 40;
+    let pendingOverlapRefreshIndices = new Set();
+    let overlapRefreshScheduled = false;
+    let forcedContentVisibilityIndices = new Set();
+    let contentVisibilityUpdateScheduled = false;
+    let contentVisibilityUpdatePending = false;
+    const supportsContentVisibility = (() => {
+        if (typeof document === 'undefined') return false;
+        const style = document.documentElement && document.documentElement.style;
+        return !!(style && 'contentVisibility' in style);
+    })();
+    const supportsContainIntrinsicSize = supportsContentVisibility && (() => {
+        if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') {
+            return false;
+        }
+        return CSS.supports('contain-intrinsic-size: auto 1px');
+    })();
+    let intrinsicSizeCalibrationQueue = [];
+    let intrinsicSizeCalibrationScheduled = false;
 
     function clearPreviousLineHighlight() {
         if (lastPreviousLineIndex === -1) {
@@ -1679,6 +1702,7 @@ $(document).ready(function() {
     let subtitleLoadTrackId = null;
     let subtitlesLoadedOnce = false;
     let currentLineIndex = -1;
+    let lastLineLookaheadIndex = -1;
     let lastPlaybackTimeSeconds = 0;
     let latestTimecode = 0;
     let firstRenderTs = null;
@@ -1694,6 +1718,7 @@ $(document).ready(function() {
         lastTarget: null,
         lastRawProgress: 0
     };
+    let activeAutoScrollPlan = null;
 
     function hasReliableFrameRateForAuto() {
         if (!Number.isFinite(projectFps) || projectFps <= 0) return false;
@@ -2885,129 +2910,413 @@ $(document).ready(function() {
         };
     }
 
-    function applyOverlapAnnotations(result) {
+    function resolveOverlapProcessingIndices(baseIndices) {
+        const total = Array.isArray(subtitleElements) ? subtitleElements.length : 0;
+        if (!total) return [];
+        const resultSet = new Set();
+        if (Array.isArray(baseIndices)) {
+            baseIndices.forEach(idx => {
+                if (Number.isInteger(idx) && idx >= 0 && idx < total) {
+                    resultSet.add(idx);
+                }
+            });
+        }
+        const hasVisibleRange = Number.isInteger(visibleRangeStart) && Number.isInteger(visibleRangeEnd)
+            && visibleRangeEnd >= visibleRangeStart && visibleRangeStart >= 0;
+        if (hasVisibleRange) {
+            const rangeStart = Math.max(0, visibleRangeStart - OVERLAP_PROCESS_BUFFER);
+            const rangeEnd = Math.min(total - 1, visibleRangeEnd + OVERLAP_PROCESS_BUFFER);
+            for (let i = rangeStart; i <= rangeEnd; i += 1) {
+                resultSet.add(i);
+            }
+        }
+        if (!resultSet.size) {
+            const fallbackEnd = Math.min(total - 1, OVERLAP_PROCESS_INITIAL_RANGE);
+            for (let i = 0; i <= fallbackEnd; i += 1) {
+                resultSet.add(i);
+            }
+        }
+        return Array.from(resultSet).sort((a, b) => a - b);
+    }
+
+    function clearOverlapStateForIndex(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleElements.length) {
+            return;
+        }
+        const container = subtitleElements[index];
+        if (container) {
+            container.classList.remove('overlap-active', 'overlap-start', 'overlap-end');
+            container.removeAttribute('data-overlap-size');
+            container.removeAttribute('data-overlap-count');
+            container.removeAttribute('data-overlap-window');
+            if (container.getAttribute && container.getAttribute('data-overlap-title') === '1') {
+                container.removeAttribute('title');
+                container.removeAttribute('data-overlap-title');
+            }
+        }
+        const indicator = subtitleOverlapIndicators[index];
+        if (indicator) {
+            indicator.classList.remove('is-visible');
+            indicator.removeAttribute('data-count');
+            indicator.removeAttribute('title');
+            indicator.textContent = '';
+        }
+    }
+
+    function unwrapOverlapBlock(block) {
+        if (!block || !block.parentNode) {
+            return;
+        }
+        const parent = block.parentNode;
+        while (block.firstChild) {
+            parent.insertBefore(block.firstChild, block);
+        }
+        parent.removeChild(block);
+    }
+
+    function runOverlapRefreshBatch(batchIndices) {
+        if (!Array.isArray(subtitleOverlapInfo) || !subtitleOverlapInfo.length) {
+            return false;
+        }
+        const total = Array.isArray(subtitleElements) ? subtitleElements.length : 0;
+        if (!total) {
+            return false;
+        }
+        const baseSet = new Set();
+        if (Array.isArray(batchIndices)) {
+            batchIndices.forEach(idx => {
+                if (Number.isInteger(idx) && idx >= 0 && idx < total) {
+                    baseSet.add(idx);
+                }
+            });
+        }
+        const limitIndices = resolveOverlapProcessingIndices(Array.from(baseSet));
+        if (!limitIndices.length) {
+            return false;
+        }
+        const analysis = {
+            lineInfo: subtitleOverlapInfo,
+            groups: overlapGroups,
+            summary: latestOverlapSummary
+        };
+        applyOverlapAnnotations(analysis, { limitToIndices: limitIndices });
+        return true;
+    }
+
+    function scheduleOverlapRefresh(indices) {
+        if (Array.isArray(indices) && indices.length) {
+            const total = Array.isArray(subtitleElements) ? subtitleElements.length : 0;
+            indices.forEach(idx => {
+                if (Number.isInteger(idx) && idx >= 0 && idx < total) {
+                    pendingOverlapRefreshIndices.add(idx);
+                }
+            });
+        }
+        if (!pendingOverlapRefreshIndices.size || overlapRefreshScheduled) {
+            return;
+        }
+        overlapRefreshScheduled = true;
+        schedulePostRenderTask(() => {
+            overlapRefreshScheduled = false;
+            if (!pendingOverlapRefreshIndices.size) {
+                return;
+            }
+            const batch = Array.from(pendingOverlapRefreshIndices);
+            const processed = runOverlapRefreshBatch(batch);
+            if (processed) {
+                pendingOverlapRefreshIndices.clear();
+            } else {
+                scheduleOverlapRefresh();
+            }
+        }, { label: 'overlap visibility refresh' });
+    }
+
+    function applyOverlapAnnotations(result, options = {}) {
         const displayNode = textDisplayEl || (textDisplay && textDisplay[0]) || null;
+        const lineInfo = result && Array.isArray(result.lineInfo) ? result.lineInfo : null;
+        const totalLines = lineInfo ? lineInfo.length : 0;
+        const groupsArray = result && Array.isArray(result.groups) ? result.groups : null;
+        const groupIndexMap = new Map();
+
+        if (groupsArray) {
+            groupsArray.forEach(group => {
+                if (!group || !Number.isInteger(group.id) || !Array.isArray(group.indices)) {
+                    return;
+                }
+                groupIndexMap.set(group.id, group.indices);
+            });
+        }
+
+        if (result && result.summary) {
+            latestOverlapSummary = result.summary;
+        }
+
+        let limitSet = null;
+        if (totalLines && options && Array.isArray(options.limitToIndices) && options.limitToIndices.length) {
+            const candidateSet = new Set();
+            options.limitToIndices.forEach(idx => {
+                if (Number.isInteger(idx) && idx >= 0 && idx < totalLines) {
+                    candidateSet.add(idx);
+                }
+            });
+            if (candidateSet.size) {
+                const queue = Array.from(candidateSet);
+                for (let ptr = 0; ptr < queue.length; ptr += 1) {
+                    const idx = queue[ptr];
+                    const entry = lineInfo ? lineInfo[idx] : null;
+                    const groupId = entry && Number.isInteger(entry.groupId) ? entry.groupId : null;
+                    if (groupId === null) continue;
+                    const related = groupIndexMap.get(groupId);
+                    if (!Array.isArray(related)) continue;
+                    for (let i = 0; i < related.length; i += 1) {
+                        const siblingIdx = related[i];
+                        if (!Number.isInteger(siblingIdx) || siblingIdx < 0 || siblingIdx >= totalLines) {
+                            continue;
+                        }
+                        if (!candidateSet.has(siblingIdx)) {
+                            candidateSet.add(siblingIdx);
+                            queue.push(siblingIdx);
+                        }
+                    }
+                }
+                if (candidateSet.size) {
+                    limitSet = candidateSet;
+                }
+            }
+        }
+
+        const processAll = !limitSet;
+        const limitArray = limitSet ? Array.from(limitSet).sort((a, b) => a - b) : null;
 
         if (activeOverlapBlocks.length) {
-            while (activeOverlapBlocks.length) {
-                const block = activeOverlapBlocks.pop();
-                if (!block || !block.parentNode) {
-                    continue;
+            if (processAll) {
+                while (activeOverlapBlocks.length) {
+                    const block = activeOverlapBlocks.pop();
+                    unwrapOverlapBlock(block);
                 }
-                const parent = block.parentNode;
-                while (block.firstChild) {
-                    parent.insertBefore(block.firstChild, block);
+            } else {
+                const retainedBlocks = [];
+                for (let i = 0; i < activeOverlapBlocks.length; i += 1) {
+                    const block = activeOverlapBlocks[i];
+                    if (!block) {
+                        continue;
+                    }
+                    let shouldRemove = false;
+                    const groupIdAttr = block.dataset ? block.dataset.groupId : undefined;
+                    if (groupIdAttr !== undefined) {
+                        const parsed = Number(groupIdAttr);
+                        if (Number.isInteger(parsed) && groupIndexMap.has(parsed)) {
+                            const groupIndices = groupIndexMap.get(parsed) || [];
+                            for (let j = 0; j < groupIndices.length; j += 1) {
+                                if (limitSet.has(groupIndices[j])) {
+                                    shouldRemove = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!shouldRemove && block.children && block.children.length) {
+                        for (let j = 0; j < block.children.length; j += 1) {
+                            const child = block.children[j];
+                            const idx = child && child.dataset ? parseInt(child.dataset.frzzIndex, 10) : NaN;
+                            if (Number.isInteger(idx) && limitSet.has(idx)) {
+                                shouldRemove = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (shouldRemove) {
+                        unwrapOverlapBlock(block);
+                    } else {
+                        retainedBlocks.push(block);
+                    }
                 }
-                parent.removeChild(block);
+                activeOverlapBlocks = retainedBlocks;
             }
         }
 
         if (activeOverlapLineIndices.length) {
-            for (let idx = 0; idx < activeOverlapLineIndices.length; idx += 1) {
-                const lineIndex = activeOverlapLineIndices[idx];
-                const container = subtitleElements[lineIndex];
-                if (container) {
-                    container.classList.remove('overlap-active', 'overlap-start', 'overlap-end');
-                    container.removeAttribute('data-overlap-size');
-                    container.removeAttribute('data-overlap-count');
-                    container.removeAttribute('data-overlap-window');
-                    if (container.getAttribute && container.getAttribute('data-overlap-title') === '1') {
-                        container.removeAttribute('title');
-                        container.removeAttribute('data-overlap-title');
+            if (processAll) {
+                for (let idx = 0; idx < activeOverlapLineIndices.length; idx += 1) {
+                    clearOverlapStateForIndex(activeOverlapLineIndices[idx]);
+                }
+                activeOverlapLineIndices = [];
+            } else {
+                const retained = [];
+                for (let idx = 0; idx < activeOverlapLineIndices.length; idx += 1) {
+                    const lineIndex = activeOverlapLineIndices[idx];
+                    if (limitSet.has(lineIndex)) {
+                        clearOverlapStateForIndex(lineIndex);
+                    } else {
+                        retained.push(lineIndex);
                     }
                 }
-                const indicator = subtitleOverlapIndicators[lineIndex];
-                if (indicator) {
-                    indicator.classList.remove('is-visible');
-                    indicator.removeAttribute('data-count');
-                    indicator.removeAttribute('title');
-                    indicator.textContent = '';
-                }
+                activeOverlapLineIndices = retained;
             }
-            activeOverlapLineIndices = [];
         }
 
-        if (!result || !Array.isArray(result.lineInfo) || !result.lineInfo.length) {
+        if (!lineInfo || !lineInfo.length) {
             return result ? result.summary : null;
         }
 
         const overlapVisualsEnabled = settings.highlightOverlapEnabled !== false;
         if (!overlapVisualsEnabled) {
-            return result.summary;
+            return result ? result.summary : null;
         }
 
         const frameRate = getActiveFrameRate();
         const groupMembers = new Map();
         const updatedOverlapIndices = [];
 
-        for (let i = 0; i < result.lineInfo.length; i += 1) {
-            const entry = result.lineInfo[i];
-            if (!entry) continue;
-            const container = subtitleElements[i];
-            if (!container) continue;
+        if (processAll) {
+            for (let i = 0; i < lineInfo.length; i += 1) {
+                const entry = lineInfo[i];
+                if (!entry) continue;
+                const container = subtitleElements[i];
+                if (!container) continue;
 
-            updatedOverlapIndices.push(i);
+                updatedOverlapIndices.push(i);
 
-            container.classList.add('overlap-active');
-            if (entry.isStart) {
-                container.classList.add('overlap-start');
-            }
-            if (entry.isEnd) {
-                container.classList.add('overlap-end');
-            }
-            container.dataset.overlapSize = String(entry.groupSize);
-            container.dataset.overlapCount = String(entry.overlapCount);
-            container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
+                container.classList.add('overlap-active');
+                if (entry.isStart) {
+                    container.classList.add('overlap-start');
+                }
+                if (entry.isEnd) {
+                    container.classList.add('overlap-end');
+                }
+                container.dataset.overlapSize = String(entry.groupSize);
+                container.dataset.overlapCount = String(entry.overlapCount);
+                container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
 
-            const rangeStartSec = entry.minGroupStartMs / 1000;
-            const rangeEndSec = entry.maxGroupEndMs / 1000;
-            const tooltipBase = entry.groupSize > 2
-                ? `Пересечения: ${entry.groupSize} реплик`
-                : 'Пересечения: 2 реплики';
-            const startTimecode = formatTimecode(rangeStartSec, frameRate);
-            const endTimecode = formatTimecode(rangeEndSec, frameRate);
-            const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
-            const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
-            const tooltipLines = [
-                tooltipBase,
-                `Интервал: ${startTimecode} → ${endTimecode}`,
-                `Длительность: ${durationText}`
-            ];
-            if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
-                tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
-            }
-            if (entry.overlapCount > 0) {
-                tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
-            }
-            container.setAttribute('title', tooltipLines.join('\n'));
-            container.setAttribute('data-overlap-title', '1');
+                const rangeStartSec = entry.minGroupStartMs / 1000;
+                const rangeEndSec = entry.maxGroupEndMs / 1000;
+                const tooltipBase = entry.groupSize > 2
+                    ? `Пересечения: ${entry.groupSize} реплик`
+                    : 'Пересечения: 2 реплики';
+                const startTimecode = formatTimecode(rangeStartSec, frameRate);
+                const endTimecode = formatTimecode(rangeEndSec, frameRate);
+                const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
+                const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
+                const tooltipLines = [
+                    tooltipBase,
+                    `Интервал: ${startTimecode} → ${endTimecode}`,
+                    `Длительность: ${durationText}`
+                ];
+                if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
+                    tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
+                }
+                if (entry.overlapCount > 0) {
+                    tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
+                }
+                container.setAttribute('title', tooltipLines.join('\n'));
+                container.setAttribute('data-overlap-title', '1');
 
-            let indicator = subtitleOverlapIndicators[i];
-            if (!indicator) {
-                const timeEl = subtitleTimeElements[i];
-                if (timeEl) {
-                    indicator = document.createElement('span');
-                    indicator.className = 'overlap-indicator';
-                    indicator.setAttribute('aria-hidden', 'true');
-                    indicator.textContent = '';
-                    const timeProgressEl = subtitleTimeProgressElements[i];
-                    if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
-                        timeEl.insertBefore(indicator, timeProgressEl);
-                    } else {
-                        timeEl.appendChild(indicator);
+                let indicator = subtitleOverlapIndicators[i];
+                if (!indicator) {
+                    const timeEl = subtitleTimeElements[i];
+                    if (timeEl) {
+                        indicator = document.createElement('span');
+                        indicator.className = 'overlap-indicator';
+                        indicator.setAttribute('aria-hidden', 'true');
+                        indicator.textContent = '';
+                        const timeProgressEl = subtitleTimeProgressElements[i];
+                        if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
+                            timeEl.insertBefore(indicator, timeProgressEl);
+                        } else {
+                            timeEl.appendChild(indicator);
+                        }
+                        subtitleOverlapIndicators[i] = indicator;
                     }
-                    subtitleOverlapIndicators[i] = indicator;
+                }
+                if (indicator) {
+                    indicator.classList.add('is-visible');
+                    indicator.setAttribute('data-count', String(entry.overlapCount));
+                    indicator.setAttribute('title', tooltipLines[0]);
+                }
+                if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
+                    const existing = groupMembers.get(entry.groupId) || [];
+                    existing.push(i);
+                    groupMembers.set(entry.groupId, existing);
                 }
             }
-            if (indicator) {
-                indicator.classList.add('is-visible');
-                indicator.setAttribute('data-count', String(entry.overlapCount));
-                indicator.setAttribute('title', tooltipLines[0]);
-            }
-            if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
-                const existing = groupMembers.get(entry.groupId) || [];
-                existing.push(i);
-                groupMembers.set(entry.groupId, existing);
+        } else if (limitArray && limitArray.length) {
+            for (let idx = 0; idx < limitArray.length; idx += 1) {
+                const lineIndex = limitArray[idx];
+                if (!Number.isInteger(lineIndex) || lineIndex < 0 || lineIndex >= lineInfo.length) {
+                    continue;
+                }
+                const entry = lineInfo[lineIndex];
+                if (!entry) {
+                    continue;
+                }
+                const container = subtitleElements[lineIndex];
+                if (!container) {
+                    continue;
+                }
+
+                updatedOverlapIndices.push(lineIndex);
+
+                container.classList.add('overlap-active');
+                if (entry.isStart) {
+                    container.classList.add('overlap-start');
+                }
+                if (entry.isEnd) {
+                    container.classList.add('overlap-end');
+                }
+                container.dataset.overlapSize = String(entry.groupSize);
+                container.dataset.overlapCount = String(entry.overlapCount);
+                container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
+
+                const rangeStartSec = entry.minGroupStartMs / 1000;
+                const rangeEndSec = entry.maxGroupEndMs / 1000;
+                const tooltipBase = entry.groupSize > 2
+                    ? `Пересечения: ${entry.groupSize} реплик`
+                    : 'Пересечения: 2 реплики';
+                const startTimecode = formatTimecode(rangeStartSec, frameRate);
+                const endTimecode = formatTimecode(rangeEndSec, frameRate);
+                const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
+                const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
+                const tooltipLines = [
+                    tooltipBase,
+                    `Интервал: ${startTimecode} → ${endTimecode}`,
+                    `Длительность: ${durationText}`
+                ];
+                if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
+                    tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
+                }
+                if (entry.overlapCount > 0) {
+                    tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
+                }
+                container.setAttribute('title', tooltipLines.join('\n'));
+                container.setAttribute('data-overlap-title', '1');
+
+                let indicator = subtitleOverlapIndicators[lineIndex];
+                if (!indicator) {
+                    const timeEl = subtitleTimeElements[lineIndex];
+                    if (timeEl) {
+                        indicator = document.createElement('span');
+                        indicator.className = 'overlap-indicator';
+                        indicator.setAttribute('aria-hidden', 'true');
+                        indicator.textContent = '';
+                        const timeProgressEl = subtitleTimeProgressElements[lineIndex];
+                        if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
+                            timeEl.insertBefore(indicator, timeProgressEl);
+                        } else {
+                            timeEl.appendChild(indicator);
+                        }
+                        subtitleOverlapIndicators[lineIndex] = indicator;
+                    }
+                }
+                if (indicator) {
+                    indicator.classList.add('is-visible');
+                    indicator.setAttribute('data-count', String(entry.overlapCount));
+                    indicator.setAttribute('title', tooltipLines[0]);
+                }
+                if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
+                    const existing = groupMembers.get(entry.groupId) || [];
+                    existing.push(lineIndex);
+                    groupMembers.set(entry.groupId, existing);
+                }
             }
         }
 
@@ -3036,9 +3345,17 @@ $(document).ready(function() {
             });
         }
 
-        activeOverlapLineIndices = updatedOverlapIndices;
+        if (processAll) {
+            activeOverlapLineIndices = updatedOverlapIndices;
+        } else {
+            const nextActive = new Set(activeOverlapLineIndices);
+            for (let i = 0; i < updatedOverlapIndices.length; i += 1) {
+                nextActive.add(updatedOverlapIndices[i]);
+            }
+            activeOverlapLineIndices = Array.from(nextActive).sort((a, b) => a - b);
+        }
 
-        return result.summary;
+        return result ? result.summary : null;
     }
 
     function computeAndApplyOverlaps(options = {}) {
@@ -3055,6 +3372,9 @@ $(document).ready(function() {
                 overlapPairs: 0,
                 computeDurationMs: 0
             } });
+            if (summaryPayload) {
+                latestOverlapSummary = summaryPayload;
+            }
             eventBus.emit('overlaps:update', {
                 totalGroups: 0,
                 totalLines: 0,
@@ -3073,6 +3393,9 @@ $(document).ready(function() {
         subtitleOverlapInfo = analysis.lineInfo;
         overlapGroups = analysis.groups;
         const summary = applyOverlapAnnotations(analysis) || analysis.summary;
+        if (summary) {
+            latestOverlapSummary = summary;
+        }
         const payload = {
             totalGroups: summary.totalGroups,
             totalLines: summary.totalLines,
@@ -3088,6 +3411,112 @@ $(document).ready(function() {
         eventBus.emit('overlaps:update', payload);
         console.info('[Prompter][overlaps] analysis', payload);
         return payload;
+    }
+
+    function calibrateIntrinsicSizeForIndex(index, options = {}) {
+        if (!supportsContainIntrinsicSize) return;
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleElements.length) {
+            return;
+        }
+        const container = subtitleElements[index];
+        if (!container) return;
+        if (!options.force && container.dataset && container.dataset.intrinsicCalibrated === '1') {
+            return;
+        }
+        const hadInlineVisibility = container.style && container.style.contentVisibility && container.style.contentVisibility.length > 0;
+        let previousVisibility = '';
+        if (!hadInlineVisibility) {
+            previousVisibility = container.style.contentVisibility;
+            container.style.contentVisibility = 'visible';
+        }
+        const measured = container.offsetHeight || container.scrollHeight || 0;
+        if (measured > 0) {
+            container.style.setProperty('--subtitle-intrinsic-block-size', `${measured}px`);
+            if (container.dataset) {
+                container.dataset.intrinsicCalibrated = '1';
+            }
+        }
+        if (!hadInlineVisibility) {
+            if (previousVisibility) {
+                container.style.contentVisibility = previousVisibility;
+            } else {
+                container.style.removeProperty('content-visibility');
+            }
+        }
+    }
+
+    function ensureIntrinsicSizeForIndex(index) {
+        if (!supportsContainIntrinsicSize) return;
+        calibrateIntrinsicSizeForIndex(index);
+        if (index > 0) {
+            calibrateIntrinsicSizeForIndex(index - 1);
+        }
+        if (index + 1 < subtitleElements.length) {
+            calibrateIntrinsicSizeForIndex(index + 1);
+        }
+    }
+
+    function scheduleIntrinsicSizeCalibration(indices) {
+        if (!supportsContainIntrinsicSize) return;
+        if (Array.isArray(indices) && indices.length) {
+            indices.forEach(idx => {
+                if (Number.isInteger(idx) && idx >= 0 && idx < subtitleElements.length) {
+                    intrinsicSizeCalibrationQueue.push(idx);
+                }
+            });
+        }
+        if (intrinsicSizeCalibrationScheduled || !intrinsicSizeCalibrationQueue.length) {
+            return;
+        }
+        intrinsicSizeCalibrationScheduled = true;
+        const processBatch = (deadline) => {
+            intrinsicSizeCalibrationScheduled = false;
+            if (!intrinsicSizeCalibrationQueue.length) {
+                return;
+            }
+            const startTs = (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+            const maxBatch = 60;
+            let processed = 0;
+            while (intrinsicSizeCalibrationQueue.length) {
+                const idx = intrinsicSizeCalibrationQueue.shift();
+                calibrateIntrinsicSizeForIndex(idx);
+                processed += 1;
+                if (deadline) {
+                    if (deadline.timeRemaining() <= 1) {
+                        break;
+                    }
+                } else {
+                    const nowTs = (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+                    if ((nowTs - startTs) > 8 || processed >= maxBatch) {
+                        break;
+                    }
+                }
+            }
+            if (intrinsicSizeCalibrationQueue.length) {
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(processBatch);
+                } else {
+                    setTimeout(() => processBatch(), 16);
+                }
+            }
+        };
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(processBatch);
+        } else {
+            setTimeout(() => processBatch(), 16);
+        }
+    }
+
+    function primeIntrinsicSizesForAll() {
+        if (!supportsContainIntrinsicSize) return;
+        intrinsicSizeCalibrationQueue = [];
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
+            return;
+        }
+        for (let i = 0; i < subtitleElements.length; i += 1) {
+            intrinsicSizeCalibrationQueue.push(i);
+        }
+        scheduleIntrinsicSizeCalibration();
     }
 
     function encodeEventPayload(payload) {
@@ -3286,13 +3715,34 @@ $(document).ready(function() {
 
     function smoothScrollWrapperTo(targetTop, options = {}) {
         const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
-        if (!wrapper) return;
+        const onComplete = typeof options.onComplete === 'function' ? options.onComplete : null;
+        if (!wrapper) {
+            if (onComplete) {
+                onComplete();
+            }
+            return;
+        }
         const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight);
         const clampedTarget = clampNumber(targetTop, 0, maxScrollTop);
         const currentScrollTop = wrapper.scrollTop;
         const distance = clampedTarget - currentScrollTop;
+        const instant = options.instant === true || (Number.isFinite(options.durationMs) && options.durationMs <= 0);
+        if (instant) {
+            if (scrollAnimationFrame) {
+                cancelAnimationFrame(scrollAnimationFrame);
+                scrollAnimationFrame = null;
+            }
+            wrapper.scrollTop = clampedTarget;
+            if (onComplete) {
+                onComplete();
+            }
+            return;
+        }
         if (Math.abs(distance) < 0.5) {
             wrapper.scrollTop = clampedTarget;
+            if (onComplete) {
+                onComplete();
+            }
             return;
         }
         if (scrollAnimationFrame) {
@@ -3321,6 +3771,9 @@ $(document).ready(function() {
             } else {
                 scrollAnimationFrame = null;
                 wrapper.scrollTop = clampedTarget;
+                if (onComplete) {
+                    onComplete();
+                }
             }
         };
 
@@ -3363,7 +3816,6 @@ $(document).ready(function() {
             applyClickHighlight(element, options.highlightOptions || {});
         }
         paintLine(targetIndex, true);
-        schedulePaintVisible();
     }
 
     function updateJumpControlsState(enabled) {
@@ -3579,6 +4031,9 @@ $(document).ready(function() {
         if (!Number.isInteger(index) || index < 0 || index >= subtitleProgressContainers.length) {
             return;
         }
+        if (!isLineWithinAnimationViewport(index)) {
+            return;
+        }
         const ensured = ensureSubtitleProgressElements(index);
         if (!ensured) {
             return;
@@ -3661,10 +4116,27 @@ $(document).ready(function() {
         if (!Number.isInteger(index) || index < 0 || index >= subtitleTimeElements.length) {
             return;
         }
-        const wrapper = subtitleTimeElements[index];
-        const progressEl = subtitleTimeProgressElements[index];
-        if (!wrapper || !progressEl) {
+        if (!isLineWithinAnimationViewport(index)) {
             return;
+        }
+        const wrapper = subtitleTimeElements[index];
+        if (!wrapper) {
+            return;
+        }
+        let progressEl = subtitleTimeProgressElements[index];
+        if (!progressEl) {
+            progressEl = document.createElement('span');
+            progressEl.className = 'subtitle-time-progress';
+            progressEl.setAttribute('aria-hidden', 'true');
+            progressEl.style.transformOrigin = 'left';
+            progressEl.style.transform = 'scaleX(0)';
+            const indicator = subtitleOverlapIndicators[index];
+            if (indicator && indicator.parentNode === wrapper) {
+                wrapper.insertBefore(progressEl, indicator.nextSibling);
+            } else {
+                wrapper.appendChild(progressEl);
+            }
+            subtitleTimeProgressElements[index] = progressEl;
         }
         if (!activeTimecodeProgressIndices.has(index)) {
             activeTimecodeProgressIndices.add(index);
@@ -3756,8 +4228,6 @@ $(document).ready(function() {
         visibleIndices.clear();
         visibleRangeStart = 0;
         visibleRangeEnd = -1;
-        lastVisibleStart = 0;
-        lastVisibleEnd = 0;
     }
 
     function setupVisibilityObserver() {
@@ -3771,7 +4241,7 @@ $(document).ready(function() {
             }
             visibleRangeStart = 0;
             visibleRangeEnd = subtitleElements.length ? subtitleElements.length - 1 : -1;
-            schedulePaintVisible({ immediate: true });
+            scheduleContentVisibilityUpdate({ force: true });
             return;
         }
         subtitleObserver = new IntersectionObserver(handleSubtitleIntersection, {
@@ -3788,6 +4258,7 @@ $(document).ready(function() {
         });
         visibleRangeStart = 0;
         visibleRangeEnd = -1;
+        scheduleContentVisibilityUpdate({ force: true });
     }
 
     function handleSubtitleIntersection(entries) {
@@ -3829,7 +4300,10 @@ $(document).ready(function() {
             visibleRangeStart = Math.max(0, min);
             visibleRangeEnd = Math.min(subtitleElements.length - 1, max);
         }
-        schedulePaintVisible();
+        scheduleContentVisibilityUpdate();
+        if (Array.isArray(subtitleOverlapInfo) && subtitleOverlapInfo.length) {
+            scheduleOverlapRefresh(Array.from(visibleIndices));
+        }
     }
 
     function getLineTimingBounds(index) {
@@ -3946,63 +4420,30 @@ $(document).ready(function() {
         };
     }
 
-    function applySubtReaderInertia(index, currentTime) {
-        if (!settings.autoScroll || !Number.isFinite(currentTime)) {
-            if (subtReaderInertiaState.activeIndex !== -1) {
-                resetSubtReaderLineState();
-            }
-            return;
-        }
-        const activeMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
-        if (activeMode !== 'line') {
-            if (subtReaderInertiaState.activeIndex !== -1) {
-                resetSubtReaderLineState();
-            }
-            return;
-        }
-        if (settings.autoScrollDynamicSpeedEnabled === false) {
-            if (subtReaderInertiaState.activeIndex !== -1) {
-                resetSubtReaderLineState();
-            }
-            return;
-        }
-        if (scrollAnimationFrame) {
-            return;
-        }
-        const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
-        if (!wrapper) return;
-        const inertiaResult = computeSubtReaderInertiaTarget(index, currentTime);
-        if (!inertiaResult) {
-            if (subtReaderInertiaState.activeIndex !== -1) {
-                resetSubtReaderLineState();
-            }
-            return;
-        }
-        const delta = inertiaResult.target - wrapper.scrollTop;
-        if (Math.abs(delta) < SUBTREADER_INERTIA_MIN_DISTANCE_PX) {
-            subtReaderInertiaState.activeIndex = index;
-            subtReaderInertiaState.lastTarget = inertiaResult.target;
-            subtReaderInertiaState.lastRawProgress = inertiaResult.rawProgress;
-            return;
-        }
-        wrapper.scrollTop = inertiaResult.target;
-        subtReaderInertiaState.activeIndex = index;
-        subtReaderInertiaState.lastTarget = inertiaResult.target;
-        subtReaderInertiaState.lastRawProgress = inertiaResult.rawProgress;
+    function applySubtReaderInertia(_index, _currentTime) {
+        resetSubtReaderLineState();
     }
 
     // Measure target scroll position ahead of DOM mutations to avoid layout thrashing.
     function computeAutoScrollPlan(targetIndex, options = {}) {
-        if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
+        if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= subtitleElements.length) {
             return undefined;
         }
+        ensureIntrinsicSizeForIndex(targetIndex);
         const wrapper = textDisplayWrapperEl || textDisplayWrapper[0] || null;
         if (!wrapper) return undefined;
-        const targetNode = subtitleElements[targetIndex];
-        if (!targetNode) return undefined;
+        const element = subtitleElements[targetIndex];
+        if (!element) return undefined;
+
         const wrapperHeight = wrapper.clientHeight || 0;
-        if (!wrapperHeight) return undefined;
-        const autoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+        const scrollHeight = wrapper.scrollHeight || 0;
+        if (!wrapperHeight || !scrollHeight) return undefined;
+
+        const mode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+        const forceScroll = options.force === true || options.instant === true;
+        const lookahead = options.lookahead === true;
+        const currentTimeSeconds = Number.isFinite(options.currentTime) ? options.currentTime : null;
+
         const rawTopPercent = sanitizeAutoScrollPercent(
             settings.autoScrollWindowTopPercent,
             defaultSettings.autoScrollWindowTopPercent,
@@ -4021,9 +4462,12 @@ $(document).ready(function() {
             : rawBottomPercent;
         const windowTopFraction = clampNumber(windowTopPercent / 100, 0, 0.95);
         const windowBottomFraction = clampNumber(windowBottomPercent / 100, windowTopFraction + 0.01, 1);
-        let targetOffsetTop = typeof targetNode.offsetTop === 'number' ? targetNode.offsetTop : 0;
-        if (typeof targetNode.getBoundingClientRect === 'function' && typeof wrapper.getBoundingClientRect === 'function') {
-            const nodeRect = targetNode.getBoundingClientRect();
+        const windowTopPx = wrapperHeight * windowTopFraction;
+        const windowBottomPx = wrapperHeight * windowBottomFraction;
+
+        let targetOffsetTop = typeof element.offsetTop === 'number' ? element.offsetTop : 0;
+        if (typeof element.getBoundingClientRect === 'function' && typeof wrapper.getBoundingClientRect === 'function') {
+            const nodeRect = element.getBoundingClientRect();
             const wrapperRect = wrapper.getBoundingClientRect();
             if (nodeRect && wrapperRect) {
                 const relativeTop = (nodeRect.top - wrapperRect.top) + wrapper.scrollTop;
@@ -4032,166 +4476,293 @@ $(document).ready(function() {
                 }
             }
         }
+
         const currentScrollTop = wrapper.scrollTop;
-        const relativeTop = targetOffsetTop - currentScrollTop;
-        const elementHeight = Math.max(targetNode.offsetHeight || 1, 1);
-        const topThreshold = wrapperHeight * windowTopFraction;
-        const bottomThreshold = (wrapperHeight * windowBottomFraction) - elementHeight;
-        const currentTimeSeconds = Number.isFinite(options.currentTime) ? options.currentTime : null;
-        const lineAnchorPercent = sanitizeAutoScrollPercent(
-            settings.autoScrollLineAnchorPercent,
-            defaultSettings.autoScrollLineAnchorPercent,
-            0,
-            100
-        );
-        let anchorFraction = windowTopFraction;
-        if (autoScrollMode === 'line') {
-            anchorFraction = clampNumber(lineAnchorPercent / 100, 0.05, 0.95);
-        }
-        const lookaheadMode = options.lookahead === true;
-        const lookaheadOffsetPx = lookaheadMode
-            ? Math.min(elementHeight * 0.6, wrapperHeight * 0.25)
-            : 0;
-        const dynamicSpeedEnabled = settings.autoScrollDynamicSpeedEnabled !== false;
-        const speedFactor = getScrollSpeedMultiplier();
-        const anchorTargetRelativeTop = (wrapperHeight * anchorFraction) + lookaheadOffsetPx;
-        const forceScroll = options.force === true;
-        if (!forceScroll) {
-            if (autoScrollMode === 'line') {
-                const anchorTolerancePx = Math.max(12, Math.min(elementHeight * 0.5, wrapperHeight * 0.1));
-                const currentCenter = relativeTop + (elementHeight * 0.5);
-                if (Math.abs(currentCenter - anchorTargetRelativeTop) <= anchorTolerancePx) {
-                    return null;
-                }
-            } else if (relativeTop >= topThreshold && relativeTop <= bottomThreshold) {
+        const elementHeight = Math.max(element.offsetHeight || 1, 1);
+        const elementTopRelative = targetOffsetTop - currentScrollTop;
+        const elementBottomRelative = elementTopRelative + elementHeight;
+
+    // Mirror manual timecode centering: derive scroll target from relative element geometry first.
+    let desiredScrollTop = currentScrollTop;
+        if (mode === 'line') {
+            const lineAnchorPercent = sanitizeAutoScrollPercent(
+                settings.autoScrollLineAnchorPercent,
+                defaultSettings.autoScrollLineAnchorPercent,
+                0,
+                100
+            );
+            const anchorFraction = clampNumber(lineAnchorPercent / 100, 0.05, 0.95);
+            const lookaheadOffsetPx = lookahead
+                ? Math.min(elementHeight * 0.6, wrapperHeight * 0.25)
+                : 0;
+            const anchorTarget = (wrapperHeight * anchorFraction) + lookaheadOffsetPx;
+            const elementCenter = elementTopRelative + (elementHeight * 0.5);
+            const deltaToAnchor = elementCenter - anchorTarget;
+            const tolerancePx = Math.max(LINE_SCROLL_TOLERANCE_PX, Math.min(elementHeight * 0.5, wrapperHeight * 0.1));
+            if (!forceScroll && Math.abs(deltaToAnchor) <= tolerancePx) {
                 return null;
             }
-        }
-        let desiredScrollTop;
-        if (autoScrollMode === 'line') {
-            desiredScrollTop = targetOffsetTop - anchorTargetRelativeTop + (elementHeight * 0.5);
+            desiredScrollTop = clampNumber(
+                currentScrollTop + deltaToAnchor,
+                0,
+                Math.max(0, scrollHeight - wrapperHeight)
+            );
         } else {
-            desiredScrollTop = targetOffsetTop - anchorTargetRelativeTop;
+            const tolerancePx = Math.max(PAGE_SCROLL_TOLERANCE_PX, Math.min(elementHeight * 0.25, wrapperHeight * 0.08));
+            const isAbove = elementTopRelative < (windowTopPx - tolerancePx);
+            const isBelow = elementBottomRelative > (windowBottomPx + tolerancePx);
+            if (!forceScroll && !isAbove && !isBelow) {
+                return null;
+            }
+            const alignTopTarget = targetOffsetTop - windowTopPx;
+            desiredScrollTop = clampNumber(alignTopTarget, 0, Math.max(0, scrollHeight - wrapperHeight));
         }
-        const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapperHeight);
-        const clampedTarget = clampNumber(desiredScrollTop, 0, maxScrollTop);
-        const distance = Math.abs(clampedTarget - currentScrollTop);
-        if (!forceScroll && distance < 0.5) {
+
+        const distance = desiredScrollTop - currentScrollTop;
+        if (!forceScroll && Math.abs(distance) < 0.5) {
             return null;
         }
+
+    const speedMultiplier = getScrollSpeedMultiplier();
+    const dynamicSpeedEnabled = false; // dynamic speed temporarily disabled
         let durationMs;
-        let easingFn;
-        if (autoScrollMode === 'line') {
-            const baseMs = sanitizeAutoScrollLineEasingBaseMs(settings.autoScrollLineEasingBaseMs, defaultSettings.autoScrollLineEasingBaseMs);
-            const perPixel = sanitizeAutoScrollLineEasingPerPixel(settings.autoScrollLineEasingPerPixel, defaultSettings.autoScrollLineEasingPerPixel);
-            const maxMs = sanitizeAutoScrollLineEasingMaxMs(settings.autoScrollLineEasingMaxMs, defaultSettings.autoScrollLineEasingMaxMs);
+
+        if (options.instant === true) {
+            durationMs = 0;
+        } else if (mode === 'line') {
+            const baseMs = sanitizeAutoScrollLineEasingBaseMs(
+                settings.autoScrollLineEasingBaseMs,
+                defaultSettings.autoScrollLineEasingBaseMs
+            );
+            const perPixel = sanitizeAutoScrollLineEasingPerPixel(
+                settings.autoScrollLineEasingPerPixel,
+                defaultSettings.autoScrollLineEasingPerPixel
+            );
+            const maxMs = sanitizeAutoScrollLineEasingMaxMs(
+                settings.autoScrollLineEasingMaxMs,
+                defaultSettings.autoScrollLineEasingMaxMs
+            );
             if (dynamicSpeedEnabled) {
-                const adjustedBase = Math.max(40, baseMs / speedFactor);
-                const adjustedPerPixel = Math.max(0, perPixel / speedFactor);
-                const computed = adjustedBase + (Math.abs(distance) * adjustedPerPixel);
-                durationMs = clampNumber(Math.round(computed), 60, maxMs);
-                if (lookaheadMode) {
-                    durationMs = Math.min(durationMs, Math.max(120, adjustedBase));
-                }
+                const dynamicBase = Math.max(baseMs, 120);
+                const computed = (dynamicBase + Math.abs(distance) * perPixel) / speedMultiplier;
+                const lowerBound = (LINE_BASELINE_DURATION_MS * 0.45) / speedMultiplier;
+                durationMs = clampNumber(Math.round(Math.max(computed, lowerBound)), MIN_TIMELINE_SCROLL_MS, Math.max(maxMs, LINE_BASELINE_DURATION_MS));
             } else {
-                const staticDuration = Math.max(60, DEFAULT_LINE_STATIC_DURATION_MS / speedFactor);
-                durationMs = clampNumber(Math.round(staticDuration), 60, maxMs);
+                const staticBase = Math.max(baseMs, LINE_BASELINE_DURATION_MS);
+                const computed = staticBase / speedMultiplier;
+                durationMs = clampNumber(Math.round(computed), MIN_TIMELINE_SCROLL_MS, Math.max(maxMs, LINE_BASELINE_DURATION_MS));
             }
-            easingFn = easeInOutCubic;
         } else {
             if (dynamicSpeedEnabled) {
-                const distanceComponent = Math.min(1400, distance * PAGE_DYNAMIC_DISTANCE_COEFFICIENT);
-                const baseDuration = Math.max(PAGE_DYNAMIC_BASE_DURATION_MS, distanceComponent);
-                let computedDuration = clampNumber(
-                    Math.round(baseDuration / speedFactor),
-                    80,
-                    MAX_AUTO_SCROLL_ANIMATION_MS
-                );
-                if (lookaheadMode) {
-                    const cappedBase = Math.max(220, PAGE_DYNAMIC_BASE_DURATION_MS / speedFactor);
-                    computedDuration = Math.min(computedDuration, cappedBase);
-                }
-                durationMs = computedDuration;
+                const normalizedDistance = clampNumber(Math.abs(distance) / Math.max(wrapperHeight, 1), 0, 1.75);
+                const dynamicScale = 0.45 + (normalizedDistance * 0.55);
+                const computed = (PAGE_BASELINE_DURATION_MS * dynamicScale) / speedMultiplier;
+                durationMs = clampNumber(Math.round(computed), MIN_TIMELINE_SCROLL_MS, MAX_AUTO_SCROLL_ANIMATION_MS);
             } else {
-                durationMs = clampNumber(
-                    Math.round(DEFAULT_PAGE_STATIC_DURATION_MS / speedFactor),
-                    80,
-                    MAX_AUTO_SCROLL_ANIMATION_MS
-                );
+                const computed = PAGE_BASELINE_DURATION_MS / speedMultiplier;
+                durationMs = clampNumber(Math.round(computed), MIN_TIMELINE_SCROLL_MS, MAX_AUTO_SCROLL_ANIMATION_MS);
             }
-            easingFn = easeOutCubic;
         }
-        const timelineConstraintMs = computeTimelineDurationConstraint(targetIndex, currentTimeSeconds, lookaheadMode);
+
+        const timelineConstraintMs = dynamicSpeedEnabled
+            ? computeTimelineDurationConstraint(targetIndex, currentTimeSeconds, lookahead)
+            : null;
         if (timelineConstraintMs !== null && Number.isFinite(durationMs)) {
-            durationMs = Math.min(durationMs, timelineConstraintMs);
-            durationMs = Math.max(MIN_TIMELINE_SCROLL_MS, durationMs);
+            durationMs = Math.max(MIN_TIMELINE_SCROLL_MS, Math.min(durationMs, timelineConstraintMs));
         }
+
+        const easingFn = mode === 'line' ? easeInOutCubic : easeOutCubic;
+
         return {
-            targetScrollTop: clampedTarget,
+            targetScrollTop: desiredScrollTop,
             durationMs,
             easing: easingFn,
-            mode: autoScrollMode,
-            distance,
-            lookahead: lookaheadMode
+            mode,
+            distance: Math.abs(distance),
+            lookahead,
+            instant: options.instant === true
         };
     }
 
     function autoScrollToIndex(targetIndex, precomputedPlan) {
-        if (typeof targetIndex !== 'number' || targetIndex < 0 || targetIndex >= subtitleElements.length) {
+        if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= subtitleElements.length) {
             return;
         }
         const plan = (typeof precomputedPlan === 'undefined') ? computeAutoScrollPlan(targetIndex) : precomputedPlan;
         if (!plan) {
             return;
         }
+        const planToken = { targetIndex, plan, timestamp: Date.now() };
+        activeAutoScrollPlan = planToken;
         smoothScrollWrapperTo(plan.targetScrollTop, {
-            durationMs: plan.durationMs,
-            easing: plan.easing
+            durationMs: plan.instant ? 0 : plan.durationMs,
+            easing: plan.easing,
+            instant: plan.instant === true,
+            onComplete: () => {
+                if (activeAutoScrollPlan === planToken) {
+                    activeAutoScrollPlan = null;
+                    if (contentVisibilityUpdatePending) {
+                        scheduleContentVisibilityUpdate({ force: true });
+                    }
+                }
+            }
         });
     }
 
-    function invalidateAllLinePaint(options = {}) {
+    function invalidateAllLinePaint() {
         paintGeneration = (paintGeneration + 1) >>> 0;
-        if (options.resetBounds) {
-            lastVisibleStart = 0;
-            lastVisibleEnd = 0;
+        if (Array.isArray(subtitleStyleMetadata) && subtitleStyleMetadata.length) {
+            for (let i = 0; i < subtitleStyleMetadata.length; i += 1) {
+                const meta = subtitleStyleMetadata[i];
+                if (meta) {
+                    meta.colorApplied = false;
+                }
+            }
         }
-        if (options.schedule !== false) {
-            schedulePaintVisible(options.immediate ? { immediate: true } : undefined);
-        }
-    }
-
-
-    function schedulePaintVisible(options) {
-        if (!subtitleElements.length) return;
-        const immediate = options && options.immediate;
-        if (immediate) {
-            paintVisibleRange();
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
             return;
         }
-        if (paintScheduled) return;
-        paintScheduled = true;
+        if (visibleIndices.size) {
+            visibleIndices.forEach(idx => {
+                if (idx >= 0 && idx < subtitleElements.length) {
+                    paintLine(idx, true);
+                }
+            });
+            return;
+        }
+        const hasRange = Number.isInteger(visibleRangeStart)
+            && Number.isInteger(visibleRangeEnd)
+            && visibleRangeEnd >= visibleRangeStart;
+        if (hasRange) {
+            for (let idx = visibleRangeStart; idx <= visibleRangeEnd; idx += 1) {
+                paintLine(idx, true);
+            }
+            return;
+        }
+        for (let idx = 0; idx < subtitleElements.length; idx += 1) {
+            paintLine(idx, true);
+        }
+    }
+
+    function scheduleContentVisibilityUpdate(options = {}) {
+        if (options && options.force === true) {
+            contentVisibilityUpdateScheduled = false;
+            applyContentVisibilityWindow({ force: true });
+            return;
+        }
+        if (contentVisibilityUpdateScheduled) {
+            return;
+        }
+        contentVisibilityUpdateScheduled = true;
         requestAnimationFrame(() => {
-            paintScheduled = false;
-            paintVisibleRange();
+            contentVisibilityUpdateScheduled = false;
+            applyContentVisibilityWindow();
         });
     }
 
-    function paintVisibleRange() {
-        if (!subtitleElements.length) return;
-        const startIndex = visibleRangeStart;
-        const endIndex = visibleRangeEnd;
-        if (endIndex < startIndex) return;
-        paintRange(startIndex, endIndex);
-        lastVisibleStart = startIndex;
-        lastVisibleEnd = endIndex;
+    function applyContentVisibilityWindow(options = {}) {
+        const force = options && options.force === true;
+        if (!force && activeAutoScrollPlan) {
+            contentVisibilityUpdatePending = true;
+            return;
+        }
+        contentVisibilityUpdatePending = false;
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
+            clearContentVisibilityOverrides();
+            return;
+        }
+
+        const total = subtitleElements.length;
+        let start = 0;
+        let end = Math.min(total - 1, CONTENT_VISIBILITY_RADIUS * 2);
+        const hasRange = Number.isInteger(visibleRangeStart)
+            && Number.isInteger(visibleRangeEnd)
+            && visibleRangeEnd >= visibleRangeStart
+            && visibleRangeStart >= 0;
+        if (hasRange) {
+            start = Math.max(0, visibleRangeStart - CONTENT_VISIBILITY_RADIUS);
+            end = Math.min(total - 1, visibleRangeEnd + CONTENT_VISIBILITY_RADIUS);
+        } else if (visibleIndices.size) {
+            let min = Infinity;
+            let max = -1;
+            visibleIndices.forEach(idx => {
+                if (idx < min) min = idx;
+                if (idx > max) max = idx;
+            });
+            if (Number.isFinite(min) && Number.isFinite(max)) {
+                start = Math.max(0, min - CONTENT_VISIBILITY_RADIUS);
+                end = Math.min(total - 1, max + CONTENT_VISIBILITY_RADIUS);
+            }
+        } else {
+            end = Math.min(total - 1, CONTENT_VISIBILITY_RADIUS);
+        }
+
+        const nextSet = new Set();
+        for (let idx = start; idx <= end; idx += 1) {
+            nextSet.add(idx);
+        }
+
+        forcedContentVisibilityIndices.forEach(idx => {
+            if (!nextSet.has(idx)) {
+                if (idx >= 0 && idx < total) {
+                    const el = subtitleElements[idx];
+                    if (el && el.style && el.style.contentVisibility === 'visible') {
+                        el.style.removeProperty('content-visibility');
+                    }
+                }
+            }
+        });
+
+        nextSet.forEach(idx => {
+            if (!forcedContentVisibilityIndices.has(idx)) {
+                const el = subtitleElements[idx];
+                if (el && el.style) {
+                    el.style.contentVisibility = 'visible';
+                }
+            }
+        });
+
+        forcedContentVisibilityIndices = nextSet;
     }
 
-    function paintRange(start, end) {
-        if (start > end) return;
-        for (let i = start; i <= end; i++) {
-            paintLine(i);
+    function clearContentVisibilityOverrides() {
+        if (!forcedContentVisibilityIndices || forcedContentVisibilityIndices.size === 0) {
+            contentVisibilityUpdatePending = false;
+            return;
         }
+        forcedContentVisibilityIndices.forEach(idx => {
+            const el = subtitleElements && idx >= 0 && idx < subtitleElements.length ? subtitleElements[idx] : null;
+            if (el && el.style) {
+                el.style.removeProperty('content-visibility');
+            }
+        });
+        forcedContentVisibilityIndices = new Set();
+        contentVisibilityUpdatePending = false;
+    }
+
+    function isLineWithinAnimationViewport(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleElements.length) {
+            return false;
+        }
+        const hasValidRange = Number.isInteger(visibleRangeStart)
+            && Number.isInteger(visibleRangeEnd)
+            && visibleRangeEnd >= visibleRangeStart;
+        if (!hasValidRange) {
+            if (!visibleIndices.size) {
+                return true;
+            }
+            return visibleIndices.has(index);
+        }
+        const bufferedStart = Math.max(0, visibleRangeStart - ANIMATION_VIEWPORT_BUFFER);
+        const bufferedEnd = Math.min(subtitleElements.length - 1, visibleRangeEnd + ANIMATION_VIEWPORT_BUFFER);
+        return index >= bufferedStart && index <= bufferedEnd;
+    }
+
+    function getSeparatorPaintColor() {
+        if (typeof document === 'undefined' || !document.body) {
+            return '#555';
+        }
+        return document.body.classList.contains('light-theme') ? '#ccc' : '#555';
     }
 
     function paintLine(index, force = false) {
@@ -4217,11 +4788,12 @@ $(document).ready(function() {
         if (!force && meta.colorApplied) return;
 
         const baseColor = colorInfo.color;
-        const useLightened = !!settings.roleFontColorEnabled;
+        const hasBaseColor = !!baseColor;
+        const useLightened = hasBaseColor && !!settings.roleFontColorEnabled;
         const lightened = useLightened ? (getLightenedColorCached(baseColor, true) || null) : null;
 
         const roleEl = colorInfo.roleElement;
-        if (roleEl) {
+        if (roleEl && hasBaseColor) {
             const bgColor = lightened ? lightened.bg : baseColor;
             if (roleEl.style.backgroundColor !== bgColor) {
                 roleEl.style.backgroundColor = bgColor;
@@ -4238,7 +4810,7 @@ $(document).ready(function() {
         }
 
         const columnSwatch = colorInfo.columnSwatch;
-        if (columnSwatch) {
+        if (columnSwatch && hasBaseColor) {
             const desiredBg = lightened ? lightened.bg : baseColor;
             if (columnSwatch.style.backgroundColor !== desiredBg) {
                 columnSwatch.style.backgroundColor = desiredBg;
@@ -4246,10 +4818,18 @@ $(document).ready(function() {
         }
 
         const inlineSwatch = colorInfo.inlineSwatch;
-        if (inlineSwatch) {
+        if (inlineSwatch && hasBaseColor) {
             const desiredBg = lightened ? lightened.bg : baseColor;
             if (inlineSwatch.style.backgroundColor !== desiredBg) {
                 inlineSwatch.style.backgroundColor = desiredBg;
+            }
+        }
+
+        const separatorEl = colorInfo.separator;
+        if (separatorEl) {
+            const separatorColor = getSeparatorPaintColor();
+            if (separatorEl.style.backgroundColor !== separatorColor) {
+                separatorEl.style.backgroundColor = separatorColor;
             }
         }
 
@@ -4286,19 +4866,23 @@ $(document).ready(function() {
             if (inlineSwatch && inlineSwatch.style.backgroundColor) {
                 inlineSwatch.style.backgroundColor = '';
             }
+            const separatorEl = colorInfo.separator;
+            if (separatorEl && separatorEl.style.backgroundColor) {
+                separatorEl.style.backgroundColor = '';
+            }
             meta.colorApplied = false;
         }
     }
 
     function handleWrapperScroll() {
-        schedulePaintVisible();
+        scheduleContentVisibilityUpdate();
     }
 
     if (textDisplayWrapperEl) {
         textDisplayWrapperEl.addEventListener('scroll', handleWrapperScroll, { passive: true });
     }
     window.addEventListener('resize', () => {
-        schedulePaintVisible();
+        scheduleContentVisibilityUpdate();
         if (currentLineIndex !== -1 && settings.autoScroll) {
             requestAnimationFrame(() => autoScrollToIndex(currentLineIndex));
         }
@@ -4643,6 +5227,7 @@ $(document).ready(function() {
 
     function resetAutoScrollState() {
         resetSubtReaderInertiaState();
+        lastLineLookaheadIndex = -1;
     }
 
     function applySettings(options) {
@@ -4984,7 +5569,7 @@ $(document).ready(function() {
             if (currentLineIndex !== -1) {
                 updateTeleprompter(lastPlaybackTimeSeconds);
             }
-            invalidateAllLinePaint({ schedule: true });
+            invalidateAllLinePaint();
             if (Array.isArray(subtitleData) && subtitleData.length) {
                 computeAndApplyOverlaps({ reason: 'settings_update' });
             }
@@ -6593,12 +7178,14 @@ $(document).ready(function() {
             subtitleData = subtitles;
             subtitlesLoadedOnce = true;
             currentLineIndex = -1;
+            lastLineLookaheadIndex = -1;
             if (textDisplayEl) { textDisplayEl.textContent = ''; }
             else { textDisplay.empty(); }
             clearSubtitleProgress();
             clearTimecodeProgress();
             disconnectVisibilityObserver();
             resetVisibilityTracking();
+            clearContentVisibilityOverrides();
             lastPreviousLineIndex = -1;
             const total = subtitleData.length;
             subtitleElements = new Array(total);
@@ -6619,6 +7206,11 @@ $(document).ready(function() {
             activeLineIndices = [];
             activeTimecodeProgressIndices = new Set();
             timecodeProgressValues = new Array(total).fill(0);
+            activeOverlapBlocks = [];
+            activeOverlapLineIndices = [];
+            pendingOverlapRefreshIndices = new Set();
+            overlapRefreshScheduled = false;
+            latestOverlapSummary = null;
             if (total === 0) {
                 subtitleTimeElements = [];
                 subtitleTimeLabelElements = [];
@@ -6631,9 +7223,16 @@ $(document).ready(function() {
                 subtitleProgressBars = [];
                 subtitleProgressValues = [];
                 timecodeProgressValues = [];
-                invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
+                activeOverlapBlocks = [];
+                activeOverlapLineIndices = [];
+                pendingOverlapRefreshIndices = new Set();
+                overlapRefreshScheduled = false;
+                latestOverlapSummary = null;
+                lastLineLookaheadIndex = -1;
+                invalidateAllLinePaint();
                 finalizeDataModelUpdate();
                 computeAndApplyOverlaps({ reason: 'data_empty' });
+                scheduleContentVisibilityUpdate({ force: true });
                 return;
             }
             // After loading subtitles we may need to refresh stats button visibility
@@ -6772,15 +7371,10 @@ $(document).ready(function() {
                 const timeLabelElement = document.createElement('span');
                 timeLabelElement.className = 'subtitle-time-label';
                 timeLabelElement.textContent = timeString;
-                const timeProgressElement = document.createElement('span');
-                timeProgressElement.className = 'subtitle-time-progress';
-                timeProgressElement.setAttribute('aria-hidden', 'true');
-                timeProgressElement.style.transform = 'scaleX(0)';
                 timeElement.appendChild(timeLabelElement);
-                timeElement.appendChild(timeProgressElement);
                 subtitleTimeElements[index] = timeElement;
                 subtitleTimeLabelElements[index] = timeLabelElement;
-                subtitleTimeProgressElements[index] = timeProgressElement;
+                subtitleTimeProgressElements[index] = null;
                 subtitleOverlapIndicators[index] = null;
 
                 let checkerboardClass = '';
@@ -6839,26 +7433,28 @@ $(document).ready(function() {
                 const shouldColorColumnSwatch = !!(swatchElement && swatchElement.classList.contains('column-swatch'));
                 const shouldColorInlineSwatch = !!(swatchElement && swatchElement.classList.contains('inline-swatch'));
 
-                let meta = null;
-                if (checkerboardClass) {
-                    meta = { checkerboardClass, checkerboardApplied: false, colorInfo: null, colorApplied: false };
+                if (separatorElement) {
+                    separatorElement.style.backgroundColor = '';
                 }
-                if (shouldColorRole || shouldColorColumnSwatch || shouldColorInlineSwatch) {
-                    if (!meta) {
-                        meta = { checkerboardClass: checkerboardClass || '', checkerboardApplied: false, colorInfo: null, colorApplied: false };
-                    }
-                    meta.colorInfo = {
-                        color: finalRoleColorCandidate,
-                        roleElement: shouldColorRole ? roleElement : null,
-                        columnSwatch: shouldColorColumnSwatch ? swatchElement : null,
-                        inlineSwatch: shouldColorInlineSwatch ? swatchElement : null
+
+                const colorInfo = (shouldColorRole || shouldColorColumnSwatch || shouldColorInlineSwatch || separatorElement) ? {
+                    color: finalRoleColorCandidate || null,
+                    roleElement: shouldColorRole ? roleElement : null,
+                    columnSwatch: shouldColorColumnSwatch ? swatchElement : null,
+                    inlineSwatch: shouldColorInlineSwatch ? swatchElement : null,
+                    separator: separatorElement || null
+                } : null;
+
+                let meta = null;
+                if (checkerboardClass || colorInfo) {
+                    meta = {
+                        checkerboardClass: checkerboardClass || '',
+                        checkerboardApplied: false,
+                        colorInfo,
+                        colorApplied: false
                     };
-                    meta.colorApplied = false;
                 }
                 if (meta) {
-                    if (!meta.checkerboardClass && checkerboardClass) {
-                        meta.checkerboardClass = checkerboardClass;
-                    }
                     subtitleStyleMetadata[index] = meta;
                 }
 
@@ -6950,8 +7546,7 @@ $(document).ready(function() {
             displayNode.appendChild(fragment);
             const tAppend1 = performance.now();
             setupVisibilityObserver();
-            invalidateAllLinePaint({ resetBounds: true, schedule: false, immediate: true });
-            schedulePaintVisible();
+            invalidateAllLinePaint();
             computeAndApplyOverlaps({ reason: 'data_load' });
             const t1 = performance.now();
             const renderMs = t1 - t0;
@@ -6980,6 +7575,8 @@ $(document).ready(function() {
             renderRoleFilterChips();
             updateFilterRuntimeFromSettings();
             recomputeFilteringState({ reason: 'data_load', force: true });
+            scheduleContentVisibilityUpdate({ force: true });
+            initialAutoScrollPending = true;
             updateTeleprompter(latestTimecode);
         } catch (e) { console.error("Error in handleTextResponse:", e); }
     }
@@ -8214,12 +8811,22 @@ $(document).ready(function() {
             const oldCurrentIndex = currentLineIndex;
             const indexChanged = newCurrentLineIndex !== oldCurrentIndex;
             const autoScrollEnabled = !!settings.autoScroll;
+            const autoScrollMode = sanitizeAutoScrollMode(settings.autoScrollMode, defaultSettings.autoScrollMode);
+            const isLineAutoScroll = autoScrollEnabled && autoScrollMode === 'line';
+            if (!isLineAutoScroll) {
+                lastLineLookaheadIndex = -1;
+            }
             let autoScrollPlan;
             let autoScrollPlanComputed = false;
             let autoScrollPlanWasUndefined = false;
 
-            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled) {
-                const computedPlan = computeAutoScrollPlan(newCurrentLineIndex, { currentTime });
+            const skipLineAutoScrollDueToLookahead = isLineAutoScroll && lastLineLookaheadIndex === newCurrentLineIndex;
+
+            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled && !skipLineAutoScrollDueToLookahead) {
+                const computedPlan = computeAutoScrollPlan(newCurrentLineIndex, {
+                    currentTime,
+                    instant: initialAutoScrollPending === true
+                });
                 autoScrollPlanComputed = true;
                 if (typeof computedPlan === 'undefined') {
                     autoScrollPlanWasUndefined = true;
@@ -8297,6 +8904,9 @@ $(document).ready(function() {
                 resetTransportProgress();
                 const previousIndex = oldCurrentIndex;
                 currentLineIndex = newCurrentLineIndex;
+                if (isLineAutoScroll) {
+                    lastLineLookaheadIndex = -1;
+                }
                 try {
                     if (previousIndex !== -1) {
                         if (visibleIndices.has(previousIndex)) {
@@ -8313,7 +8923,7 @@ $(document).ready(function() {
                         }
                     }
                 } catch (err) { /* defensive: avoid breaking rAF loop */ }
-                if (autoScrollEnabled && currentLineIndex !== -1) {
+                if (autoScrollEnabled && currentLineIndex !== -1 && !skipLineAutoScrollDueToLookahead) {
                     if (autoScrollPlanComputed) {
                         if (autoScrollPlan) {
                             autoScrollToIndex(currentLineIndex, autoScrollPlan);
@@ -8323,6 +8933,9 @@ $(document).ready(function() {
                     } else {
                         autoScrollToIndex(currentLineIndex);
                     }
+                }
+                if (initialAutoScrollPending) {
+                    initialAutoScrollPending = false;
                 }
                 resetSubtReaderInertiaState();
             } else {
@@ -8334,11 +8947,71 @@ $(document).ready(function() {
                 } else {
                     resetSubtReaderInertiaState();
                 }
+                if (isLineAutoScroll) {
+                    const upcomingIndex = (() => {
+                        if (!Array.isArray(subtitleData) || subtitleData.length === 0) {
+                            return -1;
+                        }
+                        if (newCurrentLineIndex !== -1) {
+                            const candidate = newCurrentLineIndex + 1;
+                            return candidate < subtitleData.length ? candidate : -1;
+                        }
+                        let lo = 0;
+                        let hi = subtitleData.length - 1;
+                        let candidate = -1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >>> 1;
+                            const line = subtitleData[mid];
+                            const start = Number(line && line.start_time);
+                            if (!Number.isFinite(start)) {
+                                lo = mid + 1;
+                                continue;
+                            }
+                            if (start >= currentTime) {
+                                candidate = mid;
+                                hi = mid - 1;
+                            } else {
+                                lo = mid + 1;
+                            }
+                        }
+                        return candidate;
+                    })();
+                    if (upcomingIndex !== -1) {
+                        const upcomingLine = subtitleData[upcomingIndex];
+                        const startTime = Number(upcomingLine && upcomingLine.start_time);
+                        if (Number.isFinite(startTime)) {
+                            const timeUntilStart = startTime - currentTime;
+                            if (timeUntilStart <= 0 || timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
+                                if (lastLineLookaheadIndex === upcomingIndex && timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
+                                    lastLineLookaheadIndex = -1;
+                                }
+                                if (timeUntilStart <= 0 && lastLineLookaheadIndex === upcomingIndex) {
+                                    lastLineLookaheadIndex = -1;
+                                }
+                            } else if (lastLineLookaheadIndex !== upcomingIndex) {
+                                const lookaheadPlan = computeAutoScrollPlan(upcomingIndex, {
+                                    currentTime,
+                                    lookahead: true
+                                });
+                                if (lookaheadPlan) {
+                                    autoScrollToIndex(upcomingIndex, lookaheadPlan);
+                                }
+                                lastLineLookaheadIndex = upcomingIndex;
+                            }
+                        }
+                    } else if (lastLineLookaheadIndex !== -1) {
+                        lastLineLookaheadIndex = -1;
+                    }
+                }
             }
 
             const nextProgressSet = new Set();
             if (useSubtitleProgress) {
-                activeIndices.forEach(idx => nextProgressSet.add(idx));
+                activeIndices.forEach(idx => {
+                    if (isLineWithinAnimationViewport(idx)) {
+                        nextProgressSet.add(idx);
+                    }
+                });
             }
             const prevProgressSet = new Set(activeSubtitleProgressIndices);
             prevProgressSet.forEach(idx => {
@@ -8362,7 +9035,11 @@ $(document).ready(function() {
 
             const nextTimeSet = new Set();
             if (useTimecodeProgress) {
-                activeIndices.forEach(idx => nextTimeSet.add(idx));
+                activeIndices.forEach(idx => {
+                    if (isLineWithinAnimationViewport(idx)) {
+                        nextTimeSet.add(idx);
+                    }
+                });
             }
             const prevTimeSet = new Set(activeTimecodeProgressIndices);
             prevTimeSet.forEach(idx => {
