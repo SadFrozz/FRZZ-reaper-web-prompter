@@ -26,21 +26,31 @@ jobs:
 
     - name: Extract Version and Set Env Vars
       id: extract_version
-      shell: bash
+      shell: python
       run: |
-        VERSION=$(sed -n "s/.*const[[:space:]]\+APP_VERSION[[:space:]]*=[[:space:]]*['\"]\([^'\"]\+\)['\"].*/\1/p" reaper_www_root/script.js | head -n 1)
-        if [ -z "$VERSION" ]; then
-          VERSION="unknown"
-        fi
-        OS_NAME=""
-        if [ "${{ runner.os }}" == "Windows" ]; then
-          OS_NAME="win"
-        elif [ "${{ runner.os }}" == "macOS" ]; then
-          OS_NAME="mac"
-        fi
-        echo "PROMPTER_VERSION=$VERSION" >> $GITHUB_ENV
-        echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
-        echo "Version extracted: $VERSION"
+        import os
+        import re
+        from pathlib import Path
+
+        version = "unknown"
+        script_path = Path("reaper_www_root/script.js")
+        if script_path.exists():
+          match = re.search(r"const\s+APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", script_path.read_text(encoding="utf-8", errors="ignore"))
+          if match:
+            version = match.group(1)
+
+        os_name = ""
+        runner_os = os.environ.get("RUNNER_OS", "").lower()
+        if runner_os == "windows":
+          os_name = "win"
+        elif runner_os == "macos":
+          os_name = "mac"
+
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+          env_file.write(f"PROMPTER_VERSION={version}\n")
+          env_file.write(f"OS_NAME={os_name}\n")
+
+        print(f"Version extracted: {version}")
 
     - name: Set up Python
       uses: actions/setup-python@v5
