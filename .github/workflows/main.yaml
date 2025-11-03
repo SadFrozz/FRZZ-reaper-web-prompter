@@ -142,10 +142,11 @@ jobs:
 
       - name: Build Release Body
         id: body
+        env:
+          SECTION_ORIG: ${{ steps.changelog.outputs.section }}
         run: |
           # Переводим стандартные заголовки секций CHANGELOG на русский (если они на английском)
-          SECTION_ORIG="${{ steps.changelog.outputs.section }}"
-          SECTION_TR=$(echo "$SECTION_ORIG" | sed -E \
+          SECTION_TR=$(printf '%s\n' "$SECTION_ORIG" | sed -E \
             -e 's/^### Added/### Добавлено/' \
             -e 's/^### Changed/### Изменено/' \
             -e 's/^### Fixed/### Исправлено/' \
