@@ -333,6 +333,8 @@ legend { padding: 0 0.5em; color: #ccc; font-weight: bold; }
 hr { border: none; height: 1px; background-color: #444; margin: 1.5rem 0; }
 .setting-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .setting-item-vertical { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin-bottom: 1rem; }
+.setting-item-vertical.actor-role-mapping-group { margin-bottom: 0; }
+.setting-item-vertical.actor-role-mapping-group + .setting-item-vertical.actor-role-mapping-group { margin-top: 1rem; }
 .setting-item-vertical input[type="text"] { width: 100%; box-sizing: border-box; font-size: inherit; }
 .setting-item label { flex-grow: 1; margin-right: 0.625rem; }
 .setting-item input[type="range"] {
@@ -851,6 +853,87 @@ input[type="checkbox"]:active::after {
 .light-theme .settings-helper-text {
     color: #4a4a4a;
 }
+.setting-item.actor-role-import-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    margin-bottom: 0;
+}
+#role-options-wrapper .actor-role-import-row + .actor-role-import-row {
+    margin-top: 0.75rem;
+}
+#import-actor-role-from-project {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.1rem;
+    padding: 0 1.15rem;
+    border-radius: 0.35rem;
+    border: 1px solid #555;
+    background: #3a3a3a;
+    color: #c9c9c9;
+    font-weight: 500;
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+#import-actor-role-from-project:hover:not(:disabled) {
+    background: #4a4a4a;
+}
+#import-actor-role-from-project:active:not(:disabled) {
+    transform: translateY(1px);
+}
+#import-actor-role-from-project:focus-visible {
+    outline: 2px solid #ffd462;
+    outline-offset: 2px;
+}
+#import-actor-role-from-project:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+#import-actor-role-from-project::after {
+    content: '';
+}
+#actor-role-import-status {
+    flex: 1 1 auto;
+    min-height: 1.2rem;
+    color: #9aa5b1;
+}
+#actor-role-import-status[data-status="info"] {
+    color: #64b5f6;
+}
+#actor-role-import-status[data-status="success"] {
+    color: #81c784;
+}
+#actor-role-import-status[data-status="error"] {
+    color: #ef767a;
+}
+.light-theme #actor-role-import-status {
+    color: #6a6d72;
+}
+.light-theme #actor-role-import-status[data-status="info"] {
+    color: #1e88e5;
+}
+.light-theme #actor-role-import-status[data-status="success"] {
+    color: #2e7d32;
+}
+.light-theme #actor-role-import-status[data-status="error"] {
+    color: #c62828;
+}
+.light-theme #import-actor-role-from-project {
+    background: #efefef;
+    color: #404040;
+    border-color: #bdbdbd;
+}
+.light-theme #import-actor-role-from-project:hover:not(:disabled) {
+    background: #dedede;
+}
+.light-theme #import-actor-role-from-project:focus-visible {
+    outline-color: #ffb300;
+}
 .settings-tile .setting-range {
     width: 100%;
 }
@@ -959,7 +1042,15 @@ textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: 
 .actor-color-list { display: flex; flex-direction: column; gap: 0.75rem; }
 .actor-color-item { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.2fr) auto auto; grid-template-rows: auto auto; grid-template-areas: "label roles picker delete" "filters roles picker delete"; gap: 0.4rem 0.75rem; background: #2b2b2b; padding: 0.75rem; border-radius: 0.5rem; transition: opacity 0.2s ease, box-shadow 0.2s ease; }
 .light-theme .actor-color-item { background: #ddd; }
-.actor-color-item-label { grid-area: label; font-weight: 600; display: flex; align-items: center; }
+.actor-color-item-label { grid-area: label; font-weight: 600; display: flex; align-items: center; min-width: 0; }
+.actor-color-item .actor-name { display: inline-flex; align-items: center; min-height: 2rem; padding: 0.1rem 0.4rem; border-radius: 0.35rem; cursor: text; transition: background 0.2s ease, color 0.2s ease; outline: none; max-width: 100%; }
+.actor-color-item .actor-name:hover { background: rgba(255, 212, 98, 0.1); color: #ffe082; }
+.actor-color-item .actor-name:focus-visible { background: rgba(255, 212, 98, 0.2); color: #ffe082; box-shadow: 0 0 0 1px rgba(255, 212, 98, 0.35); }
+.light-theme .actor-color-item .actor-name:hover { background: rgba(0, 0, 0, 0.08); color: #222; }
+.light-theme .actor-color-item .actor-name:focus-visible { background: rgba(0, 0, 0, 0.08); color: #111; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
+.actor-name-editor { width: 100%; min-height: 2.1rem; padding: 0.2rem 0.4rem; border-radius: 0.35rem; border: 1px solid #555; background: #262626; color: #f5f5f5; font: inherit; resize: none; overflow: hidden; line-height: 1.3; }
+.actor-name-editor::placeholder { color: #888; }
+.light-theme .actor-name-editor { background: #f5f5f5; color: #222; border-color: #bdbdbd; }
 .actor-filter-controls { grid-area: filters; display: flex; gap: 0.5rem; align-items: center; }
 .actor-color-item-roles { grid-area: roles; font-size: 0.82em; opacity: 0.8; align-self: start; }
 .actor-color-picker { grid-area: picker; display: flex; align-items: center; justify-self: end; }

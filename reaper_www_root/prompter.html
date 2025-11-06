@@ -99,6 +99,7 @@
             </div>
             <div class="debug-log-actions">
                 <button type="button" id="debug-log-save" class="button-secondary">Сохранить лог</button>
+                <button type="button" id="debug-log-copy" class="button-secondary">Скопировать лог</button>
                 <button type="button" id="debug-log-clear" class="button-secondary">Очистить журнал</button>
             </div>
         </div>
@@ -136,6 +137,10 @@
                                 <div class="setting-item">
                                     <label for="role-font-color-enabled" title="Если включено, фон роли будет осветляться для обеспечения контраста с черным текстом. Если выключено, цвет текста будет подбираться автоматически.">Осветлять ярлык роли под черный шрифт</label>
                                     <input type="checkbox" id="role-font-color-enabled">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="ignore-project-item-colors">Игнорировать цвета проекта</label>
+                                    <input type="checkbox" id="ignore-project-item-colors" checked>
                                 </div>
                             </div>
                             <div class="settings-tile role-settings-tile" id="role-behavior-tile">
@@ -549,10 +554,14 @@
             <div class="settings-body">
                 <fieldset>
                     <legend>Сопоставление актёр → роли</legend>
-                    <div class="setting-item-vertical">
+                    <div class="setting-item-vertical actor-role-mapping-group">
                         <div id="actor-role-warning" class="modal-warning" style="display:none;" role="status"></div>
                         <label for="actor-role-mapping-text">Каждая строка: АКТЁР (пробел | запятая | двоеточие) РОЛЬ1, РОЛЬ2, ...</label>
                         <textarea id="actor-role-mapping-text" rows="6" placeholder="Иванов: РОЛЬ_1, РОЛЬ_2\nПетров РОЛЬ_3, РОЛЬ_4"></textarea>
+                        <div class="setting-item actor-role-import-row">
+                            <button type="button" id="import-actor-role-from-project" class="button-secondary">Импортировать карту ролей из проекта</button>
+                            <p id="actor-role-import-status" class="settings-helper-text" aria-live="polite"></p>
+                        </div>
                     </div>
                 </fieldset>
                 <fieldset>

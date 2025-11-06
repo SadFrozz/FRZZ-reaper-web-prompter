@@ -43,6 +43,11 @@ const ConsoleMirror = (() => {
     const listeners = new Set();
     const originals = {};
     let installed = false;
+    let globalListenersAttached = false;
+    let windowErrorListener = null;
+    let unhandledRejectionListener = null;
+    const ERROR_EVENT_FLAG = '__FRZZ_PROMPTER_ERROR_CAPTURED__';
+    const REJECTION_EVENT_FLAG = '__FRZZ_PROMPTER_REJECTION_CAPTURED__';
     const SKIP_PREDICATES = [
         args => args.some(arg => typeof arg === 'string' && /wwr_req/i.test(arg) && /transport/i.test(arg)),
         args => args.some(arg => typeof arg === 'string' && arg.trim().toUpperCase() === 'TRANSPORT'),
@@ -73,6 +78,7 @@ const ConsoleMirror = (() => {
                 return originalClear(...args);
             };
         }
+        installGlobalErrorListeners();
         installed = true;
         Object.defineProperty(console, '__FRZZ_PROMPTER_LOG_MIRROR__', {
             value: true,
@@ -200,6 +206,110 @@ const ConsoleMirror = (() => {
         notify({ type: 'reset', size: 0 });
     }
 
+    function installGlobalErrorListeners() {
+        if (globalListenersAttached) return;
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+        windowErrorListener = event => {
+            try { handleWindowError(event); } catch (_) { /* swallow capture errors */ }
+        };
+        unhandledRejectionListener = event => {
+            try { handleUnhandledRejection(event); } catch (_) { /* swallow capture errors */ }
+        };
+        window.addEventListener('error', windowErrorListener, true);
+        window.addEventListener('unhandledrejection', unhandledRejectionListener, true);
+        globalListenersAttached = true;
+    }
+
+    function handleWindowError(event) {
+        if (!event || typeof event !== 'object') {
+            capture('error', ['Script error (no event data)']);
+            return;
+        }
+        if (event[ERROR_EVENT_FLAG]) return;
+        try { event[ERROR_EVENT_FLAG] = true; } catch (_) { /* ignore flag assignment failures */ }
+        const args = [];
+        const primaryMessage = buildWindowErrorMessage(event);
+        if (primaryMessage) {
+            args.push(primaryMessage);
+        }
+        if (event.error) {
+            const errorDetails = formatValue(event.error);
+            if (errorDetails && errorDetails !== primaryMessage) {
+                args.push(errorDetails);
+            }
+        }
+        if (!args.length && event.target && event.target !== window) {
+            const resourceMessage = buildResourceErrorMessage(event.target);
+            if (resourceMessage) args.push(resourceMessage);
+        }
+        if (!args.length) {
+            const fallback = buildErrorLocationSuffix(event);
+            args.push(fallback ? `Script error${fallback}` : 'Script error');
+        }
+        capture('error', args);
+    }
+
+    function handleUnhandledRejection(event) {
+        if (!event || typeof event !== 'object') {
+            capture('error', ['Unhandled promise rejection']);
+            return;
+        }
+        if (event[REJECTION_EVENT_FLAG]) return;
+        try { event[REJECTION_EVENT_FLAG] = true; } catch (_) { /* ignore flag assignment failures */ }
+        const args = ['Unhandled promise rejection'];
+        if ('reason' in event) {
+            const reasonText = formatValue(event.reason);
+            if (reasonText) args.push(reasonText);
+        }
+        capture('error', args);
+    }
+
+    function buildWindowErrorMessage(event) {
+        if (!event || typeof event !== 'object') return '';
+        if (typeof event.message === 'string' && event.message.trim()) {
+            const suffix = buildErrorLocationSuffix(event);
+            return suffix ? `${event.message}${suffix}` : event.message;
+        }
+        if (event.target && event.target !== window) {
+            return buildResourceErrorMessage(event.target);
+        }
+        const suffix = buildErrorLocationSuffix(event);
+        return suffix ? `Script error${suffix}` : '';
+    }
+
+    function buildErrorLocationSuffix(event) {
+        if (!event || typeof event !== 'object') return '';
+        const parts = [];
+        if (typeof event.filename === 'string' && event.filename.trim()) {
+            parts.push(event.filename.trim());
+        }
+        if (Number.isFinite(event.lineno)) {
+            parts.push(String(event.lineno));
+        }
+        if (Number.isFinite(event.colno)) {
+            parts.push(String(event.colno));
+        }
+        if (!parts.length) return '';
+        const location = parts.join(':');
+        return location ? ` (${location})` : '';
+    }
+
+    function buildResourceErrorMessage(target) {
+        if (!target || typeof target !== 'object') return '';
+        const tag = typeof target.tagName === 'string' ? target.tagName.toUpperCase() : 'RESOURCE';
+        const id = typeof target.id === 'string' && target.id ? `#${target.id}` : '';
+        let className = '';
+        if (typeof target.className === 'string') {
+            className = target.className;
+        } else if (target.className && typeof target.className.baseVal === 'string') {
+            className = target.className.baseVal;
+        }
+        const classes = className ? `.${className.trim().replace(/\s+/g, '.')}` : '';
+        const url = target.currentSrc || target.src || target.href || '';
+        const descriptor = `<${tag}${id}${classes}>`;
+        return url ? `Resource load error ${descriptor} ${url}` : `Resource load error ${descriptor}`;
+    }
+
     return {
         install,
         subscribe,
@@ -218,6 +328,7 @@ const DebugLogUI = (() => {
     let emptyState = null;
     let clearButton = null;
     let saveButton = null;
+    let copyButton = null;
     let unsubscribe = null;
 
     function init(options) {
@@ -228,7 +339,8 @@ const DebugLogUI = (() => {
         entriesContainer = options && options.entriesContainer ? options.entriesContainer : $();
         emptyState = options && options.emptyState ? options.emptyState : $();
         clearButton = options && options.clearButton ? options.clearButton : $();
-    saveButton = options && options.saveButton ? options.saveButton : $();
+        saveButton = options && options.saveButton ? options.saveButton : $();
+        copyButton = options && options.copyButton ? options.copyButton : $();
 
         if (!enabled) {
             teardownInteractiveState();
@@ -242,7 +354,8 @@ const DebugLogUI = (() => {
         setupInteractiveState();
         setupModalHandlers();
         setupClearButton();
-    setupSaveButton();
+        setupSaveButton();
+        setupCopyButton();
         updateEmptyState();
     }
 
@@ -372,6 +485,15 @@ const DebugLogUI = (() => {
         });
     }
 
+    function setupCopyButton() {
+        if (!copyButton || !copyButton.length) return;
+        copyButton.prop('disabled', entriesContainer && entriesContainer.children().length === 0);
+        copyButton.on(`click${EVENT_NAMESPACE}`, event => {
+            event.preventDefault();
+            copyLogToClipboard();
+        });
+    }
+
     function disableControls() {
         if (modal && modal.length) {
             modal.hide();
@@ -382,6 +504,9 @@ const DebugLogUI = (() => {
         }
         if (saveButton && saveButton.length) {
             saveButton.prop('disabled', true).off(EVENT_NAMESPACE);
+        }
+        if (copyButton && copyButton.length) {
+            copyButton.prop('disabled', true).off(EVENT_NAMESPACE);
         }
     }
 
@@ -397,6 +522,7 @@ const DebugLogUI = (() => {
         if (emptyState && emptyState.length) emptyState.toggle(!hasEntries);
         if (clearButton && clearButton.length) clearButton.prop('disabled', !hasEntries);
         if (saveButton && saveButton.length) saveButton.prop('disabled', !hasEntries);
+        if (copyButton && copyButton.length) copyButton.prop('disabled', !hasEntries);
     }
 
     function openModal() {
@@ -477,6 +603,48 @@ const DebugLogUI = (() => {
         }
     }
 
+    function copyLogToClipboard() {
+        const entries = ConsoleMirror.getEntries();
+        if (!Array.isArray(entries) || !entries.length) {
+            return;
+        }
+        const text = entries.map(formatLogFileLine).join('\n');
+        const writeClipboard = value => {
+            if (!value) return;
+            if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                navigator.clipboard.writeText(value).catch(err => {
+                    console.warn('[Prompter][debugLog] clipboard write failed, fallback engaged', err);
+                    fallbackCopy(value);
+                });
+            } else {
+                fallbackCopy(value);
+            }
+        };
+        const fallbackCopy = value => {
+            try {
+                if (typeof document === 'undefined') {
+                    throw new Error('Document unavailable for clipboard fallback');
+                }
+                const textarea = document.createElement('textarea');
+                textarea.value = value;
+                textarea.setAttribute('readonly', 'readonly');
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                const parent = document.body || document.documentElement;
+                if (!parent) throw new Error('No document body for clipboard fallback');
+                parent.appendChild(textarea);
+                textarea.select();
+                if (typeof document.execCommand === 'function') {
+                    document.execCommand('copy');
+                }
+                textarea.remove();
+            } catch (err) {
+                console.error('[Prompter][debugLog] failed to copy log', err);
+            }
+        };
+        writeClipboard(text);
+    }
+
     function formatLogFileLine(entry) {
         const stamp = formatLogFileTimestamp(entry && entry.timestamp);
         const level = String(entry && entry.level ? entry.level : 'log').toUpperCase();
@@ -532,7 +700,7 @@ if (DEBUG_LOG_BOOT_ENABLED) {
 }
 
 const APP_NAME = 'Интерактивный текстовый монитор';
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1-pre';
 const APP_VERSION_CODENAME = 'PROJECT JOHN CONNOR';
 const APP_CODENAME = 'МОНТАЖКА 2.0';
 const ORIGINAL_DOCUMENT_TITLE = `${APP_NAME} v${APP_VERSION}`;
@@ -843,6 +1011,7 @@ const defaultSettings = {
     autoFindTrack: true,
     autoFindKeywords: "сабы, субтитры, sub, subs, subtitle, текст",
     enableColorSwatches: true,
+    ignoreProjectItemColors: true,
     processRoles: true,
     roleDisplayStyle: 'column_with_swatch',
     autoHideEmptyColumn: true,
@@ -1119,8 +1288,13 @@ $(document).ready(function() {
     const debugLogEmpty = $('#debug-log-empty');
     const debugLogClearButton = $('#debug-log-clear');
     const debugLogSaveButton = $('#debug-log-save');
+    const debugLogCopyButton = $('#debug-log-copy');
     const saveSettingsButton = $('#save-settings-button');
     const resetSettingsButton = $('#reset-settings-button');
+    const actorRoleMappingTextarea = $('#actor-role-mapping-text');
+    const actorRoleImportButton = $('#import-actor-role-from-project');
+    const actorRoleImportStatus = $('#actor-role-import-status');
+    const actorColorList = $('#actor-color-list');
     const titleModeSelect = $('#title-mode');
     const customTitleWrapper = $('#custom-title-wrapper');
     const customTitleText = $('#custom-title-text');
@@ -1160,7 +1334,8 @@ $(document).ready(function() {
         entriesContainer: debugLogEntries,
         emptyState: debugLogEmpty,
         clearButton: debugLogClearButton,
-        saveButton: debugLogSaveButton
+        saveButton: debugLogSaveButton,
+        copyButton: debugLogCopyButton
     });
 
     if (textDisplay && typeof textDisplay.on === 'function') {
@@ -1457,6 +1632,7 @@ $(document).ready(function() {
     };
     const roleDisplayStyleSelect = $('#role-display-style');
     const enableColorSwatchesCheckbox = $('#enable-color-swatches');
+    const ignoreProjectItemColorsCheckbox = $('#ignore-project-item-colors');
     const roleColumnScaleWrapper = $('#role-column-scale-wrapper');
     const roleColumnScaleSlider = $('#role-column-scale');
     const roleColumnScaleValue = $('#role-column-scale-value');
@@ -1546,6 +1722,84 @@ $(document).ready(function() {
     })();
     let intrinsicSizeCalibrationQueue = [];
     let intrinsicSizeCalibrationScheduled = false;
+    const ACTOR_MAPPING_REBUILD_DEBOUNCE_THRESHOLD = 4000;
+    const ACTOR_MAPPING_REBUILD_DEBOUNCE_MS = 1000;
+    let actorMappingInputTimer = null;
+    const postRenderTaskQueue = [];
+    let postRenderFlushScheduled = false;
+    const POST_RENDER_FALLBACK_DELAY_MS = 16;
+
+    function performActorMappingPreviewRefresh() {
+        regenerateActorColorListUI();
+        if (subtitleData.length > 0) {
+            handleTextResponse(subtitleData);
+        } else {
+            updateActorRoleImportVisibility();
+        }
+    }
+
+    function schedulePostRenderTask(task, options = {}) {
+        if (typeof task !== 'function') {
+            return;
+        }
+        const label = options && typeof options.label === 'string' ? options.label : '';
+        postRenderTaskQueue.push({ task, label });
+        if (postRenderFlushScheduled) {
+            return;
+        }
+        postRenderFlushScheduled = true;
+
+        const flush = () => {
+            postRenderFlushScheduled = false;
+            if (!postRenderTaskQueue.length) {
+                return;
+            }
+            const pending = postRenderTaskQueue.splice(0);
+            pending.forEach(entry => {
+                if (!entry || typeof entry.task !== 'function') {
+                    return;
+                }
+                try {
+                    entry.task();
+                } catch (err) {
+                    const context = entry.label ? ` [${entry.label}]` : '';
+                    console.error(`[Prompter][postRender] task failed${context}`, err);
+                }
+            });
+        };
+
+        const scheduleFlush = () => {
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(() => {
+                    if (typeof requestAnimationFrame === 'function') {
+                        requestAnimationFrame(flush);
+                    } else {
+                        setTimeout(flush, POST_RENDER_FALLBACK_DELAY_MS);
+                    }
+                });
+            } else {
+                setTimeout(flush, POST_RENDER_FALLBACK_DELAY_MS);
+            }
+        };
+
+        scheduleFlush();
+    }
+
+    function scheduleActorMappingPreview(options = {}) {
+        const debounce = options.debounce === true;
+        if (actorMappingInputTimer) {
+            clearTimeout(actorMappingInputTimer);
+            actorMappingInputTimer = null;
+        }
+        if (debounce) {
+            actorMappingInputTimer = setTimeout(() => {
+                actorMappingInputTimer = null;
+                performActorMappingPreviewRefresh();
+            }, ACTOR_MAPPING_REBUILD_DEBOUNCE_MS);
+        } else {
+            performActorMappingPreviewRefresh();
+        }
+    }
 
     function clearPreviousLineHighlight() {
         if (lastPreviousLineIndex === -1) {
@@ -2298,11 +2552,17 @@ $(document).ready(function() {
                 if (Array.isArray(entry) && entry.length >= 2) {
                     const actor = String(entry[0] || '').trim();
                     const color = String(entry[1] || '').trim();
-                    if (actor && color) normalized[actor] = color;
+                    if (actor && color) {
+                        const actorKey = actor.toUpperCase();
+                        if (actorKey) normalized[actorKey] = color;
+                    }
                 } else if (typeof entry === 'object') {
                     const actor = String(entry.actor || entry.name || '').trim();
                     const color = String(entry.color || entry.value || '').trim();
-                    if (actor && color) normalized[actor] = color;
+                    if (actor && color) {
+                        const actorKey = actor.toUpperCase();
+                        if (actorKey) normalized[actorKey] = color;
+                    }
                 }
             });
             return normalized;
@@ -2314,7 +2574,8 @@ $(document).ready(function() {
                 const color = input[key];
                 if (!actor) return;
                 if (typeof color === 'string' && color.trim()) {
-                    normalized[actor] = color.trim();
+                    const actorKey = actor.toUpperCase();
+                    if (actorKey) normalized[actorKey] = color.trim();
                 }
             });
             return normalized;
@@ -2463,6 +2724,13 @@ $(document).ready(function() {
             changed = true;
         } else {
             base.progressBarEnabled = progressEnabled;
+        }
+        const ignoreProjectColors = coerceFlag(base.ignoreProjectItemColors, defaultSettings.ignoreProjectItemColors);
+        if (ignoreProjectColors !== base.ignoreProjectItemColors) {
+            base.ignoreProjectItemColors = ignoreProjectColors;
+            changed = true;
+        } else {
+            base.ignoreProjectItemColors = ignoreProjectColors;
         }
         const sanitizedProgressMode = sanitizeProgressBarMode(
             base.progressBarMode,
@@ -5296,6 +5564,10 @@ $(document).ready(function() {
             tempSettings.autoScrollDynamicSpeedEnabled = dynamicSpeedEnabled;
             settings.autoScrollDynamicSpeedEnabled = dynamicSpeedEnabled;
 
+            const ignoreProjectItemColors = tempSettings.ignoreProjectItemColors !== false;
+            tempSettings.ignoreProjectItemColors = ignoreProjectItemColors;
+            settings.ignoreProjectItemColors = ignoreProjectItemColors;
+
             const sanitizedAutoScrollMode = sanitizeAutoScrollMode(
                 tempSettings.autoScrollMode,
                 settings.autoScrollMode || defaultSettings.autoScrollMode
@@ -5937,7 +6209,7 @@ $(document).ready(function() {
 
             // Determine whether we really need full subtitle re-render
             const impactingKeys = [
-                'processRoles','roleDisplayStyle','enableColorSwatches','checkerboardEnabled','checkerboardMode',
+                'processRoles','roleDisplayStyle','enableColorSwatches','ignoreProjectItemColors','checkerboardEnabled','checkerboardMode',
                 'checkerboardBg1','checkerboardFont1','checkerboardBg2','checkerboardFont2','roleFontColorEnabled',
                 'highlightCurrentRoleEnabled'
             ];
@@ -7233,6 +7505,7 @@ $(document).ready(function() {
                 finalizeDataModelUpdate();
                 computeAndApplyOverlaps({ reason: 'data_empty' });
                 scheduleContentVisibilityUpdate({ force: true });
+                updateActorRoleImportVisibility();
                 return;
             }
             // After loading subtitles we may need to refresh stats button visibility
@@ -7265,12 +7538,14 @@ $(document).ready(function() {
                 roleMappingSize = buildActorRoleMaps();
             }
             const tMap1 = performance.now();
-            const shouldIgnoreLineColors = roleMappingSize > 0;
+            const hasActorMapping = roleMappingSize > 0;
+            const ignoreProjectItemColors = settings.ignoreProjectItemColors !== false;
+            const shouldIgnoreLineColors = hasActorMapping && ignoreProjectItemColors;
             const actorColorsMap = settings.actorColors || {};
             const configuredFrameRate = Number(settings.frameRate);
             const frameRate = Number.isFinite(configuredFrameRate) && configuredFrameRate > 0 ? configuredFrameRate : 24;
             const effectiveFormat = getEffectiveTimecodeFormat();
-            const useActorMapping = shouldIgnoreLineColors;
+            const useActorMapping = hasActorMapping;
             const useLineColor = !shouldIgnoreLineColors;
             let previousRoleRaw = null;
 
@@ -7398,7 +7673,8 @@ $(document).ready(function() {
                     }
                 }
 
-                const actor = role && useActorMapping ? roleToActor[role] || null : null;
+                const roleLookupKey = role ? role.toUpperCase() : '';
+                const actor = roleLookupKey && useActorMapping ? roleToActor[roleLookupKey] || null : null;
                 const actorColor = actor ? actorColorsMap[actor] || null : null;
                 const lineColor = useLineColor ? (line.color || null) : null;
                 const finalRoleColorCandidate = actorColor || lineColor || null;
@@ -7492,7 +7768,7 @@ $(document).ready(function() {
                     rawText,
                     displayText,
                     html: line.textHtml || null,
-                    roleId: role || null,
+                    roleId: roleLookupKey || null,
                     actorId: actor || null,
                     roleBaseColor: finalRoleColorCandidate || null,
                     actorColor,
@@ -7500,7 +7776,7 @@ $(document).ready(function() {
                     resolvedColor: finalRoleColorCandidate || null
                 });
                 subtitleFilterStates[index] = {
-                    roleId: role || null,
+                    roleId: roleLookupKey || null,
                     actorId: actor || null,
                     lineId,
                     filtered: false,
@@ -7577,6 +7853,7 @@ $(document).ready(function() {
             recomputeFilteringState({ reason: 'data_load', force: true });
             scheduleContentVisibilityUpdate({ force: true });
             initialAutoScrollPending = true;
+            updateActorRoleImportVisibility();
             updateTeleprompter(latestTimecode);
         } catch (e) { console.error("Error in handleTextResponse:", e); }
     }
@@ -7719,57 +7996,103 @@ $(document).ready(function() {
     }
 
     function parseActorRoleMapping(rawText) {
-        const lines = (rawText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        // Support pasted table rows (tabs or multi-space separated columns) and
+        // normalize all actor/role strings to UPPER CASE (caps) as requested.
+        const sourceText = String(rawText || '');
+        const lines = sourceText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         const delimiterFrequency = new Map();
         const parsedLines = [];
         let validEntryCount = 0;
         let autoValidCount = 0;
+        let pendingActorContinuation = null;
         for (const line of lines) {
-            const tokens = line.split(/\s+/).filter(Boolean);
-            if (!tokens.length) {
-                parsedLines.push({ actor: '', roles: [], delimiter: 'auto' });
-                continue;
-            }
-
+            // Table-like pasted rows often have tabs between columns
             let actor = '';
             let rolesPart = '';
             let delimiter = 'auto';
+            let usedContinuation = false;
 
-            const colonMatch = line.match(/^(.+?)\:\s*(.+)$/);
-            if (colonMatch) {
-                const processed = splitActorAndPromotedRoles((colonMatch[1] || '').trim(), (colonMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
-                actor = processed.actor;
-                rolesPart = processed.rolesPart;
-                delimiter = ':';
-            } else {
-                const dashMatch = line.match(/^(.+?)\s*[-–]\s*(.+)$/);
-                if (dashMatch) {
-                    const processed = splitActorAndPromotedRoles((dashMatch[1] || '').trim(), (dashMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
+            if (pendingActorContinuation) {
+                const trimmed = line.trim();
+                const looksLikeActorLine = trimmed.includes(':');
+                if (!looksLikeActorLine) {
+                    actor = pendingActorContinuation.actor;
+                    rolesPart = line;
+                    delimiter = pendingActorContinuation.delimiter || 'auto';
+                    usedContinuation = true;
+                }
+                pendingActorContinuation = null;
+            }
+
+            if (!usedContinuation && line.indexOf('\t') !== -1) {
+                const parts = line.split(/\t+/).map(p => p.trim()).filter(Boolean);
+                if (parts.length >= 2) {
+                    actor = parts[0];
+                    rolesPart = parts.slice(1).join(', ');
+                    delimiter = '\t';
+                }
+            }
+            // Also treat two-or-more spaces as a possible column separator
+            if (!actor && !usedContinuation) {
+                const colsMatch = line.match(/^(.+?)\s{2,}(.+)$/);
+                if (colsMatch) {
+                    actor = colsMatch[1].trim();
+                    rolesPart = colsMatch[2].trim();
+                    delimiter = '  ';
+                }
+            }
+
+            const tokens = (!actor) ? line.split(/\s+/).filter(Boolean) : rolesPart.split(/\s+/).filter(Boolean);
+            if (!tokens.length) {
+                parsedLines.push({ actor: '', roles: [], delimiter });
+                continue;
+            }
+
+            if (!actor) {
+                const colonMatch = line.match(/^(.+?)\:\s*(.*)$/);
+                if (colonMatch) {
+                    const processed = splitActorAndPromotedRoles((colonMatch[1] || '').trim(), (colonMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
                     actor = processed.actor;
                     rolesPart = processed.rolesPart;
-                    delimiter = '-';
+                    delimiter = ':';
+                    if (!rolesPart) {
+                        pendingActorContinuation = { actor, delimiter: delimiter || 'auto' };
+                        continue;
+                    }
                 } else {
-                    const commaMatch = line.match(/^(.+?),\s*(.+)$/);
-                    if (commaMatch) {
-                        const before = (commaMatch[1] || '').trim();
-                        const after = (commaMatch[2] || '').trim();
-                        const beforeTokens = before.split(/\s+/).filter(Boolean);
-                        if (shouldPreferAutoDelimiter(beforeTokens, tokens)) {
-                            const processed = deriveAutoActorRoles(tokens, { beforeTokens, allowShortSecond: true });
+                    const dashMatch = line.match(/^(.+?)\s*[-–]\s*(.+)$/);
+                    if (dashMatch) {
+                        const processed = splitActorAndPromotedRoles((dashMatch[1] || '').trim(), (dashMatch[2] || '').trim(), { keepShortTokens: false, allowLongUppercaseActorTokens: true });
+                        actor = processed.actor;
+                        rolesPart = processed.rolesPart;
+                        delimiter = '-';
+                    } else {
+                        const commaMatch = line.match(/^(.+?),\s*(.+)$/);
+                        if (commaMatch) {
+                            const before = (commaMatch[1] || '').trim();
+                            const after = (commaMatch[2] || '').trim();
+                            const beforeTokens = before.split(/\s+/).filter(Boolean);
+                            if (shouldPreferAutoDelimiter(beforeTokens, tokens)) {
+                                const processed = deriveAutoActorRoles(tokens, { beforeTokens, allowShortSecond: true });
+                                actor = processed.actor;
+                                rolesPart = processed.rolesPart;
+                                delimiter = 'auto';
+                            } else {
+                                const processed = splitActorAndPromotedRoles(before, after, { keepShortTokens: false });
+                                actor = processed.actor;
+                                rolesPart = processed.rolesPart;
+                                delimiter = ',';
+                            }
+                        } else {
+                            const processed = deriveAutoActorRoles(tokens);
                             actor = processed.actor;
                             rolesPart = processed.rolesPart;
                             delimiter = 'auto';
-                        } else {
-                            const processed = splitActorAndPromotedRoles(before, after, { keepShortTokens: false });
-                            actor = processed.actor;
-                            rolesPart = processed.rolesPart;
-                            delimiter = ',';
+                            if (actor && (!rolesPart || !rolesPart.trim()) && tokens.length === 2) {
+                                actor = tokens[0];
+                                rolesPart = tokens.slice(1).join(' ').trim();
+                            }
                         }
-                    } else {
-                        const processed = deriveAutoActorRoles(tokens);
-                        actor = processed.actor;
-                        rolesPart = processed.rolesPart;
-                        delimiter = 'auto';
                     }
                 }
             }
@@ -7785,7 +8108,11 @@ $(document).ready(function() {
                 continue;
             }
 
-            parsedLines.push({ actor, roles, delimiter });
+            // Convert to UPPER CASE for both actor and roles
+            const actorCaps = String(actor || '').trim().toUpperCase();
+            const rolesCaps = roles.map(r => String(r).trim().toUpperCase()).filter(Boolean);
+
+            parsedLines.push({ actor: actorCaps, roles: rolesCaps, delimiter });
             validEntryCount += 1;
             if (delimiter === 'auto') {
                 autoValidCount += 1;
@@ -7838,20 +8165,27 @@ $(document).ready(function() {
     }
 
     function buildActorRoleMaps() {
-        const mappingText = settings.actorRoleMappingText || '';
+        const mappingText = typeof settings.actorRoleMappingText === 'string' ? settings.actorRoleMappingText : '';
         if (mappingText !== cachedActorRoleMappingText) {
             roleToActor = {};
             actorToRoles = {};
             const parsed = parseActorRoleMapping(mappingText);
             Object.keys(parsed).forEach(actor => {
-                const roles = parsed[actor];
-                const roleSet = new Set(roles);
-                actorToRoles[actor] = roleSet;
+                const actorKey = String(actor || '').toUpperCase();
+                if (!actorKey) return;
+                const roles = Array.isArray(parsed[actor]) ? parsed[actor] : [];
+                const roleSet = new Set();
                 roles.forEach(role => {
-                    if (!roleToActor[role]) {
-                        roleToActor[role] = actor; // first mapping wins
+                    const roleKey = String(role || '').toUpperCase();
+                    if (!roleKey) return;
+                    roleSet.add(roleKey);
+                    if (!roleToActor[roleKey]) {
+                        roleToActor[roleKey] = actorKey; // first mapping wins
                     }
                 });
+                if (roleSet.size > 0) {
+                    actorToRoles[actorKey] = roleSet;
+                }
             });
             cachedActorRoleMappingText = mappingText;
             cachedMappedRolesCount = Object.keys(roleToActor).length;
@@ -7943,10 +8277,38 @@ $(document).ready(function() {
             const overlayAlpha = Math.max(0, Math.min(0.95, 1 - filterRuntime.dimOpacity));
             filterRuntime.dimOverlayAlpha = Number(overlayAlpha.toFixed(3));
 
-            const soloRoles = normalizeFilterList(settings.filterSoloRoles);
-            const muteRoles = normalizeFilterList(settings.filterMuteRoles);
-            const soloActors = normalizeFilterList(settings.filterSoloActors);
-            const muteActors = normalizeFilterList(settings.filterMuteActors);
+            const soloRolesSeen = new Set();
+            const soloRoles = [];
+            normalizeFilterList(settings.filterSoloRoles).forEach(entry => {
+                const token = String(entry || '').toUpperCase();
+                if (!token || soloRolesSeen.has(token)) return;
+                soloRolesSeen.add(token);
+                soloRoles.push(token);
+            });
+            const muteRolesSeen = new Set();
+            const muteRoles = [];
+            normalizeFilterList(settings.filterMuteRoles).forEach(entry => {
+                const token = String(entry || '').toUpperCase();
+                if (!token || muteRolesSeen.has(token)) return;
+                muteRolesSeen.add(token);
+                muteRoles.push(token);
+            });
+            const soloActorsSeen = new Set();
+            const soloActors = [];
+            normalizeFilterList(settings.filterSoloActors).forEach(entry => {
+                const token = String(entry || '').toUpperCase();
+                if (!token || soloActorsSeen.has(token)) return;
+                soloActorsSeen.add(token);
+                soloActors.push(token);
+            });
+            const muteActorsSeen = new Set();
+            const muteActors = [];
+            normalizeFilterList(settings.filterMuteActors).forEach(entry => {
+                const token = String(entry || '').toUpperCase();
+                if (!token || muteActorsSeen.has(token)) return;
+                muteActorsSeen.add(token);
+                muteActors.push(token);
+            });
             const mutedRolesFromActors = collectRolesForActors(new Set(muteActors));
             const filteredSoloRoles = soloRoles.filter(role => !mutedRolesFromActors.has(role));
             settings.filterSoloRoles = filteredSoloRoles;
@@ -8091,19 +8453,38 @@ $(document).ready(function() {
 
     function getMutedActorsSet() {
         const source = Array.isArray(settings.filterMuteActors) ? settings.filterMuteActors : [];
-        const normalized = source.filter(Boolean);
+        const normalized = [];
+        const seen = new Set();
+        source.forEach(entry => {
+            const token = String(entry || '').toUpperCase();
+            if (!token || seen.has(token)) return;
+            seen.add(token);
+            normalized.push(token);
+        });
         return new Set(normalized);
     }
 
     function getSoloActorsSet() {
         const list = Array.isArray(settings.filterSoloActors) ? settings.filterSoloActors : [];
-        const filtered = list.filter(Boolean);
+        const filtered = [];
+        const seen = new Set();
+        list.forEach(entry => {
+            const token = String(entry || '').toUpperCase();
+            if (!token || seen.has(token)) return;
+            seen.add(token);
+            filtered.push(token);
+        });
         return new Set(filtered);
     }
 
     function getSoloRolesSet() {
         const list = Array.isArray(settings.filterSoloRoles) ? settings.filterSoloRoles : [];
-        const filtered = list.filter(Boolean);
+        const filtered = [];
+        list.forEach(entry => {
+            const token = String(entry || '').toUpperCase();
+            if (!token) return;
+            filtered.push(token);
+        });
         return new Set(filtered);
     }
 
@@ -8112,8 +8493,9 @@ $(document).ready(function() {
         if (!actorSet || typeof actorSet.forEach !== 'function') return result;
         buildActorRoleMaps();
         actorSet.forEach(actor => {
-            if (!actor) return;
-            const roles = actorToRoles[actor];
+            const actorKey = String(actor || '').toUpperCase();
+            if (!actorKey) return;
+            const roles = actorToRoles[actorKey];
             if (!roles || typeof roles.forEach !== 'function') return;
             roles.forEach(role => {
                 if (role) result.add(role);
@@ -8131,7 +8513,7 @@ $(document).ready(function() {
         container.toggleClass('solo-mode-active', soloActive);
         container.find('.actor-color-item').each(function(){
             const row = $(this);
-            const actor = String(row.data('actor') || '');
+            const actor = readActorKeyFromRow(row);
             const isMuted = muteSet.has(actor);
             const isSolo = soloSet.has(actor);
             row.attr('data-muted', isMuted ? 'true' : 'false');
@@ -8310,12 +8692,13 @@ $(document).ready(function() {
     }
 
     function setActorMuteState(actor, shouldMute) {
-        if (!actor) return;
+        const actorKey = String(actor || '').toUpperCase();
+        if (!actorKey) return;
         const muteSet = getMutedActorsSet();
         if (shouldMute) {
-            muteSet.add(actor);
+            muteSet.add(actorKey);
         } else {
-            muteSet.delete(actor);
+            muteSet.delete(actorKey);
         }
         settings.filterMuteActors = Array.from(muteSet);
         refreshActorFilterControlsUI();
@@ -8323,54 +8706,78 @@ $(document).ready(function() {
     }
 
     function toggleActorMuteState(actor) {
-        if (!actor) return;
+        const actorKey = String(actor || '').toUpperCase();
+        if (!actorKey) return;
         const muteSet = getMutedActorsSet();
-        const shouldMute = !muteSet.has(actor);
-        setActorMuteState(actor, shouldMute);
+        const shouldMute = !muteSet.has(actorKey);
+        setActorMuteState(actorKey, shouldMute);
         syncActorFilterSettings({ reason: 'actor_mute_toggle' });
     }
 
     function setSoloActorsSet(soloSet) {
-        settings.filterSoloActors = Array.from(soloSet);
+        const next = [];
+        const seen = new Set();
+        if (soloSet && typeof soloSet.forEach === 'function') {
+            soloSet.forEach(actor => {
+                const token = String(actor || '').toUpperCase();
+                if (!token || seen.has(token)) return;
+                seen.add(token);
+                next.push(token);
+            });
+        }
+        settings.filterSoloActors = next;
         refreshActorFilterControlsUI();
     }
 
     function removeSoloActor(actor) {
-        if (!actor) return;
+        const actorKey = String(actor || '').toUpperCase();
+        if (!actorKey) return;
         const soloSet = getSoloActorsSet();
-        if (soloSet.delete(actor)) {
+        if (soloSet.delete(actorKey)) {
             setSoloActorsSet(soloSet);
         }
     }
 
     function toggleActorSoloState(actor) {
-        if (!actor) return;
+        const actorKey = String(actor || '').toUpperCase();
+        if (!actorKey) return;
         const soloSet = getSoloActorsSet();
-        if (soloSet.has(actor)) {
-            soloSet.delete(actor);
+        if (soloSet.has(actorKey)) {
+            soloSet.delete(actorKey);
         } else {
-            soloSet.add(actor);
+            soloSet.add(actorKey);
         }
         setSoloActorsSet(soloSet);
         syncActorFilterSettings({ reason: 'actor_solo_toggle' });
     }
 
     function setSoloRolesSet(soloSet, options = {}) {
-        settings.filterSoloRoles = Array.from(soloSet);
+        const next = [];
+        const seen = new Set();
+        if (soloSet && typeof soloSet.forEach === 'function') {
+            soloSet.forEach(role => {
+                const token = String(role || '').toUpperCase();
+                if (!token || seen.has(token)) return;
+                seen.add(token);
+                next.push(token);
+            });
+        }
+        settings.filterSoloRoles = next;
         if (options.skipRefresh !== true) {
             refreshRoleFilterControlsUI();
         }
     }
 
     function toggleRoleSoloState(role) {
-        if (!role) return;
+        const token = String(role || '').toUpperCase();
+        if (!token) return;
         const mutedRoles = collectRolesForActors(getMutedActorsSet());
-        if (mutedRoles.has(role)) return;
+        if (mutedRoles.has(token)) return;
         const soloSet = getSoloRolesSet();
-        if (soloSet.has(role)) {
-            soloSet.delete(role);
+        if (soloSet.has(token)) {
+            soloSet.delete(token);
         } else {
-            soloSet.add(role);
+            soloSet.add(token);
         }
         setSoloRolesSet(soloSet);
         syncActorFilterSettings({ reason: 'role_filter_toggle' });
@@ -8393,9 +8800,8 @@ $(document).ready(function() {
     }
 
     function regenerateActorColorListUI() {
-        const container = $('#actor-color-list');
-        if (!container.length) return;
-        container.empty();
+        if (!actorColorList || !actorColorList.length) return;
+        actorColorList.empty();
         buildActorRoleMaps();
         const actors = Object.keys(actorToRoles).sort((a,b)=> a.localeCompare(b,'ru'));
         actors.forEach(actor => {
@@ -8403,7 +8809,7 @@ $(document).ready(function() {
             const colorVal = (settings.actorColors && settings.actorColors[actor]) || 'rgba(60,60,60,0.6)';
             const row = $(`
                 <div class="actor-color-item" data-actor="${actor}">
-                    <div class="actor-color-item-label"><span class="actor-name">${actor}</span></div>
+                    <div class="actor-color-item-label"></div>
                     <div class="actor-filter-controls" role="group" aria-label="Управление Solo/Mute">
                         <button type="button" class="actor-filter-btn actor-filter-btn-mute" data-action="mute" aria-pressed="false" title="Mute актёра">M</button>
                         <button type="button" class="actor-filter-btn actor-filter-btn-solo" data-action="solo" aria-pressed="false" title="Solo актёра">S</button>
@@ -8414,10 +8820,11 @@ $(document).ready(function() {
                     </div>
                     <button type="button" class="delete-actor-color" title="Удалить актёра">✕</button>
                 </div>`);
-            container.append(row);
+            row.find('.actor-color-item-label').append(createActorNameElement(actor));
+            actorColorList.append(row);
         });
         // Initialize Spectrum on newly added inputs
-        container.find('.actor-color-input').each(function(){
+        actorColorList.find('.actor-color-input').each(function(){
             $(this).spectrum({
                 type: "component", showPaletteOnly: true, togglePaletteOnly: true, hideAfterPaletteSelect: true,
                 showInput: true, showInitial: true, allowEmpty: false, showAlpha: true, preferredFormat: "rgba",
@@ -8429,6 +8836,249 @@ $(document).ready(function() {
         renderRoleFilterChips();
         scheduleStatsButtonEvaluation();
         updateActorRoleWarningBanner();
+    }
+
+    function createActorNameElement(actorKey) {
+        const normalized = String(actorKey || '').toUpperCase();
+        return $('<span class="actor-name" tabindex="0" role="button"></span>')
+            .attr('aria-label', `Переименовать актёра ${normalized}`)
+            .attr('title', 'Переименовать актёра')
+            .text(normalized);
+    }
+
+    function autosizeActorNameEditor(editor) {
+        if (!editor || !editor.length) return;
+        const el = editor.get(0);
+        if (!el) return;
+        el.style.height = 'auto';
+        const scrollHeight = el.scrollHeight || 0;
+        let minHeight = 0;
+        try {
+            const computed = window.getComputedStyle(el);
+            const lineHeight = parseFloat(computed.lineHeight);
+            if (Number.isFinite(lineHeight) && lineHeight > 0) {
+                minHeight = lineHeight;
+            } else {
+                const fontSize = parseFloat(computed.fontSize);
+                if (Number.isFinite(fontSize) && fontSize > 0) {
+                    minHeight = fontSize * 1.2;
+                }
+            }
+        } catch (_) {
+            /* ignore compute errors */
+        }
+        if (!minHeight || !Number.isFinite(minHeight)) {
+            minHeight = 24;
+        }
+        el.style.height = `${Math.max(scrollHeight, minHeight)}px`;
+    }
+
+    function replaceActorTokenInArray(source, oldToken, newToken) {
+        if (!Array.isArray(source) || !source.length) return source;
+        const oldKey = String(oldToken || '').toUpperCase();
+        const newKey = String(newToken || '').toUpperCase();
+        if (!oldKey || !newKey) return source;
+        let changed = false;
+        const seen = new Set();
+        const result = [];
+        source.forEach(entry => {
+            if (!entry && entry !== 0) return;
+            let token = String(entry).toUpperCase();
+            if (token === oldKey) {
+                token = newKey;
+                changed = true;
+            }
+            if (seen.has(token)) {
+                if (token !== oldKey) {
+                    changed = true;
+                }
+                return;
+            }
+            seen.add(token);
+            result.push(token);
+        });
+        return changed ? result : source;
+    }
+
+    function serializeActorRoleMapping(mapping, actorOrder) {
+        if (!mapping || typeof mapping !== 'object') {
+            return '';
+        }
+        const entries = [];
+        const seen = new Set();
+        const consumeActor = actor => {
+            const key = String(actor || '').toUpperCase();
+            if (!key || seen.has(key)) {
+                return;
+            }
+            const rolesArray = Array.isArray(mapping[key]) ? mapping[key] : [];
+            const roles = rolesArray
+                .map(role => String(role || '').toUpperCase().trim())
+                .filter(Boolean);
+            if (!roles.length) {
+                return;
+            }
+            seen.add(key);
+            entries.push(`${key}, ${roles.join(', ')}`);
+        };
+        if (Array.isArray(actorOrder) && actorOrder.length) {
+            actorOrder.forEach(consumeActor);
+        }
+        Object.keys(mapping).forEach(consumeActor);
+        return entries.join('\n\n');
+    }
+
+    function applyActorRenameInternal(oldActorKey, newActorName) {
+        const oldKey = String(oldActorKey || '').toUpperCase();
+        const trimmedNew = String(newActorName || '').trim();
+        if (!oldKey || !trimmedNew) {
+            return { changed: false, reason: 'invalid' };
+        }
+        const newKey = trimmedNew.toUpperCase();
+        if (newKey === oldKey) {
+            return { changed: false, reason: 'same' };
+        }
+        const rawMapping = settings.actorRoleMappingText || '';
+        if (!rawMapping.trim()) {
+            return { changed: false, reason: 'empty' };
+        }
+        const parsedMapping = parseActorRoleMapping(rawMapping);
+        if (!parsedMapping[oldKey]) {
+            return { changed: false, reason: 'missing' };
+        }
+        const actorOrder = Object.keys(parsedMapping);
+        const oldRoles = Array.isArray(parsedMapping[oldKey]) ? parsedMapping[oldKey].slice() : [];
+        delete parsedMapping[oldKey];
+        const mergedSet = new Set(Array.isArray(parsedMapping[newKey]) ? parsedMapping[newKey] : []);
+        oldRoles.forEach(role => mergedSet.add(role));
+        parsedMapping[newKey] = Array.from(mergedSet);
+        const oldIndex = actorOrder.indexOf(oldKey);
+        if (oldIndex !== -1) {
+            actorOrder.splice(oldIndex, 1);
+        }
+        if (!actorOrder.includes(newKey)) {
+            const insertIndex = oldIndex >= 0 ? oldIndex : actorOrder.length;
+            actorOrder.splice(insertIndex, 0, newKey);
+        }
+        const rebuiltText = serializeActorRoleMapping(parsedMapping, actorOrder);
+        settings.actorRoleMappingText = rebuiltText;
+
+        const colors = settings.actorColors && typeof settings.actorColors === 'object'
+            ? { ...settings.actorColors }
+            : {};
+        const oldColor = colors[oldKey];
+        if (oldKey !== newKey) {
+            delete colors[oldKey];
+            if (oldColor && !colors[newKey]) {
+                colors[newKey] = oldColor;
+            }
+        }
+        settings.actorColors = colors;
+
+        settings.filterMuteActors = replaceActorTokenInArray(settings.filterMuteActors, oldKey, newKey);
+        settings.filterSoloActors = replaceActorTokenInArray(settings.filterSoloActors, oldKey, newKey);
+
+        cachedActorRoleMappingText = null;
+
+        return { changed: true, newActor: newKey, rebuiltText };
+    }
+
+    function readActorKeyFromRow(row) {
+        if (!row || !row.length) return '';
+        const attrVal = row.attr('data-actor');
+        if (attrVal && typeof attrVal === 'string') {
+            return attrVal.trim().toUpperCase();
+        }
+        const dataVal = row.data('actor');
+        if (typeof dataVal === 'string' && dataVal.trim()) {
+            return dataVal.trim().toUpperCase();
+        }
+        return '';
+    }
+
+    function beginActorInlineRename(row, nameSpan) {
+        if (!row || !row.length) return;
+        if (row.attr('data-editing') === 'true') return;
+        const actorKey = readActorKeyFromRow(row);
+        const displayText = nameSpan && nameSpan.length ? nameSpan.text().trim() : actorKey;
+        const editor = $('<textarea class="actor-name-editor" rows="1" spellcheck="false" maxlength="120"></textarea>');
+        editor.val(displayText || actorKey);
+        if (nameSpan && nameSpan.length) {
+            nameSpan.replaceWith(editor);
+        } else {
+            row.find('.actor-color-item-label').empty().append(editor);
+        }
+        row.attr('data-editing', 'true');
+        requestAnimationFrame(() => {
+            editor.trigger('focus');
+            const el = editor.get(0);
+            if (el && typeof el.setSelectionRange === 'function') {
+                const len = editor.val().length;
+                el.setSelectionRange(0, len);
+            }
+            autosizeActorNameEditor(editor);
+        });
+    }
+
+    function cancelActorInlineRename(row, editor) {
+        if (!row || !row.length) return;
+        const actorKey = readActorKeyFromRow(row);
+        const replacement = createActorNameElement(actorKey);
+        if (editor && editor.length) {
+            editor.replaceWith(replacement);
+        } else {
+            row.find('.actor-color-item-label').empty().append(replacement);
+        }
+        row.removeAttr('data-editing');
+    }
+
+    function finalizeActorInlineRename(row, editor, options = {}) {
+        if (!row || !row.length) return;
+        const oldActorKey = readActorKeyFromRow(row);
+        const rawValue = typeof options.newName === 'string' ? options.newName : (editor && editor.length ? editor.val() : '');
+        const trimmed = String(rawValue || '').trim();
+        if (!trimmed) {
+            cancelActorInlineRename(row, editor);
+            return;
+        }
+        const result = applyActorRenameInternal(oldActorKey, trimmed);
+        if (!result.changed) {
+            cancelActorInlineRename(row, editor);
+            row.removeData('renameCanceled');
+            return;
+        }
+        const replacement = createActorNameElement(result.newActor);
+        let replaced = false;
+        if (editor && editor.length) {
+            const editorEl = editor[0];
+            const parentNode = editorEl && editorEl.parentNode;
+            if (parentNode && parentNode.contains(editorEl)) {
+                try {
+                    editor.replaceWith(replacement);
+                    replaced = true;
+                } catch (err) {
+                    console.warn('[Prompter][actors] editor replace failed during rename', err);
+                }
+            }
+        }
+        if (!replaced) {
+            const labelContainer = row && row.length ? row.find('.actor-color-item-label') : $();
+            if (labelContainer.length) {
+                labelContainer.empty().append(replacement);
+                replaced = true;
+            }
+        }
+        row.attr('data-actor', result.newActor);
+        row.data('actor', result.newActor);
+        row.removeAttr('data-editing');
+
+        if (actorRoleMappingTextarea && actorRoleMappingTextarea.length) {
+            actorRoleMappingTextarea.val(result.rebuiltText);
+            scheduleActorMappingPreview({ debounce: false });
+        } else {
+            performActorMappingPreviewRefresh();
+        }
+        syncActorFilterSettings({ persistBackend: true, reason: 'actor_rename' });
     }
 
     function updateActorRoleWarningBanner() {
@@ -8448,6 +9098,214 @@ $(document).ready(function() {
         }
     }
 
+    function shouldShowActorRoleImportButton() {
+        if (!Array.isArray(subtitleData) || subtitleData.length === 0) {
+            return false;
+        }
+        const seenColors = new Set();
+        for (let i = 0; i < subtitleData.length; i += 1) {
+            const line = subtitleData[i];
+            if (!line || typeof line.color !== 'string') continue;
+            const raw = line.color.trim();
+            if (!raw) continue;
+            seenColors.add(raw.toUpperCase());
+            if (seenColors.size > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function updateActorRoleImportVisibility() {
+        if (!actorRoleImportButton || !actorRoleImportButton.length) return;
+        const wrapper = actorRoleImportButton.closest('.actor-role-import-row');
+        const shouldShow = shouldShowActorRoleImportButton();
+        const target = wrapper && wrapper.length ? wrapper : actorRoleImportButton;
+        target.toggle(shouldShow);
+        if (!shouldShow) {
+            setActorRoleImportStatus('');
+        }
+    }
+
+    function setActorRoleImportStatus(message, status) {
+        if (!actorRoleImportStatus || !actorRoleImportStatus.length) return;
+        if (!message) {
+            actorRoleImportStatus.text('');
+            actorRoleImportStatus.removeAttr('data-status');
+            return;
+        }
+        actorRoleImportStatus.text(message);
+        if (status) {
+            actorRoleImportStatus.attr('data-status', status);
+        } else {
+            actorRoleImportStatus.removeAttr('data-status');
+        }
+    }
+
+    async function fetchSubtitlesForImportFromFile() {
+        if (typeof fetch !== 'function') {
+            const err = new Error('Fetch API unavailable');
+            err.code = 'FETCH_UNSUPPORTED';
+            throw err;
+        }
+        const stamp = Date.now();
+        let url;
+        if (isEmuMode()) {
+            const sp = new URLSearchParams(window.location.search);
+            const subtitleName = normalizeReferencePath(sp.get('subtitle'), 'subtitles');
+            url = `reference/${subtitleName}.json?_ts=${stamp}`;
+        } else {
+            url = `/subtitles.json?_ts=${stamp}`;
+        }
+        const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+        if (!response.ok) {
+            const err = new Error(`HTTP ${response.status}`);
+            err.code = 'HTTP_ERROR';
+            err.status = response.status;
+            throw err;
+        }
+        const data = await response.json();
+        if (!Array.isArray(data)) {
+            const err = new Error('Invalid subtitles format');
+            err.code = 'INVALID_FORMAT';
+            throw err;
+        }
+        return data;
+    }
+
+    async function resolveSubtitlesForImport() {
+        try {
+            const data = await fetchSubtitlesForImportFromFile();
+            return { data, source: 'file', fetchError: null };
+        } catch (err) {
+            console.warn('[Prompter][roles] subtitles import fallback to in-memory data', err);
+            if (Array.isArray(subtitleData) && subtitleData.length > 0) {
+                return { data: subtitleData, source: 'memory', fetchError: err };
+            }
+            const fallbackError = new Error('Subtitles not loaded');
+            fallbackError.code = 'NO_SUBTITLES';
+            fallbackError.cause = err;
+            throw fallbackError;
+        }
+    }
+
+    function groupRolesByLineColor(subtitles) {
+        const colorOrder = [];
+        const colorMap = new Map();
+        let processedLines = 0;
+        let coloredLineCount = 0;
+        for (const line of Array.isArray(subtitles) ? subtitles : []) {
+            if (!line || typeof line.color !== 'string') continue;
+            const rawColor = line.color.trim();
+            if (!rawColor) continue;
+            coloredLineCount++;
+            if (!line.text || typeof line.text !== 'string') continue;
+            const extracted = extractLeadingRole(line.text, true);
+            if (!extracted || !extracted.role) continue;
+            const normalizedRole = extracted.role.trim().toUpperCase();
+            if (!normalizedRole) continue;
+            processedLines++;
+            const colorKey = rawColor.toUpperCase();
+            let entry = colorMap.get(colorKey);
+            if (!entry) {
+                entry = { color: rawColor, rolesSet: new Set(), rolesOrder: [] };
+                colorMap.set(colorKey, entry);
+                colorOrder.push(colorKey);
+            }
+            if (!entry.rolesSet.has(normalizedRole)) {
+                entry.rolesSet.add(normalizedRole);
+                entry.rolesOrder.push(normalizedRole);
+            }
+        }
+        const groups = [];
+        const uniqueRoles = new Set();
+        colorOrder.forEach((colorKey, index) => {
+            const entry = colorMap.get(colorKey);
+            if (!entry || entry.rolesOrder.length === 0) return;
+            entry.rolesOrder.forEach(role => uniqueRoles.add(role));
+            groups.push({
+                label: `ГРУППА${index + 1}`,
+                roles: entry.rolesOrder.slice(),
+                color: entry.color
+            });
+        });
+        return {
+            groups,
+            uniqueRoleCount: uniqueRoles.size,
+            processedLines,
+            coloredLineCount
+        };
+    }
+
+    async function importActorRoleGroupsFromProject() {
+        if (!actorRoleImportButton || !actorRoleImportButton.length) return;
+        setActorRoleImportStatus('Считываем субтитры...', 'info');
+        actorRoleImportButton.prop('disabled', true);
+        try {
+            const { data, source, fetchError } = await resolveSubtitlesForImport();
+            if (!Array.isArray(data) || data.length === 0) {
+                setActorRoleImportStatus('Файл субтитров пуст или не создан. Обновите проект и попробуйте снова.', 'error');
+                return;
+            }
+            const grouping = groupRolesByLineColor(data);
+            if (!grouping.groups.length) {
+                setActorRoleImportStatus('Не удалось найти роли с назначенными цветами.', 'error');
+                return;
+            }
+            const mappingPayload = {};
+            const actorOrder = [];
+            if (!settings.actorColors) {
+                settings.actorColors = {};
+            }
+            const actorColorAssignments = { ...settings.actorColors };
+            grouping.groups.forEach(group => {
+                if (!group || !group.label) return;
+                const labelKey = typeof group.label === 'string' ? group.label.trim().toUpperCase() : '';
+                if (!labelKey) return;
+                const rolesList = Array.isArray(group.roles)
+                    ? group.roles.map(role => String(role || '').toUpperCase().trim()).filter(Boolean)
+                    : [];
+                if (rolesList.length) {
+                    mappingPayload[labelKey] = rolesList;
+                    actorOrder.push(labelKey);
+                }
+                if (group.color && typeof group.color === 'string') {
+                    actorColorAssignments[labelKey] = group.color;
+                }
+            });
+            settings.actorColors = actorColorAssignments;
+            const mappingText = serializeActorRoleMapping(mappingPayload, actorOrder);
+            settings.actorRoleMappingText = mappingText;
+            cachedActorRoleMappingText = null;
+            if (actorRoleMappingTextarea && actorRoleMappingTextarea.length) {
+                actorRoleMappingTextarea.val(mappingText);
+            }
+            scheduleActorMappingPreview({ debounce: false });
+            updateActorRoleImportVisibility();
+            let message = `Импортировано групп: ${grouping.groups.length}. Ролей: ${grouping.uniqueRoleCount}.`;
+            if (source === 'memory' && fetchError) {
+                message += ' Использованы загруженные субтитры (файл недоступен).';
+            }
+            setActorRoleImportStatus(message, 'success');
+        } catch (err) {
+            const code = err && err.code ? err.code : 'UNKNOWN';
+            let message = 'Не удалось импортировать карту ролей.';
+            if (code === 'NO_SUBTITLES') {
+                message = 'Субтитры ещё не загружены. Откройте дорожку и попробуйте снова.';
+            } else if (code === 'HTTP_ERROR') {
+                message = 'Файл subtitles.json недоступен. Обновите текст в REAPER и повторите попытку.';
+            } else if (code === 'INVALID_FORMAT') {
+                message = 'Файл subtitles.json имеет некорректный формат.';
+            } else if (code === 'FETCH_UNSUPPORTED') {
+                message = 'Браузер не поддерживает загрузку файла субтитров.';
+            }
+            setActorRoleImportStatus(message, 'error');
+            console.error('[Prompter][roles] importActorRoleGroupsFromProject failed', err);
+        } finally {
+            actorRoleImportButton.prop('disabled', false);
+        }
+    }
+
     // Compute roles present in subtitleData but not mapped to any actor
     function computeUnassignedRoles() {
         const mappedRoles = new Set(Object.keys(roleToActor));
@@ -8456,7 +9314,10 @@ $(document).ready(function() {
             subtitleData.forEach(line => {
                 if (!line || !line.text) return;
                 const m = line.text.match(/^\[(.*?)\]\s*/);
-                if (m && m[1]) { allRoles.add(m[1]); }
+                if (m && m[1]) {
+                    const roleKey = String(m[1]).toUpperCase();
+                    if (roleKey) allRoles.add(roleKey);
+                }
             });
         }
         const unassigned = [];
@@ -8490,12 +9351,12 @@ $(document).ready(function() {
     }
 
     function saveActorsFromUI() {
-        const rawMapping = $('#actor-role-mapping-text').val();
+        const rawMapping = actorRoleMappingTextarea && actorRoleMappingTextarea.length ? actorRoleMappingTextarea.val() : '';
         settings.actorRoleMappingText = rawMapping;
         // Collect colors that пользователь явно видел/менял в списке
         const newColors = {};
         $('#actor-color-list .actor-color-item').each(function(){
-            const actor = $(this).data('actor');
+            const actor = readActorKeyFromRow($(this));
             const input = $(this).find('.actor-color-input');
             let val = input.val();
             if (input.spectrum && input.spectrum("get")) {
@@ -8525,7 +9386,7 @@ $(document).ready(function() {
         const muteActors = [];
         const soloActors = [];
         $('#actor-color-list .actor-color-item').each(function(){
-            const actor = $(this).data('actor');
+            const actor = readActorKeyFromRow($(this));
             if (!actor) return;
             if ($(this).attr('data-muted') === 'true') {
                 muteActors.push(actor);
@@ -9133,20 +9994,30 @@ $(document).ready(function() {
     resetSettingsButton.on('click', resetSettings);
     $('#actors-button').on('click', function(){
         // Заполнить textarea текущим mapping
-        $('#actor-role-mapping-text').val(settings.actorRoleMappingText || '');
+        if (actorRoleMappingTextarea && actorRoleMappingTextarea.length) {
+            actorRoleMappingTextarea.val(settings.actorRoleMappingText || '');
+        }
+        setActorRoleImportStatus('');
         regenerateActorColorListUI();
         updateActorRoleWarningBanner();
+        updateActorRoleImportVisibility();
         $('#actors-modal').show();
     });
+    if (actorRoleImportButton && actorRoleImportButton.length) {
+        actorRoleImportButton.on('click', () => {
+            importActorRoleGroupsFromProject();
+        });
+    }
     $('#stats-button').on('click', function(){ buildAndShowStats(); });
-    // Realtime mapping update while typing
-    $('#actor-role-mapping-text').on('input', function(){
-        settings.actorRoleMappingText = $(this).val();
-        // Rebuild only lightweight preview (do not save yet)
-        regenerateActorColorListUI();
-        // Update rendered subtitles highlight if roles affect coloring
-        if (subtitleData.length > 0) handleTextResponse(subtitleData);
-    });
+    // Realtime mapping update while typing: rebuild preview without mutating user input.
+    if (actorRoleMappingTextarea && actorRoleMappingTextarea.length) {
+        actorRoleMappingTextarea.on('input', function(){
+            const val = $(this).val();
+            settings.actorRoleMappingText = typeof val === 'string' ? val : '';
+            const shouldDebounce = Array.isArray(subtitleData) && subtitleData.length >= ACTOR_MAPPING_REBUILD_DEBOUNCE_THRESHOLD; // throttle heavy rebuilds for large datasets
+            scheduleActorMappingPreview({ debounce: shouldDebounce });
+        });
+    }
 
     // ================= STATISTICS =================
     function computeStats() {
@@ -9162,10 +10033,11 @@ $(document).ready(function() {
                 if (!line || !line.text) continue;
                 const m = line.text.match(/^\[(.*?)\]\s*/);
                 if (m && m[1]) {
-                    const role = m[1];
+                    const roleKey = String(m[1]).toUpperCase();
+                    if (!roleKey) continue;
                     totalRoleLines++;
-                    roleCounts.set(role, (roleCounts.get(role) || 0) + 1);
-                    const actor = roleToActor[role];
+                    roleCounts.set(roleKey, (roleCounts.get(roleKey) || 0) + 1);
+                    const actor = roleToActor[roleKey];
                     if (actor) {
                         totalActorLines++;
                         actorCounts.set(actor, (actorCounts.get(actor) || 0) + 1);
@@ -9252,7 +10124,7 @@ $(document).ready(function() {
     $(document).on('click', '.actor-filter-btn', function(event){
         event.preventDefault();
         const action = $(this).data('action');
-        const actor = $(this).closest('.actor-color-item').data('actor');
+        const actor = readActorKeyFromRow($(this).closest('.actor-color-item'));
         if (!actor || typeof action !== 'string') return;
         if (action === 'mute') {
             toggleActorMuteState(actor);
@@ -9273,13 +10145,47 @@ $(document).ready(function() {
     });
     $(document).on('click', '.delete-actor-color', function(){
         const row = $(this).closest('.actor-color-item');
-        const actor = row.data('actor');
+        const actor = readActorKeyFromRow(row);
         if (actor) {
             setActorMuteState(actor, false);
             removeSoloActor(actor);
         }
         row.remove();
         syncActorFilterSettings({ reason: 'actor_row_deleted' });
+    });
+    $(document).on('click', '.actor-name', function(event){
+        event.preventDefault();
+        const row = $(this).closest('.actor-color-item');
+        if (!row.length) return;
+        beginActorInlineRename(row, $(this));
+    });
+    $(document).on('keydown', '.actor-name', function(event){
+        if (event.key === 'Enter' || event.key === 'F2' || event.key === ' ' || event.key === 'Spacebar') {
+            event.preventDefault();
+            const row = $(this).closest('.actor-color-item');
+            if (!row.length) return;
+            beginActorInlineRename(row, $(this));
+        }
+    });
+    $(document).on('input', '.actor-name-editor', function(){
+        autosizeActorNameEditor($(this));
+    });
+    $(document).on('keydown', '.actor-name-editor', function(event){
+        const row = $(this).closest('.actor-color-item');
+        if (!row.length) return;
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            finalizeActorInlineRename(row, $(this));
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelActorInlineRename(row, $(this));
+        }
+    });
+    $(document).on('blur', '.actor-name-editor', function(){
+        const row = $(this).closest('.actor-color-item');
+        if (!row.length) return;
+        if (row.attr('data-editing') !== 'true') return;
+        finalizeActorInlineRename(row, $(this));
     });
     $('#save-actors-button').on('click', function(){ saveActorsFromUI(); $('#actors-modal').hide(); });
     $('#reset-actor-filters-button').on('click', function(event){
