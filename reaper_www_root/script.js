@@ -1,4 +1,4 @@
-const SETTINGS_SCHEMA_VERSION = 7;
+const SETTINGS_SCHEMA_VERSION = 8;
 const DATA_MODEL_VERSION = 2;
 const DEFAULT_PROJECT_FPS = 24;
 const MAX_JUMP_PRE_ROLL_SECONDS = 10;
@@ -774,6 +774,213 @@ function sanitizeProgressBarMode(value, fallback = 'subtitle') {
     return fallbackNormalized;
 }
 
+function sanitizeSegmentationPriority(value, fallback = 'video') {
+    const fallbackNormalized = (typeof fallback === 'string' && fallback.trim().toLowerCase() === 'markers') ? 'markers' : 'video';
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'video' || normalized === 'videos' || normalized === 'video_files') {
+            return 'video';
+        }
+        if (normalized === 'markers' || normalized === 'marker' || normalized === 'regions' || normalized === 'region') {
+            return 'markers';
+        }
+    }
+    return fallbackNormalized;
+}
+
+function sanitizeSegmentationDisplayMode(value, fallback = 'current') {
+    const fallbackNormalized = (typeof fallback === 'string' && fallback.trim().toLowerCase() === 'all') ? 'all' : 'current';
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'current' || normalized === 'current_segment' || normalized === 'segment') {
+            return 'current';
+        }
+        if (normalized === 'all' || normalized === 'all_segments' || normalized === 'full') {
+            return 'all';
+        }
+    }
+    return fallbackNormalized;
+}
+
+function sanitizeSegmentationAutoSwitchMode(value, fallback = 'playback_only') {
+    const fallbackNormalized = (() => {
+        if (typeof fallback !== 'string') return 'playback_only';
+        const normalized = fallback.trim().toLowerCase();
+        if (normalized === 'always') return 'always';
+        if (normalized === 'disabled' || normalized === 'off') return 'disabled';
+        return 'playback_only';
+    })();
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'always') {
+            return 'always';
+        }
+        if (normalized === 'disabled' || normalized === 'off' || normalized === 'none') {
+            return 'disabled';
+        }
+        if (normalized === 'playback' || normalized === 'playback_only' || normalized === 'play' || normalized === 'transport') {
+            return 'playback_only';
+        }
+    }
+    return fallbackNormalized;
+}
+
+function sanitizeSegmentationKeywordList(value, fallback = '', options = {}) {
+    const allowEmpty = options && options.allowEmpty === true;
+    const fallbackString = typeof fallback === 'string' ? fallback.trim() : '';
+    if (typeof value !== 'string') {
+        return allowEmpty ? '' : fallbackString;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return allowEmpty ? '' : fallbackString;
+    }
+    return trimmed;
+}
+
+const SEGMENTATION_MODE_NONE = 'none';
+const SEGMENTATION_MODE_VIDEO = 'video';
+const SEGMENTATION_MODE_MARKERS = 'markers';
+const SEGMENTATION_MODE_BOTH = 'both';
+
+const SEGMENTATION_MODE_LABELS = {
+    [SEGMENTATION_MODE_NONE]: 'Выключить',
+    [SEGMENTATION_MODE_VIDEO]: 'Только по видеофайлам',
+    [SEGMENTATION_MODE_MARKERS]: 'Только по маркерам\регионам',
+    [SEGMENTATION_MODE_BOTH]: 'Двойной режим'
+};
+
+let settings = {};
+
+function sanitizeSegmentationMode(value, fallback = SEGMENTATION_MODE_NONE) {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (normalized === SEGMENTATION_MODE_VIDEO || normalized === SEGMENTATION_MODE_MARKERS || normalized === SEGMENTATION_MODE_BOTH) {
+        return normalized;
+    }
+    return SEGMENTATION_MODE_NONE;
+}
+
+function mapSegmentationModeToFlags(mode) {
+    const resolved = sanitizeSegmentationMode(mode);
+    if (resolved === SEGMENTATION_MODE_VIDEO) {
+        return { enabled: true, video: true, markers: false };
+    }
+    if (resolved === SEGMENTATION_MODE_MARKERS) {
+        return { enabled: true, video: false, markers: true };
+    }
+    if (resolved === SEGMENTATION_MODE_BOTH) {
+        return { enabled: true, video: true, markers: true };
+    }
+    return { enabled: false, video: false, markers: false };
+}
+
+function deriveSegmentationModeFromFlags(enabled, videoEnabled, markersEnabled) {
+    if (!enabled || (!videoEnabled && !markersEnabled)) {
+        return SEGMENTATION_MODE_NONE;
+    }
+    if (videoEnabled && markersEnabled) {
+        return SEGMENTATION_MODE_BOTH;
+    }
+    if (videoEnabled) {
+        return SEGMENTATION_MODE_VIDEO;
+    }
+    if (markersEnabled) {
+        return SEGMENTATION_MODE_MARKERS;
+    }
+    return SEGMENTATION_MODE_NONE;
+}
+
+function buildSegmentationRequestState(sourceSettings = settings) {
+    const base = sourceSettings || settings || defaultSettings;
+    const enabledFlag = base && base.segmentationEnabled !== false;
+    const videoFlag = enabledFlag && (base.segmentationAutoVideoEnabled !== false);
+    const markersFlag = enabledFlag && (base.segmentationAutoMarkersEnabled !== false);
+    const mode = deriveSegmentationModeFromFlags(enabledFlag, videoFlag, markersFlag);
+    const flags = mapSegmentationModeToFlags(mode);
+    const priority = sanitizeSegmentationPriority(
+        base ? base.segmentationAutodetectPriority : undefined,
+        defaultSettings.segmentationAutodetectPriority
+    );
+    const videoKeywords = flags.enabled && flags.video
+        ? sanitizeSegmentationKeywordList(
+            base.segmentationAutoVideoKeywords,
+            defaultSettings.segmentationAutoVideoKeywords
+        )
+        : '';
+    const markerPattern = flags.enabled && flags.markers
+        ? sanitizeSegmentationKeywordList(
+            base.segmentationMarkerPattern,
+            defaultSettings.segmentationMarkerPattern,
+            { allowEmpty: true }
+        )
+        : '';
+    return {
+        enabled: flags.enabled,
+        mode,
+        priority,
+        videoEnabled: flags.video,
+        markersEnabled: flags.markers,
+        videoKeywords,
+        markerPattern
+    };
+}
+
+function segmentationRequestStatesDiffer(prev, next) {
+    if (!prev || !next) {
+        return true;
+    }
+    return (
+        prev.enabled !== next.enabled ||
+        prev.mode !== next.mode ||
+        prev.priority !== next.priority ||
+        prev.videoEnabled !== next.videoEnabled ||
+        prev.markersEnabled !== next.markersEnabled ||
+        prev.videoKeywords !== next.videoKeywords ||
+        prev.markerPattern !== next.markerPattern
+    );
+}
+
+function transmitSegmentationRequestToBackend(reason = 'project_data', options = {}) {
+    const requestReason = (typeof reason === 'string' && reason.trim().length)
+        ? reason.trim()
+        : 'project_data';
+    const state = buildSegmentationRequestState(options && options.sourceSettings);
+    if (typeof wwr_req !== 'function') {
+        console.debug('[Prompter][segmentation] transmit skipped (wwr_req unavailable)', {
+            reason: requestReason,
+            state
+        });
+        return state;
+    }
+    try {
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_request_mode/${encodeURIComponent(state.mode)}`);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_request_priority/${encodeURIComponent(state.priority)}`);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_video_toggle/${state.videoEnabled ? '1' : '0'}`);
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_markers_toggle/${state.markersEnabled ? '1' : '0'}`);
+        if (state.videoEnabled && state.videoKeywords) {
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_video_keywords/${encodeURIComponent(state.videoKeywords)}`);
+        } else {
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_video_keywords/');
+        }
+        if (state.markersEnabled && state.markerPattern) {
+            wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_marker_pattern/${encodeURIComponent(state.markerPattern)}`);
+        } else {
+            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_marker_pattern/');
+        }
+        const metaPayload = `${Date.now()}|${state.mode}|${requestReason}`;
+        wwr_req(`SET/EXTSTATEPERSIST/PROMPTER_WEBUI/segmentation_request_meta/${encodeURIComponent(metaPayload)}`);
+        console.debug('[Prompter][segmentation] request dispatched', {
+            reason: requestReason,
+            mode: state.mode,
+            video: state.videoEnabled,
+            markers: state.markersEnabled
+        });
+    } catch (err) {
+        console.error('[Prompter][segmentation] transmit failed', err);
+    }
+    return state;
+}
+
 function sanitizeAutoScrollPercent(value, fallback, min = 0, max = 100) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -974,6 +1181,574 @@ const PrompterTime = (() => {
     };
 })();
 
+const STATS_SEGMENT_ALL_VALUE = 'all';
+const SEGMENT_RANGE_EPSILON = 1e-6;
+
+const STATS_PERCENT_DIGITS = 1;
+
+function createDefaultProjectSegmentationInfo() {
+    return {
+        mode: 'none',
+        priority: 'video',
+        videoSegments: [],
+        markerSegments: [],
+        requestedAtMs: null,
+        generatedAtMs: null,
+        meta: {}
+    };
+}
+
+let projectSegmentationInfo = createDefaultProjectSegmentationInfo();
+let statsSegmentSelection = STATS_SEGMENT_ALL_VALUE;
+const statsSegmentOptionMap = new Map();
+
+function resetStatsSegmentOptionMap() {
+    statsSegmentOptionMap.clear();
+    statsSegmentOptionMap.set(STATS_SEGMENT_ALL_VALUE, {
+        value: STATS_SEGMENT_ALL_VALUE,
+        label: 'Весь проект',
+        kind: 'all',
+        range: null
+    });
+}
+
+resetStatsSegmentOptionMap();
+
+const manualSegmentationState = {
+    enabled: false,
+    segments: [],
+    updatedAtMs: null,
+    version: 0
+};
+
+function coerceSecondsValue(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string') {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+function sanitizeManualSegmentationList(rawSegments) {
+    if (!Array.isArray(rawSegments)) {
+        return [];
+    }
+    const collected = [];
+    rawSegments.forEach((entry, index) => {
+        if (!entry || typeof entry !== 'object') {
+            return;
+        }
+        let startSeconds = coerceSecondsValue(entry.startSeconds ?? entry.start ?? entry.start_second ?? entry.start_sec);
+        if (startSeconds === null) {
+            const startMs = coerceSecondsValue(entry.startMs ?? entry.start_ms ?? entry.startMilliseconds ?? entry.start_milliseconds);
+            if (startMs !== null) {
+                startSeconds = startMs / 1000;
+            }
+        }
+        if (startSeconds === null) {
+            return;
+        }
+        let endSeconds = coerceSecondsValue(entry.endSeconds ?? entry.end ?? entry.end_second ?? entry.end_sec);
+        if (endSeconds === null) {
+            const endMs = coerceSecondsValue(entry.endMs ?? entry.end_ms ?? entry.endMilliseconds ?? entry.end_milliseconds);
+            if (endMs !== null) {
+                endSeconds = endMs / 1000;
+            }
+        }
+        const label = typeof entry.label === 'string' ? entry.label : (typeof entry.name === 'string' ? entry.name : '');
+        collected.push({
+            kind: 'manual',
+            startSeconds: Math.max(0, startSeconds),
+            rawEnd: endSeconds !== null ? Math.max(endSeconds, startSeconds) : null,
+            label,
+            originalIndex: index,
+            source: entry.source || 'manual'
+        });
+    });
+    collected.sort((a, b) => {
+        if (a.startSeconds === b.startSeconds) {
+            return a.originalIndex - b.originalIndex;
+        }
+        return a.startSeconds - b.startSeconds;
+    });
+    for (let i = 0; i < collected.length; i++) {
+        const segment = collected[i];
+        const next = collected[i + 1];
+        const resolvedEnd = segment.rawEnd !== null ? segment.rawEnd : (next ? next.startSeconds : segment.startSeconds);
+        segment.endSeconds = Math.max(segment.startSeconds, resolvedEnd);
+        segment.uid = `manual:${i}`;
+        segment.ordinal = i;
+        segment.label = segment.label && segment.label.trim().length ? segment.label.trim() : `Сегмент ${i + 1}`;
+        delete segment.rawEnd;
+        delete segment.originalIndex;
+    }
+    return collected;
+}
+
+function setManualSegmentationSegments(rawSegments = [], options = {}) {
+    const sanitized = sanitizeManualSegmentationList(rawSegments);
+    manualSegmentationState.segments = sanitized;
+    manualSegmentationState.updatedAtMs = Date.now();
+    manualSegmentationState.version += 1;
+    if (!options || options.refresh !== false) {
+        handleManualSegmentationChanged({ reason: options.reason || 'update' });
+    } else {
+        updateProjectSettingsButtonVisibility({ reason: options && options.reason ? options.reason : 'update_no_refresh' });
+    }
+    return sanitized;
+}
+
+function getManualSegmentationSegments() {
+    return Array.isArray(manualSegmentationState.segments) ? manualSegmentationState.segments : [];
+}
+
+function manualSegmentationHasSegments() {
+    return getManualSegmentationSegments().length > 0;
+}
+
+function isManualSegmentationEnabled() {
+    return manualSegmentationState.enabled === true;
+}
+
+let projectSettingsButtonEl = null;
+let projectSettingsModalEl = null;
+
+function getProjectSettingsButtonElement() {
+    if (projectSettingsButtonEl && projectSettingsButtonEl.length) {
+        return projectSettingsButtonEl;
+    }
+    if (typeof window !== 'undefined' && window.jQuery) {
+        const candidate = window.jQuery('#project-settings-button');
+        if (candidate && candidate.length) {
+            projectSettingsButtonEl = candidate;
+            return projectSettingsButtonEl;
+        }
+    }
+    return null;
+}
+
+function getProjectSettingsModalElement() {
+    if (projectSettingsModalEl && projectSettingsModalEl.length) {
+        return projectSettingsModalEl;
+    }
+    if (typeof window !== 'undefined' && window.jQuery) {
+        const candidate = window.jQuery('#project-settings-modal');
+        if (candidate && candidate.length) {
+            projectSettingsModalEl = candidate;
+            return projectSettingsModalEl;
+        }
+    }
+    return null;
+}
+
+function shouldShowProjectSettingsButton() {
+    const manualSettingFlag = !!(settings && settings.segmentationManualEnabled);
+    return manualSettingFlag || isManualSegmentationEnabled() || manualSegmentationHasSegments();
+}
+
+function updateProjectSettingsButtonVisibility(options = {}) {
+    const button = getProjectSettingsButtonElement();
+    if (!button || !button.length) {
+        return;
+    }
+    const shouldShow = shouldShowProjectSettingsButton();
+    if (shouldShow) {
+        button.show().attr('aria-hidden', 'false');
+    } else {
+        button.hide().attr('aria-hidden', 'true');
+    }
+    if (shouldShow && options && options.focus === true) {
+        button.trigger('focus');
+    }
+}
+
+function showProjectSettingsModal() {
+    const modal = getProjectSettingsModalElement();
+    if (!modal || !modal.length) {
+        return;
+    }
+    modal.attr('aria-hidden', 'false').show();
+}
+
+function hideProjectSettingsModal() {
+    const modal = getProjectSettingsModalElement();
+    if (!modal || !modal.length) {
+        return;
+    }
+    modal.attr('aria-hidden', 'true').hide();
+}
+
+function isManualSegmentationActive() {
+    return isManualSegmentationEnabled() && manualSegmentationHasSegments();
+}
+
+function handleManualSegmentationChanged(options = {}) {
+    if (typeof refreshStatsSegmentationControls === 'function') {
+        const preserveSelection = options && options.preserveSelection === true;
+        refreshStatsSegmentationControls({ preserveSelection, recalcIfVisible: true });
+    }
+    updateProjectSettingsButtonVisibility({ reason: options && options.reason ? options.reason : 'manual_segmentation_change' });
+}
+
+function setManualSegmentationEnabled(enabled, options = {}) {
+    const normalized = !!enabled;
+    const previous = isManualSegmentationEnabled();
+    const force = options && options.force === true;
+    if (!force && previous === normalized) {
+        if (options && options.ensureVisibility) {
+            updateProjectSettingsButtonVisibility({ reason: options.reason || 'manual_toggle_noop' });
+        }
+        return previous;
+    }
+    manualSegmentationState.enabled = normalized;
+    manualSegmentationState.updatedAtMs = Date.now();
+    if (!options || options.refresh !== false) {
+        handleManualSegmentationChanged({
+            reason: options ? options.reason : 'manual_toggle',
+            preserveSelection: options && options.preserveSelection === true
+        });
+    } else {
+        updateProjectSettingsButtonVisibility({ reason: options.reason || 'manual_toggle' });
+    }
+    return normalized;
+}
+
+function sanitizeSegmentList(rawList, kind) {
+    const result = [];
+    if (!Array.isArray(rawList)) {
+        return result;
+    }
+    rawList.forEach((entry, idx) => {
+        if (!entry || typeof entry !== 'object') {
+            return;
+        }
+        const startSecondsRaw = Number(entry.start);
+        if (!Number.isFinite(startSecondsRaw)) {
+            return;
+        }
+        const segment = {
+            kind,
+            startSeconds: Math.max(0, startSecondsRaw),
+            _originalOrder: idx
+        };
+        if (kind === 'video') {
+            segment.fileName = typeof entry.file_name === 'string' ? entry.file_name : '';
+            segment.trackName = typeof entry.track_name === 'string' ? entry.track_name : '';
+        } else {
+            segment.name = typeof entry.name === 'string' ? entry.name : '';
+            segment.markerSource = entry.source === 'region' ? 'region' : 'marker';
+            const markerIndex = Number(entry.index);
+            segment.projectIndex = Number.isFinite(markerIndex) ? markerIndex : null;
+        }
+        result.push(segment);
+    });
+    result.sort((a, b) => {
+        if (a.startSeconds === b.startSeconds) {
+            return a._originalOrder - b._originalOrder;
+        }
+        return a.startSeconds - b.startSeconds;
+    });
+    for (let i = 0; i < result.length; i++) {
+        const next = result[i + 1];
+        const nextStart = next ? next.startSeconds : Number.POSITIVE_INFINITY;
+        result[i].endSeconds = nextStart < result[i].startSeconds ? result[i].startSeconds : nextStart;
+        result[i].uid = `${kind}:${i}`;
+        result[i].ordinal = i;
+        delete result[i]._originalOrder;
+    }
+    return result;
+}
+
+function sanitizeProjectSegmentationSnapshot(raw) {
+    const info = createDefaultProjectSegmentationInfo();
+    if (!raw || typeof raw !== 'object') {
+        return info;
+    }
+    const modeRaw = typeof raw.mode === 'string' ? raw.mode.toLowerCase() : 'none';
+    info.mode = (modeRaw === 'video' || modeRaw === 'markers' || modeRaw === 'both') ? modeRaw : 'none';
+    info.priority = raw.priority === 'markers' ? 'markers' : 'video';
+    const requestedMs = Number(raw.requested_at_ms);
+    info.requestedAtMs = Number.isFinite(requestedMs) ? requestedMs : null;
+    const generatedMs = Number(raw.generated_at_ms);
+    info.generatedAtMs = Number.isFinite(generatedMs) ? generatedMs : null;
+    info.videoSegments = sanitizeSegmentList(raw.SegByVideo, 'video');
+    info.markerSegments = sanitizeSegmentList(raw.SegByMarkers, 'markers');
+    info.meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
+    if (info.mode === 'none') {
+        info.videoSegments = [];
+        info.markerSegments = [];
+    } else {
+        const modeIncludesVideo = info.mode === 'video' || info.mode === 'both';
+        const modeIncludesMarkers = info.mode === 'markers' || info.mode === 'both';
+        const hasMeaningfulVideo = modeIncludesVideo && info.videoSegments.length > 1;
+        const hasMeaningfulMarkers = modeIncludesMarkers && info.markerSegments.length > 1;
+        if (!hasMeaningfulVideo && !hasMeaningfulMarkers) {
+            info.mode = 'none';
+            info.videoSegments = [];
+            info.markerSegments = [];
+        }
+    }
+    return info;
+}
+
+function determinePrimarySegmentKind(info) {
+    if (!info) {
+        return null;
+    }
+    if (info.priority === 'markers' && info.markerSegments.length) {
+        return 'markers';
+    }
+    if (info.priority === 'video' && info.videoSegments.length) {
+        return 'video';
+    }
+    if (info.videoSegments.length) {
+        return 'video';
+    }
+    if (info.markerSegments.length) {
+        return 'markers';
+    }
+    return null;
+}
+
+function formatStatsSegmentLabel(segment, index, kind) {
+    const ordinal = index + 1;
+    if (kind === 'video') {
+        const baseName = segment.fileName && segment.fileName.trim().length ? segment.fileName.trim() : `Видео ${ordinal}`;
+        const trackSuffix = segment.trackName && segment.trackName.trim().length ? ` · ${segment.trackName.trim()}` : '';
+        return `${ordinal}. Видео: ${baseName}${trackSuffix}`;
+    }
+    const sourceLabel = segment.markerSource === 'region' ? 'Регион' : 'Маркер';
+    const base = segment.name && segment.name.trim().length ? segment.name.trim() : `${sourceLabel} ${ordinal}`;
+    return `${ordinal}. ${sourceLabel}: ${base}`;
+}
+
+function formatManualSegmentLabel(segment, index) {
+    const ordinal = index + 1;
+    if (!segment) {
+        return `${ordinal}. Сегмент ${ordinal}`;
+    }
+    const base = segment.label && segment.label.trim().length ? segment.label.trim() : `Сегмент ${ordinal}`;
+    return `${ordinal}. ${base}`;
+}
+
+function buildStatsSegmentOptions(info) {
+    const options = [{
+        value: STATS_SEGMENT_ALL_VALUE,
+        label: 'Весь проект',
+        range: null,
+        kind: 'all'
+    }];
+    if (isManualSegmentationActive()) {
+        const manualSegments = getManualSegmentationSegments();
+        manualSegments.forEach((segment, index) => {
+            if (!segment || typeof segment.startSeconds !== 'number') {
+                return;
+            }
+            const value = typeof segment.uid === 'string' ? segment.uid : `manual:${index}`;
+            options.push({
+                value,
+                label: formatManualSegmentLabel(segment, index),
+                range: {
+                    startSeconds: segment.startSeconds,
+                    endSeconds: segment.endSeconds
+                },
+                    kind: 'manual',
+                segment
+            });
+        });
+        return {
+            options,
+            primaryKind: 'manual',
+            segments: manualSegments,
+            source: 'manual'
+        };
+    }
+    const primaryKind = determinePrimarySegmentKind(info);
+    let segments = [];
+    if (primaryKind) {
+        segments = primaryKind === 'markers' ? info.markerSegments : info.videoSegments;
+        segments.forEach(segment => {
+            options.push({
+                value: segment.uid,
+                label: formatStatsSegmentLabel(segment, segment.ordinal, primaryKind),
+                range: {
+                    startSeconds: segment.startSeconds,
+                    endSeconds: segment.endSeconds
+                },
+                kind: primaryKind,
+                segment
+            });
+        });
+    }
+    return {
+        options,
+        primaryKind,
+        segments,
+        source: primaryKind === 'markers' ? 'markers' : (primaryKind === 'video' ? 'video' : null)
+    };
+}
+
+function determineStatsSegmentSelectionForTime(info, seconds) {
+    const manualActive = isManualSegmentationActive();
+    const time = Number(seconds);
+    if (manualActive) {
+        const manualSegments = getManualSegmentationSegments();
+        if (!manualSegments.length) {
+            return STATS_SEGMENT_ALL_VALUE;
+        }
+        if (!Number.isFinite(time) || time < 0) {
+            return manualSegments[0] && typeof manualSegments[0].uid === 'string'
+                ? manualSegments[0].uid
+                : STATS_SEGMENT_ALL_VALUE;
+        }
+        let manualCandidate = null;
+        for (let i = 0; i < manualSegments.length; i++) {
+            const segment = manualSegments[i];
+            if (!segment || typeof segment.uid !== 'string') {
+                continue;
+            }
+            const start = Number(segment.startSeconds);
+            if (!Number.isFinite(start)) {
+                continue;
+            }
+            if (time < start - SEGMENT_RANGE_EPSILON) {
+                break;
+            }
+            manualCandidate = segment;
+            const endRaw = Number(segment.endSeconds);
+            const end = Number.isFinite(endRaw) ? endRaw : Number.POSITIVE_INFINITY;
+            if (time < end - SEGMENT_RANGE_EPSILON) {
+                return segment.uid;
+            }
+        }
+        return manualCandidate && typeof manualCandidate.uid === 'string'
+            ? manualCandidate.uid
+            : STATS_SEGMENT_ALL_VALUE;
+    }
+    if (!info || info.mode === 'none') {
+        return STATS_SEGMENT_ALL_VALUE;
+    }
+    if (!Number.isFinite(time) || time < 0) {
+        return STATS_SEGMENT_ALL_VALUE;
+    }
+    const primaryKind = determinePrimarySegmentKind(info);
+    if (!primaryKind) {
+        return STATS_SEGMENT_ALL_VALUE;
+    }
+    const segments = primaryKind === 'markers' ? info.markerSegments : info.videoSegments;
+    if (!Array.isArray(segments) || !segments.length) {
+        return STATS_SEGMENT_ALL_VALUE;
+    }
+    let candidate = null;
+    for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        if (!segment || typeof segment.uid !== 'string') {
+            continue;
+        }
+        const start = Number(segment.startSeconds);
+        if (!Number.isFinite(start)) {
+            continue;
+        }
+        if (time < start - SEGMENT_RANGE_EPSILON) {
+            break;
+        }
+        candidate = segment;
+        const endRaw = Number(segment.endSeconds);
+        const end = Number.isFinite(endRaw) ? endRaw : Number.POSITIVE_INFINITY;
+        if (time < end - SEGMENT_RANGE_EPSILON) {
+            return segment.uid;
+        }
+    }
+    return candidate && typeof candidate.uid === 'string' ? candidate.uid : STATS_SEGMENT_ALL_VALUE;
+}
+
+let statsSegmentControlsEl = null;
+let statsSegmentSelectEl = null;
+let statsSegmentSourceEl = null;
+let statsModalEl = null;
+let statsRolesSectionEl = null;
+let statsActorsSectionEl = null;
+let statsColorsSectionEl = null;
+let statsEmptyEl = null;
+let statsRolesTableBodyEl = null;
+let statsActorsTableBodyEl = null;
+let statsColorsTableBodyEl = null;
+let statsRolesTotalEl = null;
+let statsActorsTotalEl = null;
+let statsColorsTotalEl = null;
+
+let renderStatsTablesRef = null;
+
+let roleToActor = {};
+
+function refreshStatsSegmentationControls(options = {}) {
+    const preserveSelection = options && options.preserveSelection === true;
+    const recalcIfVisible = options && options.recalcIfVisible === true;
+    const resolved = buildStatsSegmentOptions(projectSegmentationInfo);
+    resetStatsSegmentOptionMap();
+    resolved.options.forEach(option => {
+        statsSegmentOptionMap.set(option.value, option);
+    });
+    const availableValues = resolved.options.map(option => option.value);
+    if (!preserveSelection || !availableValues.includes(statsSegmentSelection)) {
+        statsSegmentSelection = availableValues.includes(STATS_SEGMENT_ALL_VALUE)
+            ? STATS_SEGMENT_ALL_VALUE
+            : (availableValues[0] || STATS_SEGMENT_ALL_VALUE);
+    }
+    if (!statsSegmentControlsEl || !statsSegmentSelectEl) {
+        if (recalcIfVisible && typeof renderStatsTablesRef === 'function' && statsModalEl && statsModalEl.length && statsModalEl.is(':visible')) {
+            renderStatsTablesRef({ openModal: false });
+        }
+        return;
+    }
+    statsSegmentSelectEl.empty();
+    resolved.options.forEach(option => {
+        statsSegmentSelectEl.append($('<option>').val(option.value).text(option.label));
+    });
+    statsSegmentSelectEl.val(statsSegmentSelection);
+    if (resolved.options.length > 1 && resolved.primaryKind) {
+        statsSegmentControlsEl.show();
+        if (statsSegmentSourceEl && statsSegmentSourceEl.length) {
+            let sourceLabel;
+            if (resolved.source === 'manual' || resolved.primaryKind === 'manual') {
+                sourceLabel = 'ручной режим';
+            } else if (resolved.primaryKind === 'markers') {
+                sourceLabel = 'маркеры/регионы';
+            } else if (resolved.primaryKind === 'video') {
+                sourceLabel = 'видеофайлы';
+            } else {
+                sourceLabel = 'неизвестно';
+            }
+            const segmentCount = Array.isArray(resolved.segments) ? resolved.segments.length : 0;
+            statsSegmentSourceEl.text(`Источник: ${sourceLabel}. Сегментов: ${segmentCount}`);
+            statsSegmentSourceEl.show();
+        }
+    } else {
+        statsSegmentControlsEl.hide();
+        if (statsSegmentSourceEl && statsSegmentSourceEl.length) {
+            statsSegmentSourceEl.text('');
+            statsSegmentSourceEl.hide();
+        }
+    }
+    if (recalcIfVisible && typeof renderStatsTablesRef === 'function' && statsModalEl && statsModalEl.length && statsModalEl.is(':visible')) {
+        renderStatsTablesRef({ openModal: false });
+    }
+}
+
+function getActiveStatsSegmentRange() {
+    const entry = statsSegmentOptionMap.get(statsSegmentSelection);
+    if (!entry || !entry.range) {
+        return null;
+    }
+    return entry.range;
+}
+
 if (typeof window !== 'undefined') {
     window.PrompterTime = PrompterTime;
     try {
@@ -985,7 +1760,7 @@ if (typeof window !== 'undefined') {
 
 // --- НАСТРОЙКИ ПО УМОЛЧАНИЮ ---
 const defaultSettings = {
-    settingsSchemaVersion: 6,
+    settingsSchemaVersion: 8,
     fontSize: 2,
     lineHeight: 1.4,
     navigationPanelPosition: 'bottom',
@@ -1010,6 +1785,15 @@ const defaultSettings = {
     customTitleText: 'Мой суфлер',
     autoFindTrack: true,
     autoFindKeywords: "сабы, субтитры, sub, subs, subtitle, текст",
+    segmentationEnabled: true,
+    segmentationAutoVideoEnabled: true,
+    segmentationAutoVideoKeywords: 'ВИДЕО, ВИДОС, ВИДОСЫ, VID, VIDEO, RAW, РАВКА',
+    segmentationAutoMarkersEnabled: true,
+    segmentationMarkerPattern: '$N (сери*|эпизод*|част*)',
+    segmentationAutodetectPriority: 'video',
+    segmentationDisplayMode: 'current',
+    segmentationAutoSwitchMode: 'playback_only',
+    segmentationManualEnabled: false,
     enableColorSwatches: true,
     ignoreProjectItemColors: true,
     processRoles: true,
@@ -1057,7 +1841,6 @@ const defaultSettings = {
     timecodeDisplayFormat: 'auto'
 };
 const FILTER_STATE_KEYS = ['filterSoloRoles', 'filterMuteRoles', 'filterSoloActors', 'filterMuteActors'];
-let settings = {};
 let currentProjectName = '';
 let animationFrameId = null;
 let wwr_is_enabled = false;
@@ -1096,6 +1879,7 @@ const overlapScratchStore = {
 
 let activeOverlapLineIndices = [];
 let activeOverlapBlocks = [];
+let activeOverlapBlockMap = new Map();
 
 const EMU_ROLES_MISSING_KEY = 'frzz_emu_roles_missing';
 const ACTOR_ROLE_DELIMITER_WARNING_TEXT = 'Проверьте карту ролей, не найден общий разделитель между актерами и их ролями';
@@ -1213,6 +1997,10 @@ function parseProjectDataStatus(raw) {
 function clearProjectDataCache() {
     projectDataCache = null;
     lastProjectDataTimestamp = 0;
+    projectSegmentationInfo = createDefaultProjectSegmentationInfo();
+    statsSegmentSelection = STATS_SEGMENT_ALL_VALUE;
+    resetStatsSegmentOptionMap();
+    refreshStatsSegmentationControls({ preserveSelection: false, recalcIfVisible: true });
     try {
         localStorage.removeItem(PROJECT_DATA_CACHE_KEY);
     } catch (err) {
@@ -1268,6 +2056,67 @@ $(document).ready(function() {
     const JUMP_REQUEST_DEBOUNCE_MS = 150;
     let transportProgressValue = 0;
     const statusIndicator = $('#status-indicator');
+    projectSettingsButtonEl = $('#project-settings-button');
+    projectSettingsModalEl = $('#project-settings-modal');
+    updateProjectSettingsButtonVisibility({ reason: 'dom_ready_init' });
+    let projectDataReady = false;
+    let projectDataRetryTimer = null;
+    let projectDataRetryAttempt = 0;
+    const PROJECT_DATA_RETRY_BASE_DELAY_MS = 900;
+    const PROJECT_DATA_RETRY_MAX_ATTEMPTS = 3;
+
+    function clearProjectDataRetryTimer() {
+        if (projectDataRetryTimer !== null) {
+            clearTimeout(projectDataRetryTimer);
+            projectDataRetryTimer = null;
+        }
+    }
+
+    function markProjectDataReady() {
+        projectDataReady = true;
+        projectDataRetryAttempt = 0;
+        clearProjectDataRetryTimer();
+    }
+
+    function scheduleProjectDataRetry(reason = 'auto_retry') {
+        if (projectDataReady) return;
+        if (projectDataRetryAttempt >= PROJECT_DATA_RETRY_MAX_ATTEMPTS) {
+            if (statusIndicator && statusIndicator.length) {
+                statusIndicator.text('Не удалось автоматически обновить данные проекта. Нажмите "Обновить".');
+            }
+            return;
+        }
+        if (projectDataRetryTimer !== null) {
+            return;
+        }
+        const nextAttempt = projectDataRetryAttempt + 1;
+        projectDataRetryAttempt = nextAttempt;
+        const delayMs = Math.max(300, Math.round(PROJECT_DATA_RETRY_BASE_DELAY_MS * nextAttempt));
+        projectDataRetryTimer = setTimeout(() => {
+            projectDataRetryTimer = null;
+            if (projectDataReady) {
+                return;
+            }
+            if (statusIndicator && statusIndicator.length) {
+                const attemptLabel = nextAttempt > 1
+                    ? `Повторная попытка синхронизации данных проекта... (${nextAttempt})`
+                    : 'Повторная попытка синхронизации данных проекта...';
+                statusIndicator.text(attemptLabel);
+            }
+            getProjectData(`${reason}:attempt${nextAttempt}`, { allowCache: false, forceReload: true })
+                .then(() => {
+                    markProjectDataReady();
+                })
+                .catch(err => {
+                    console.warn('[Prompter][projectData] retry failed', { reason, attempt: nextAttempt, error: err && err.message });
+                    if (projectDataRetryAttempt < PROJECT_DATA_RETRY_MAX_ATTEMPTS) {
+                        scheduleProjectDataRetry(reason);
+                    } else if (statusIndicator && statusIndicator.length) {
+                        statusIndicator.text('Не удалось автоматически обновить данные проекта. Нажмите "Обновить".');
+                    }
+                });
+        }, delayMs);
+    }
     const refreshButton = $('#refresh-button');
     const navigationPanel = $('#navigation-panel');
     const navigationCompactToggle = $('#navigation-compact-toggle');
@@ -1325,6 +2174,35 @@ $(document).ready(function() {
     const settingsTileGrids = $('.settings-tile-grid');
     const TILE_GRID_ROW_SIZE = 6; // finer granularity for masonry spans
     let settingsTileReflowRaf = null;
+
+    statsModalEl = $('#stats-modal');
+    statsSegmentControlsEl = $('#stats-segmentation-controls');
+    statsSegmentSelectEl = $('#stats-segment-select');
+    statsSegmentSourceEl = $('#stats-segment-source');
+    statsRolesSectionEl = $('#stats-roles-section');
+    statsActorsSectionEl = $('#stats-actors-section');
+    statsColorsSectionEl = $('#stats-colors-section');
+    statsEmptyEl = $('#stats-empty');
+    statsRolesTableBodyEl = $('#stats-roles-table tbody');
+    statsActorsTableBodyEl = $('#stats-actors-table tbody');
+    statsColorsTableBodyEl = $('#stats-colors-table tbody');
+    statsRolesTotalEl = $('#stats-roles-total');
+    statsActorsTotalEl = $('#stats-actors-total');
+    statsColorsTotalEl = $('#stats-colors-total');
+
+    if (statsSegmentSelectEl && statsSegmentSelectEl.length) {
+        statsSegmentSelectEl.on('change', function() {
+            const rawValue = $(this).val();
+            const selectedValue = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+            const normalizedValue = typeof selectedValue === 'string' ? selectedValue : STATS_SEGMENT_ALL_VALUE;
+            statsSegmentSelection = statsSegmentOptionMap.has(normalizedValue) ? normalizedValue : STATS_SEGMENT_ALL_VALUE;
+            $(this).val(statsSegmentSelection);
+            renderStatsTables({ openModal: false });
+            scheduleStatsButtonEvaluation();
+        });
+    }
+
+    refreshStatsSegmentationControls({ preserveSelection: true, recalcIfVisible: false });
 
     DebugLogUI.init({
         enabled: DEBUG_LOG_BOOT_ENABLED,
@@ -1674,6 +2552,119 @@ $(document).ready(function() {
     const jumpPreventWhilePlayingCheckbox = $('#jump-prevent-while-playing');
     const jumpPreventWhileRecordingCheckbox = $('#jump-prevent-while-recording');
     const timecodeDisplayFormatSelect = $('#timecode-display-format');
+    const segmentationAutodetectTile = $('#segmentation-autodetect-tile');
+    const segmentationDisplayTile = $('#segmentation-display-tile');
+    const segmentationManualToggle = $('#segmentation-manual-enabled');
+    const segmentationModeSelect = $('#segmentation-autodetect-mode');
+    const segmentationVideoKeywordsWrapper = $('#segmentation-video-keywords-wrapper');
+    const segmentationVideoKeywordsInput = $('#segmentation-auto-video-keywords');
+    const segmentationMarkerPatternWrapper = $('#segmentation-marker-pattern-wrapper');
+    const segmentationMarkerPatternInput = $('#segmentation-marker-pattern');
+    const segmentationPriorityWrapper = $('#segmentation-priority-wrapper');
+    const segmentationPrioritySelect = $('#segmentation-autodetect-priority');
+    const segmentationDisplayModeSelect = $('#segmentation-display-mode');
+    const segmentationAutoSwitchWrapper = $('#segmentation-auto-switch-wrapper');
+    const segmentationAutoSwitchSelect = $('#segmentation-auto-switch-mode');
+
+    const updateSegmentationControlsState = (options = {}) => {
+        let resolvedMode;
+        const hasExplicitFlags = Object.prototype.hasOwnProperty.call(options, 'enabled')
+            || Object.prototype.hasOwnProperty.call(options, 'videoEnabled')
+            || Object.prototype.hasOwnProperty.call(options, 'markersEnabled');
+        if (typeof options.mode === 'string') {
+            resolvedMode = sanitizeSegmentationMode(options.mode);
+        } else if (hasExplicitFlags) {
+            const baseEnabled = Object.prototype.hasOwnProperty.call(options, 'enabled')
+                ? !!options.enabled
+                : (settings.segmentationEnabled !== false);
+            const baseVideo = Object.prototype.hasOwnProperty.call(options, 'videoEnabled')
+                ? !!options.videoEnabled
+                : (settings.segmentationAutoVideoEnabled !== false);
+            const baseMarkers = Object.prototype.hasOwnProperty.call(options, 'markersEnabled')
+                ? !!options.markersEnabled
+                : (settings.segmentationAutoMarkersEnabled !== false);
+            resolvedMode = deriveSegmentationModeFromFlags(baseEnabled, baseVideo, baseMarkers);
+        } else if (segmentationModeSelect.length) {
+            resolvedMode = sanitizeSegmentationMode(segmentationModeSelect.val());
+        } else {
+            resolvedMode = deriveSegmentationModeFromFlags(
+                settings.segmentationEnabled !== false,
+                settings.segmentationAutoVideoEnabled !== false,
+                settings.segmentationAutoMarkersEnabled !== false
+            );
+        }
+
+        const flags = mapSegmentationModeToFlags(resolvedMode);
+        const enabled = flags.enabled;
+        const videoEnabled = flags.video;
+        const markersEnabled = flags.markers;
+
+        if (segmentationModeSelect.length) {
+            const currentValue = sanitizeSegmentationMode(segmentationModeSelect.val());
+            if (currentValue !== resolvedMode) {
+                if (!segmentationModeSelect.find(`option[value="${resolvedMode}"]`).length) {
+                    const label = SEGMENTATION_MODE_LABELS[resolvedMode] || resolvedMode;
+                    segmentationModeSelect.append($('<option>').val(resolvedMode).text(label));
+                }
+                segmentationModeSelect.val(resolvedMode);
+            }
+            segmentationModeSelect.prop('disabled', false);
+        }
+
+        const displayMode = typeof options.displayMode === 'string'
+            ? sanitizeSegmentationDisplayMode(options.displayMode, defaultSettings.segmentationDisplayMode)
+            : (segmentationDisplayModeSelect.length
+                ? sanitizeSegmentationDisplayMode(segmentationDisplayModeSelect.val(), defaultSettings.segmentationDisplayMode)
+                : defaultSettings.segmentationDisplayMode);
+
+        if (segmentationAutodetectTile.length) {
+            segmentationAutodetectTile.toggleClass('is-disabled', false);
+        }
+        if (segmentationDisplayTile.length) {
+            segmentationDisplayTile.toggleClass('is-disabled', false);
+        }
+
+        const showVideoKeywords = enabled && videoEnabled;
+        if (segmentationVideoKeywordsWrapper.length) {
+            segmentationVideoKeywordsWrapper.toggle(showVideoKeywords);
+        }
+        if (segmentationVideoKeywordsInput.length) {
+            segmentationVideoKeywordsInput.prop('disabled', !showVideoKeywords);
+        }
+
+        const showMarkerPattern = enabled && markersEnabled;
+        if (segmentationMarkerPatternWrapper.length) {
+            segmentationMarkerPatternWrapper.toggle(showMarkerPattern);
+        }
+        if (segmentationMarkerPatternInput.length) {
+            segmentationMarkerPatternInput.prop('disabled', !showMarkerPattern);
+        }
+
+        const showPriority = enabled && videoEnabled && markersEnabled;
+        if (segmentationPriorityWrapper.length) {
+            segmentationPriorityWrapper.toggle(showPriority);
+        }
+        if (segmentationPrioritySelect.length) {
+            segmentationPrioritySelect.prop('disabled', !showPriority);
+        }
+
+    const showAutoSwitch = displayMode === 'current';
+        if (segmentationAutoSwitchWrapper.length) {
+            segmentationAutoSwitchWrapper.toggle(showAutoSwitch);
+        }
+        if (segmentationAutoSwitchSelect.length) {
+            segmentationAutoSwitchSelect.prop('disabled', !showAutoSwitch);
+        }
+
+        if (segmentationDisplayModeSelect.length) {
+            if (Object.prototype.hasOwnProperty.call(options, 'displayMode')) {
+                segmentationDisplayModeSelect.val(displayMode);
+            }
+        }
+
+        scheduleSettingsTileReflow();
+    };
+
     let subtitleData = [];
     let subtitleElements = [];
     let subtitleContentElements = [];
@@ -1694,6 +2685,7 @@ $(document).ready(function() {
     let activeLineIndices = [];
     let activeTimecodeProgressIndices = new Set();
     let timecodeProgressValues = [];
+    roleToActor = {};
     let paintGeneration = 0;
     const ANIMATION_VIEWPORT_BUFFER = 6;
     const CONTENT_VISIBILITY_RADIUS = 80;
@@ -2177,7 +3169,7 @@ $(document).ready(function() {
     console.info('[Prompter] document ready init start');
 
     // Actor coloring runtime caches
-    let roleToActor = {}; // role -> actor
+    roleToActor = {}; // role -> actor
     let actorToRoles = {}; // actor -> Set(roles)
     let cachedActorRoleMappingText = null;
     let cachedMappedRolesCount = 0;
@@ -2732,6 +3724,75 @@ $(document).ready(function() {
         } else {
             base.ignoreProjectItemColors = ignoreProjectColors;
         }
+        const segmentationEnabled = coerceFlag(base.segmentationEnabled, defaultSettings.segmentationEnabled);
+        if (segmentationEnabled !== base.segmentationEnabled) {
+            base.segmentationEnabled = segmentationEnabled;
+            changed = true;
+        } else {
+            base.segmentationEnabled = segmentationEnabled;
+        }
+        const segmentationAutoVideoEnabled = coerceFlag(base.segmentationAutoVideoEnabled, defaultSettings.segmentationAutoVideoEnabled);
+        if (segmentationAutoVideoEnabled !== base.segmentationAutoVideoEnabled) {
+            base.segmentationAutoVideoEnabled = segmentationAutoVideoEnabled;
+            changed = true;
+        } else {
+            base.segmentationAutoVideoEnabled = segmentationAutoVideoEnabled;
+        }
+        const segmentationAutoMarkersEnabled = coerceFlag(base.segmentationAutoMarkersEnabled, defaultSettings.segmentationAutoMarkersEnabled);
+        if (segmentationAutoMarkersEnabled !== base.segmentationAutoMarkersEnabled) {
+            base.segmentationAutoMarkersEnabled = segmentationAutoMarkersEnabled;
+            changed = true;
+        } else {
+            base.segmentationAutoMarkersEnabled = segmentationAutoMarkersEnabled;
+        }
+        const segmentationManualEnabled = coerceFlag(base.segmentationManualEnabled, defaultSettings.segmentationManualEnabled);
+        if (segmentationManualEnabled !== base.segmentationManualEnabled) {
+            base.segmentationManualEnabled = segmentationManualEnabled;
+            changed = true;
+        } else {
+            base.segmentationManualEnabled = segmentationManualEnabled;
+        }
+        const sanitizedSegmentationKeywords = sanitizeSegmentationKeywordList(
+            base.segmentationAutoVideoKeywords,
+            defaultSettings.segmentationAutoVideoKeywords
+        );
+        if (sanitizedSegmentationKeywords !== base.segmentationAutoVideoKeywords) {
+            base.segmentationAutoVideoKeywords = sanitizedSegmentationKeywords;
+            changed = true;
+        }
+        const sanitizedMarkerPattern = sanitizeSegmentationKeywordList(
+            base.segmentationMarkerPattern,
+            defaultSettings.segmentationMarkerPattern,
+            { allowEmpty: true }
+        );
+        if (sanitizedMarkerPattern !== base.segmentationMarkerPattern) {
+            base.segmentationMarkerPattern = sanitizedMarkerPattern;
+            changed = true;
+        }
+        const sanitizedSegmentationPriority = sanitizeSegmentationPriority(
+            base.segmentationAutodetectPriority,
+            defaultSettings.segmentationAutodetectPriority
+        );
+        if (sanitizedSegmentationPriority !== base.segmentationAutodetectPriority) {
+            base.segmentationAutodetectPriority = sanitizedSegmentationPriority;
+            changed = true;
+        }
+        const sanitizedSegmentationDisplayMode = sanitizeSegmentationDisplayMode(
+            base.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        if (sanitizedSegmentationDisplayMode !== base.segmentationDisplayMode) {
+            base.segmentationDisplayMode = sanitizedSegmentationDisplayMode;
+            changed = true;
+        }
+        const sanitizedSegmentationAutoSwitch = sanitizeSegmentationAutoSwitchMode(
+            base.segmentationAutoSwitchMode,
+            defaultSettings.segmentationAutoSwitchMode
+        );
+        if (sanitizedSegmentationAutoSwitch !== base.segmentationAutoSwitchMode) {
+            base.segmentationAutoSwitchMode = sanitizedSegmentationAutoSwitch;
+            changed = true;
+        }
         const sanitizedProgressMode = sanitizeProgressBarMode(
             base.progressBarMode,
             defaultSettings.progressBarMode
@@ -3242,6 +4303,99 @@ $(document).ready(function() {
         parent.removeChild(block);
     }
 
+    function getLineIndexFromElement(element) {
+        if (!element || !element.dataset) {
+            return NaN;
+        }
+        if (element.dataset.frzzIndex !== undefined) {
+            const parsed = parseInt(element.dataset.frzzIndex, 10);
+            if (Number.isInteger(parsed)) {
+                return parsed;
+            }
+        }
+        if (element.dataset.index !== undefined) {
+            const parsed = parseInt(element.dataset.index, 10);
+            if (Number.isInteger(parsed)) {
+                return parsed;
+            }
+        }
+        return NaN;
+    }
+
+    function detachOverlapBlock(block) {
+        if (!block) {
+            return;
+        }
+        const attr = block.dataset ? Number(block.dataset.groupId) : NaN;
+        if (Number.isInteger(attr) && activeOverlapBlockMap.get(attr) === block) {
+            activeOverlapBlockMap.delete(attr);
+        } else {
+            activeOverlapBlockMap.forEach((value, key) => {
+                if (value === block) {
+                    activeOverlapBlockMap.delete(key);
+                }
+            });
+        }
+        const idx = activeOverlapBlocks.indexOf(block);
+        if (idx !== -1) {
+            activeOverlapBlocks.splice(idx, 1);
+        }
+        unwrapOverlapBlock(block);
+    }
+
+    function blockNeedsRebuild(block, sortedIndices) {
+        if (!block || !Array.isArray(sortedIndices)) {
+            return true;
+        }
+        const children = block.children || [];
+        if (children.length !== sortedIndices.length) {
+            return true;
+        }
+        for (let i = 0; i < sortedIndices.length; i += 1) {
+            const childIndex = getLineIndexFromElement(children[i]);
+            if (childIndex !== sortedIndices[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function createOverlapBlock(groupId, sortedIndices) {
+        if (!Array.isArray(sortedIndices) || sortedIndices.length <= 1) {
+            return null;
+        }
+        const firstElement = subtitleElements[sortedIndices[0]];
+        if (!firstElement || !firstElement.parentNode) {
+            return null;
+        }
+        const parent = firstElement.parentNode;
+        const block = document.createElement('div');
+        block.className = 'overlap-block';
+        if (Number.isInteger(groupId)) {
+            block.dataset.groupId = String(groupId);
+        }
+        block.dataset.overlapSize = String(sortedIndices.length);
+        parent.insertBefore(block, firstElement);
+        sortedIndices.forEach(index => {
+            const el = subtitleElements[index];
+            if (el) {
+                block.appendChild(el);
+            }
+        });
+        activeOverlapBlocks.push(block);
+        if (Number.isInteger(groupId)) {
+            activeOverlapBlockMap.set(groupId, block);
+        }
+        return block;
+    }
+
+    function updateOverlapBlockMetadata(block, size) {
+        if (!block) {
+            return;
+        }
+        block.dataset.overlapSize = String(size);
+    }
+
     function runOverlapRefreshBatch(batchIndices) {
         if (!Array.isArray(subtitleOverlapInfo) || !subtitleOverlapInfo.length) {
             return false;
@@ -3355,52 +4509,22 @@ $(document).ready(function() {
 
         const processAll = !limitSet;
         const limitArray = limitSet ? Array.from(limitSet).sort((a, b) => a - b) : null;
+        const touchedGroupIds = new Set();
 
-        if (activeOverlapBlocks.length) {
-            if (processAll) {
-                while (activeOverlapBlocks.length) {
-                    const block = activeOverlapBlocks.pop();
-                    unwrapOverlapBlock(block);
+        if (!processAll && limitSet && limitSet.size) {
+            activeOverlapBlockMap.forEach((block, groupId) => {
+                if (!block) {
+                    return;
                 }
-            } else {
-                const retainedBlocks = [];
-                for (let i = 0; i < activeOverlapBlocks.length; i += 1) {
-                    const block = activeOverlapBlocks[i];
-                    if (!block) {
-                        continue;
-                    }
-                    let shouldRemove = false;
-                    const groupIdAttr = block.dataset ? block.dataset.groupId : undefined;
-                    if (groupIdAttr !== undefined) {
-                        const parsed = Number(groupIdAttr);
-                        if (Number.isInteger(parsed) && groupIndexMap.has(parsed)) {
-                            const groupIndices = groupIndexMap.get(parsed) || [];
-                            for (let j = 0; j < groupIndices.length; j += 1) {
-                                if (limitSet.has(groupIndices[j])) {
-                                    shouldRemove = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (!shouldRemove && block.children && block.children.length) {
-                        for (let j = 0; j < block.children.length; j += 1) {
-                            const child = block.children[j];
-                            const idx = child && child.dataset ? parseInt(child.dataset.frzzIndex, 10) : NaN;
-                            if (Number.isInteger(idx) && limitSet.has(idx)) {
-                                shouldRemove = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (shouldRemove) {
-                        unwrapOverlapBlock(block);
-                    } else {
-                        retainedBlocks.push(block);
+                const children = block.children || [];
+                for (let i = 0; i < children.length; i += 1) {
+                    const idx = getLineIndexFromElement(children[i]);
+                    if (Number.isInteger(idx) && limitSet.has(idx)) {
+                        touchedGroupIds.add(groupId);
+                        break;
                     }
                 }
-                activeOverlapBlocks = retainedBlocks;
-            }
+            });
         }
 
         if (activeOverlapLineIndices.length) {
@@ -3409,7 +4533,7 @@ $(document).ready(function() {
                     clearOverlapStateForIndex(activeOverlapLineIndices[idx]);
                 }
                 activeOverlapLineIndices = [];
-            } else {
+            } else if (limitSet) {
                 const retained = [];
                 for (let idx = 0; idx < activeOverlapLineIndices.length; idx += 1) {
                     const lineIndex = activeOverlapLineIndices[idx];
@@ -3424,11 +4548,30 @@ $(document).ready(function() {
         }
 
         if (!lineInfo || !lineInfo.length) {
+            if (processAll) {
+                activeOverlapBlocks.slice().forEach(detachOverlapBlock);
+                activeOverlapBlockMap.clear();
+            } else if (touchedGroupIds.size) {
+                touchedGroupIds.forEach(groupId => {
+                    const existingBlock = activeOverlapBlockMap.get(groupId);
+                    if (existingBlock) {
+                        detachOverlapBlock(existingBlock);
+                    }
+                });
+            }
             return result ? result.summary : null;
         }
 
         const overlapVisualsEnabled = settings.highlightOverlapEnabled !== false;
         if (!overlapVisualsEnabled) {
+            if (activeOverlapBlocks.length) {
+                activeOverlapBlocks.slice().forEach(detachOverlapBlock);
+                activeOverlapBlockMap.clear();
+            }
+            return result ? result.summary : null;
+        }
+
+        if (!processAll && (!limitArray || !limitArray.length)) {
             return result ? result.summary : null;
         }
 
@@ -3436,190 +4579,146 @@ $(document).ready(function() {
         const groupMembers = new Map();
         const updatedOverlapIndices = [];
 
+        const ensureIndicatorForIndex = (lineIndex, entry, tooltipLines) => {
+            let indicator = subtitleOverlapIndicators[lineIndex];
+            if (!indicator) {
+                const timeEl = subtitleTimeElements[lineIndex];
+                if (timeEl) {
+                    indicator = document.createElement('span');
+                    indicator.className = 'overlap-indicator';
+                    indicator.setAttribute('aria-hidden', 'true');
+                    indicator.textContent = '';
+                    const timeProgressEl = subtitleTimeProgressElements[lineIndex];
+                    if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
+                        timeEl.insertBefore(indicator, timeProgressEl);
+                    } else {
+                        timeEl.appendChild(indicator);
+                    }
+                    subtitleOverlapIndicators[lineIndex] = indicator;
+                }
+            }
+            if (indicator) {
+                indicator.classList.add('is-visible');
+                indicator.setAttribute('data-count', String(entry.overlapCount));
+                indicator.setAttribute('title', tooltipLines[0]);
+            }
+        };
+
+        const processLine = (lineIndex) => {
+            if (!Number.isInteger(lineIndex) || lineIndex < 0 || !lineInfo || lineIndex >= lineInfo.length) {
+                return;
+            }
+            const entry = lineInfo[lineIndex];
+            if (!entry) {
+                return;
+            }
+            if (!entry.groupSize || entry.groupSize <= 1) {
+                if (Number.isInteger(entry.groupId)) {
+                    touchedGroupIds.add(entry.groupId);
+                }
+                return;
+            }
+            const container = subtitleElements[lineIndex];
+            if (!container) {
+                return;
+            }
+
+            updatedOverlapIndices.push(lineIndex);
+
+            container.classList.add('overlap-active');
+            if (entry.isStart) {
+                container.classList.add('overlap-start');
+            }
+            if (entry.isEnd) {
+                container.classList.add('overlap-end');
+            }
+            container.dataset.overlapSize = String(entry.groupSize);
+            container.dataset.overlapCount = String(entry.overlapCount);
+            container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
+
+            const rangeStartSec = entry.minGroupStartMs / 1000;
+            const rangeEndSec = entry.maxGroupEndMs / 1000;
+            const tooltipBase = entry.groupSize > 2
+                ? `Пересечения: ${entry.groupSize} реплик`
+                : 'Пересечения: 2 реплики';
+            const startTimecode = formatTimecode(rangeStartSec, frameRate);
+            const endTimecode = formatTimecode(rangeEndSec, frameRate);
+            const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
+            const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
+            const tooltipLines = [
+                tooltipBase,
+                `Интервал: ${startTimecode} → ${endTimecode}`,
+                `Длительность: ${durationText}`
+            ];
+            if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
+                tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
+            }
+            if (entry.overlapCount > 0) {
+                tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
+            }
+            container.setAttribute('title', tooltipLines.join('\n'));
+            container.setAttribute('data-overlap-title', '1');
+
+            ensureIndicatorForIndex(lineIndex, entry, tooltipLines);
+
+            if (Number.isInteger(entry.groupId) && entry.groupId >= 0) {
+                let members = groupMembers.get(entry.groupId);
+                if (!members) {
+                    members = [];
+                    groupMembers.set(entry.groupId, members);
+                }
+                members.push(lineIndex);
+                touchedGroupIds.add(entry.groupId);
+            }
+        };
+
         if (processAll) {
             for (let i = 0; i < lineInfo.length; i += 1) {
-                const entry = lineInfo[i];
-                if (!entry) continue;
-                const container = subtitleElements[i];
-                if (!container) continue;
-
-                updatedOverlapIndices.push(i);
-
-                container.classList.add('overlap-active');
-                if (entry.isStart) {
-                    container.classList.add('overlap-start');
-                }
-                if (entry.isEnd) {
-                    container.classList.add('overlap-end');
-                }
-                container.dataset.overlapSize = String(entry.groupSize);
-                container.dataset.overlapCount = String(entry.overlapCount);
-                container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
-
-                const rangeStartSec = entry.minGroupStartMs / 1000;
-                const rangeEndSec = entry.maxGroupEndMs / 1000;
-                const tooltipBase = entry.groupSize > 2
-                    ? `Пересечения: ${entry.groupSize} реплик`
-                    : 'Пересечения: 2 реплики';
-                const startTimecode = formatTimecode(rangeStartSec, frameRate);
-                const endTimecode = formatTimecode(rangeEndSec, frameRate);
-                const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
-                const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
-                const tooltipLines = [
-                    tooltipBase,
-                    `Интервал: ${startTimecode} → ${endTimecode}`,
-                    `Длительность: ${durationText}`
-                ];
-                if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
-                    tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
-                }
-                if (entry.overlapCount > 0) {
-                    tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
-                }
-                container.setAttribute('title', tooltipLines.join('\n'));
-                container.setAttribute('data-overlap-title', '1');
-
-                let indicator = subtitleOverlapIndicators[i];
-                if (!indicator) {
-                    const timeEl = subtitleTimeElements[i];
-                    if (timeEl) {
-                        indicator = document.createElement('span');
-                        indicator.className = 'overlap-indicator';
-                        indicator.setAttribute('aria-hidden', 'true');
-                        indicator.textContent = '';
-                        const timeProgressEl = subtitleTimeProgressElements[i];
-                        if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
-                            timeEl.insertBefore(indicator, timeProgressEl);
-                        } else {
-                            timeEl.appendChild(indicator);
-                        }
-                        subtitleOverlapIndicators[i] = indicator;
-                    }
-                }
-                if (indicator) {
-                    indicator.classList.add('is-visible');
-                    indicator.setAttribute('data-count', String(entry.overlapCount));
-                    indicator.setAttribute('title', tooltipLines[0]);
-                }
-                if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
-                    const existing = groupMembers.get(entry.groupId) || [];
-                    existing.push(i);
-                    groupMembers.set(entry.groupId, existing);
-                }
+                processLine(i);
             }
-        } else if (limitArray && limitArray.length) {
+        } else {
             for (let idx = 0; idx < limitArray.length; idx += 1) {
-                const lineIndex = limitArray[idx];
-                if (!Number.isInteger(lineIndex) || lineIndex < 0 || lineIndex >= lineInfo.length) {
-                    continue;
-                }
-                const entry = lineInfo[lineIndex];
-                if (!entry) {
-                    continue;
-                }
-                const container = subtitleElements[lineIndex];
-                if (!container) {
-                    continue;
-                }
-
-                updatedOverlapIndices.push(lineIndex);
-
-                container.classList.add('overlap-active');
-                if (entry.isStart) {
-                    container.classList.add('overlap-start');
-                }
-                if (entry.isEnd) {
-                    container.classList.add('overlap-end');
-                }
-                container.dataset.overlapSize = String(entry.groupSize);
-                container.dataset.overlapCount = String(entry.overlapCount);
-                container.dataset.overlapWindow = `${entry.minGroupStartMs}-${entry.maxGroupEndMs}`;
-
-                const rangeStartSec = entry.minGroupStartMs / 1000;
-                const rangeEndSec = entry.maxGroupEndMs / 1000;
-                const tooltipBase = entry.groupSize > 2
-                    ? `Пересечения: ${entry.groupSize} реплик`
-                    : 'Пересечения: 2 реплики';
-                const startTimecode = formatTimecode(rangeStartSec, frameRate);
-                const endTimecode = formatTimecode(rangeEndSec, frameRate);
-                const durationMs = Math.max(0, entry.maxGroupEndMs - entry.minGroupStartMs);
-                const durationText = PrompterTime.formatHmsMillis(durationMs, durationMs >= 1000 ? 2 : 3);
-                const tooltipLines = [
-                    tooltipBase,
-                    `Интервал: ${startTimecode} → ${endTimecode}`,
-                    `Длительность: ${durationText}`
-                ];
-                if (entry.maxDegreeInGroup && entry.maxDegreeInGroup > 1) {
-                    tooltipLines.push(`Максимум одновременно: ${entry.maxDegreeInGroup}`);
-                }
-                if (entry.overlapCount > 0) {
-                    tooltipLines.push(`Связей с текущей строкой: ${entry.overlapCount}`);
-                }
-                container.setAttribute('title', tooltipLines.join('\n'));
-                container.setAttribute('data-overlap-title', '1');
-
-                let indicator = subtitleOverlapIndicators[lineIndex];
-                if (!indicator) {
-                    const timeEl = subtitleTimeElements[lineIndex];
-                    if (timeEl) {
-                        indicator = document.createElement('span');
-                        indicator.className = 'overlap-indicator';
-                        indicator.setAttribute('aria-hidden', 'true');
-                        indicator.textContent = '';
-                        const timeProgressEl = subtitleTimeProgressElements[lineIndex];
-                        if (timeProgressEl && timeProgressEl.parentNode === timeEl) {
-                            timeEl.insertBefore(indicator, timeProgressEl);
-                        } else {
-                            timeEl.appendChild(indicator);
-                        }
-                        subtitleOverlapIndicators[lineIndex] = indicator;
-                    }
-                }
-                if (indicator) {
-                    indicator.classList.add('is-visible');
-                    indicator.setAttribute('data-count', String(entry.overlapCount));
-                    indicator.setAttribute('title', tooltipLines[0]);
-                }
-                if (entry.groupSize && entry.groupSize > 1 && typeof entry.groupId === 'number') {
-                    const existing = groupMembers.get(entry.groupId) || [];
-                    existing.push(lineIndex);
-                    groupMembers.set(entry.groupId, existing);
-                }
+                processLine(limitArray[idx]);
             }
         }
 
-        if (displayNode && groupMembers.size) {
-            groupMembers.forEach((indices, groupId) => {
-                if (!Array.isArray(indices) || indices.length <= 1) {
-                    return;
-                }
-                const sorted = indices.slice().sort((a, b) => a - b);
-                const firstElement = subtitleElements[sorted[0]];
-                if (!firstElement || !firstElement.parentNode) {
-                    return;
-                }
-                const parent = firstElement.parentNode;
-                const block = document.createElement('div');
-                block.className = 'overlap-block';
-                block.dataset.groupId = String(groupId);
-                block.dataset.overlapSize = String(sorted.length);
-                parent.insertBefore(block, firstElement);
-                sorted.forEach(idx => {
-                    const el = subtitleElements[idx];
-                    if (!el) return;
-                    block.appendChild(el);
-                });
-                activeOverlapBlocks.push(block);
-            });
-        }
+        const groupsKept = new Set();
+        groupMembers.forEach((indices, groupId) => {
+            if (!Array.isArray(indices) || indices.length <= 1) {
+                return;
+            }
+            const sorted = indices.slice().sort((a, b) => a - b);
+            let block = activeOverlapBlockMap.get(groupId);
+            if (block && blockNeedsRebuild(block, sorted)) {
+                detachOverlapBlock(block);
+                block = null;
+            }
+            if (!block) {
+                block = createOverlapBlock(groupId, sorted);
+            } else {
+                updateOverlapBlockMetadata(block, sorted.length);
+            }
+            if (block) {
+                groupsKept.add(groupId);
+            }
+        });
+
+        const groupsToRemove = processAll
+            ? Array.from(activeOverlapBlockMap.keys()).filter(groupId => !groupsKept.has(groupId))
+            : Array.from(touchedGroupIds).filter(groupId => Number.isInteger(groupId) && !groupsKept.has(groupId));
+
+        groupsToRemove.forEach(groupId => {
+            const block = activeOverlapBlockMap.get(groupId);
+            if (block) {
+                detachOverlapBlock(block);
+            }
+        });
 
         if (processAll) {
             activeOverlapLineIndices = updatedOverlapIndices;
         } else {
             const nextActive = new Set(activeOverlapLineIndices);
-            for (let i = 0; i < updatedOverlapIndices.length; i += 1) {
-                nextActive.add(updatedOverlapIndices[i]);
-            }
+            updatedOverlapIndices.forEach(index => nextActive.add(index));
             activeOverlapLineIndices = Array.from(nextActive).sort((a, b) => a - b);
         }
 
@@ -5663,6 +6762,65 @@ $(document).ready(function() {
             tempSettings.highlightOverlapEnabled = highlightOverlapEnabled;
             settings.highlightOverlapEnabled = highlightOverlapEnabled;
 
+            let segmentationModeValue;
+            if (fromDom && segmentationModeSelect.length) {
+                segmentationModeValue = sanitizeSegmentationMode(segmentationModeSelect.val());
+            } else {
+                segmentationModeValue = deriveSegmentationModeFromFlags(
+                    tempSettings.segmentationEnabled !== false,
+                    tempSettings.segmentationAutoVideoEnabled !== false,
+                    tempSettings.segmentationAutoMarkersEnabled !== false
+                );
+            }
+            const segmentationModeFlags = mapSegmentationModeToFlags(segmentationModeValue);
+            tempSettings.segmentationEnabled = segmentationModeFlags.enabled;
+            settings.segmentationEnabled = segmentationModeFlags.enabled;
+            tempSettings.segmentationAutoVideoEnabled = segmentationModeFlags.video;
+            settings.segmentationAutoVideoEnabled = segmentationModeFlags.video;
+            tempSettings.segmentationAutoMarkersEnabled = segmentationModeFlags.markers;
+            settings.segmentationAutoMarkersEnabled = segmentationModeFlags.markers;
+
+            const sanitizedVideoKeywords = sanitizeSegmentationKeywordList(
+                tempSettings.segmentationAutoVideoKeywords,
+                settings.segmentationAutoVideoKeywords || defaultSettings.segmentationAutoVideoKeywords
+            );
+            tempSettings.segmentationAutoVideoKeywords = sanitizedVideoKeywords;
+            settings.segmentationAutoVideoKeywords = sanitizedVideoKeywords;
+
+            const sanitizedMarkerPattern = sanitizeSegmentationKeywordList(
+                tempSettings.segmentationMarkerPattern,
+                settings.segmentationMarkerPattern || defaultSettings.segmentationMarkerPattern,
+                { allowEmpty: true }
+            );
+            tempSettings.segmentationMarkerPattern = sanitizedMarkerPattern;
+            settings.segmentationMarkerPattern = sanitizedMarkerPattern;
+
+            const sanitizedSegmentationPriority = sanitizeSegmentationPriority(
+                tempSettings.segmentationAutodetectPriority,
+                settings.segmentationAutodetectPriority || defaultSettings.segmentationAutodetectPriority
+            );
+            tempSettings.segmentationAutodetectPriority = sanitizedSegmentationPriority;
+            settings.segmentationAutodetectPriority = sanitizedSegmentationPriority;
+
+            const sanitizedSegmentationDisplayMode = sanitizeSegmentationDisplayMode(
+                tempSettings.segmentationDisplayMode,
+                settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode
+            );
+            tempSettings.segmentationDisplayMode = sanitizedSegmentationDisplayMode;
+            settings.segmentationDisplayMode = sanitizedSegmentationDisplayMode;
+
+            const sanitizedSegmentationAutoSwitch = sanitizeSegmentationAutoSwitchMode(
+                tempSettings.segmentationAutoSwitchMode,
+                settings.segmentationAutoSwitchMode || defaultSettings.segmentationAutoSwitchMode
+            );
+            tempSettings.segmentationAutoSwitchMode = sanitizedSegmentationAutoSwitch;
+            settings.segmentationAutoSwitchMode = sanitizedSegmentationAutoSwitch;
+
+            const manualSegmentationEnabled = tempSettings.segmentationManualEnabled === true;
+            tempSettings.segmentationManualEnabled = manualSegmentationEnabled;
+            settings.segmentationManualEnabled = manualSegmentationEnabled;
+            setManualSegmentationEnabled(manualSegmentationEnabled, { reason: 'settings_apply' });
+
             const sanitizedProgressBarMode = sanitizeProgressBarMode(
                 tempSettings.progressBarMode,
                 settings.progressBarMode || defaultSettings.progressBarMode
@@ -5761,6 +6919,11 @@ $(document).ready(function() {
                 lastPreviousLineIndex = -1;
             }
 
+            updateSegmentationControlsState({
+                mode: segmentationModeValue,
+                displayMode: sanitizedSegmentationDisplayMode
+            });
+
             // Apply UI scale: baseline 100 => 100% root. Mobile devices receive a multiplier for visual parity.
             let rawScale = tempSettings.uiScale || 100;
             rawScale = Math.min(300, Math.max(50, rawScale));
@@ -5847,6 +7010,7 @@ $(document).ready(function() {
             }
             console.debug('[Prompter][applySettings] done');
             updateJumpControlsState(tempSettings.jumpOnClickEnabled);
+            updateProjectSettingsButtonVisibility({ reason: 'settings_apply_final' });
         } catch (e) { console.error("Error in applySettings:", e); }
     }
 
@@ -5950,6 +7114,65 @@ $(document).ready(function() {
             jumpPreventWhileRecordingCheckbox.prop('checked', !!s.jumpPreventWhileRecording);
         }
         updateJumpControlsState(s.jumpOnClickEnabled);
+
+        const segmentationEnabledValue = s.segmentationEnabled !== false;
+        const segmentationVideoEnabledValue = s.segmentationAutoVideoEnabled !== false;
+        const segmentationMarkersEnabledValue = s.segmentationAutoMarkersEnabled !== false;
+        const segmentationModeValue = deriveSegmentationModeFromFlags(
+            segmentationEnabledValue,
+            segmentationVideoEnabledValue,
+            segmentationMarkersEnabledValue
+        );
+        const segmentationDisplayModeValue = sanitizeSegmentationDisplayMode(
+            s.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        const segmentationPriorityValue = sanitizeSegmentationPriority(
+            s.segmentationAutodetectPriority,
+            defaultSettings.segmentationAutodetectPriority
+        );
+        const segmentationAutoSwitchValue = sanitizeSegmentationAutoSwitchMode(
+            s.segmentationAutoSwitchMode,
+            defaultSettings.segmentationAutoSwitchMode
+        );
+        if (segmentationModeSelect.length) {
+            ensureSelectValue(segmentationModeSelect, segmentationModeValue);
+        }
+        if (segmentationDisplayModeSelect.length) {
+            ensureSelectValue(segmentationDisplayModeSelect, segmentationDisplayModeValue);
+        }
+        if (segmentationPrioritySelect.length) {
+            ensureSelectValue(segmentationPrioritySelect, segmentationPriorityValue);
+        }
+        if (segmentationAutoSwitchSelect.length) {
+            ensureSelectValue(segmentationAutoSwitchSelect, segmentationAutoSwitchValue);
+        }
+        if (segmentationVideoKeywordsInput.length) {
+            segmentationVideoKeywordsInput.val(
+                sanitizeSegmentationKeywordList(
+                    s.segmentationAutoVideoKeywords,
+                    defaultSettings.segmentationAutoVideoKeywords
+                )
+            );
+        }
+        if (segmentationMarkerPatternInput.length) {
+            segmentationMarkerPatternInput.val(
+                sanitizeSegmentationKeywordList(
+                    s.segmentationMarkerPattern,
+                    defaultSettings.segmentationMarkerPattern,
+                    { allowEmpty: true }
+                )
+            );
+        }
+        if (segmentationManualToggle && segmentationManualToggle.length) {
+            segmentationManualToggle.prop('checked', s.segmentationManualEnabled === true);
+        }
+        setManualSegmentationEnabled(s.segmentationManualEnabled === true, { reason: 'settings_ui_sync', refresh: false, force: true });
+        updateProjectSettingsButtonVisibility({ reason: 'settings_ui_sync' });
+        updateSegmentationControlsState({
+            mode: segmentationModeValue,
+            displayMode: segmentationDisplayModeValue
+        });
 
         scheduleSettingsTileReflow();
 
@@ -6131,6 +7354,7 @@ $(document).ready(function() {
     // Save visual/settings (actors excluded, stored separately)
     function saveSettings() {
         try {
+            const previousSegmentationState = buildSegmentationRequestState(settings);
             // Snapshot actor-related data to preserve across visual settings rebuild
             const actorMappingSnapshot = settings.actorRoleMappingText;
             const actorColorsSnapshot = settings.actorColors;
@@ -6175,6 +7399,56 @@ $(document).ready(function() {
             settingsToSave.navigationCompactMode = !!settingsToSave.navigationCompactMode;
             settingsToSave.transportTimecodeVisible = settingsToSave.transportTimecodeVisible !== false;
 
+            settingsToSave.segmentationEnabled = settingsToSave.segmentationEnabled !== false;
+            settingsToSave.segmentationAutoVideoEnabled = settingsToSave.segmentationAutoVideoEnabled !== false;
+            settingsToSave.segmentationAutoMarkersEnabled = settingsToSave.segmentationAutoMarkersEnabled !== false;
+            settingsToSave.segmentationManualEnabled = settingsToSave.segmentationManualEnabled === true;
+
+            if (!settingsToSave.segmentationAutoVideoKeywords || !settingsToSave.segmentationAutoVideoKeywords.trim()) {
+                settingsToSave.segmentationAutoVideoKeywords = settings.segmentationAutoVideoKeywords || defaultSettings.segmentationAutoVideoKeywords;
+            } else {
+                settingsToSave.segmentationAutoVideoKeywords = sanitizeSegmentationKeywordList(
+                    settingsToSave.segmentationAutoVideoKeywords,
+                    defaultSettings.segmentationAutoVideoKeywords
+                );
+            }
+
+            settingsToSave.segmentationMarkerPattern = sanitizeSegmentationKeywordList(
+                settingsToSave.segmentationMarkerPattern,
+                settings.segmentationMarkerPattern || defaultSettings.segmentationMarkerPattern,
+                { allowEmpty: true }
+            );
+
+            settingsToSave.segmentationAutodetectPriority = sanitizeSegmentationPriority(
+                settingsToSave.segmentationAutodetectPriority,
+                settings.segmentationAutodetectPriority || defaultSettings.segmentationAutodetectPriority
+            );
+
+            settingsToSave.segmentationDisplayMode = sanitizeSegmentationDisplayMode(
+                settingsToSave.segmentationDisplayMode,
+                settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode
+            );
+
+            settingsToSave.segmentationAutoSwitchMode = sanitizeSegmentationAutoSwitchMode(
+                settingsToSave.segmentationAutoSwitchMode,
+                settings.segmentationAutoSwitchMode || defaultSettings.segmentationAutoSwitchMode
+            );
+
+            let segmentationModeValue;
+            if (segmentationModeSelect.length) {
+                segmentationModeValue = sanitizeSegmentationMode(segmentationModeSelect.val());
+            } else {
+                segmentationModeValue = deriveSegmentationModeFromFlags(
+                    settingsToSave.segmentationEnabled !== false,
+                    settingsToSave.segmentationAutoVideoEnabled !== false,
+                    settingsToSave.segmentationAutoMarkersEnabled !== false
+                );
+            }
+            const segmentationModeFlags = mapSegmentationModeToFlags(segmentationModeValue);
+            settingsToSave.segmentationEnabled = segmentationModeFlags.enabled;
+            settingsToSave.segmentationAutoVideoEnabled = segmentationModeFlags.video;
+            settingsToSave.segmentationAutoMarkersEnabled = segmentationModeFlags.markers;
+
             // Guard: do not allow empty autoFindKeywords to wipe previous value
             if (!settingsToSave.autoFindKeywords || !settingsToSave.autoFindKeywords.trim()) {
                 settingsToSave.autoFindKeywords = settings.autoFindKeywords || defaultSettings.autoFindKeywords;
@@ -6207,6 +7481,9 @@ $(document).ready(function() {
             console.debug('[Prompter][saveSettings] Saved settings:', JSON.parse(JSON.stringify(settings)));
             applySettings();
 
+            const nextSegmentationState = buildSegmentationRequestState(settings);
+            const segmentationChanged = segmentationRequestStatesDiffer(previousSegmentationState, nextSegmentationState);
+
             // Determine whether we really need full subtitle re-render
             const impactingKeys = [
                 'processRoles','roleDisplayStyle','enableColorSwatches','ignoreProjectItemColors','checkerboardEnabled','checkerboardMode',
@@ -6226,6 +7503,21 @@ $(document).ready(function() {
             }
             
             persistSettingsToBackend(settings, { reason: 'save' });
+
+            if (segmentationChanged) {
+                console.info('[Prompter][saveSettings] segmentation settings changed, refreshing project data');
+                projectDataReady = false;
+                projectDataRetryAttempt = 0;
+                clearProjectDataRetryTimer();
+                if (statusIndicator && statusIndicator.length) {
+                    statusIndicator.text('Обновление сегментации...');
+                }
+                getProjectData('settings_segmentation_refresh', { allowCache: false, forceReload: true })
+                    .catch(err => {
+                        console.warn('[Prompter][saveSettings] segmentation refresh failed', err);
+                        scheduleProjectDataRetry('settings_segmentation_retry');
+                    });
+            }
         } catch (e) { console.error("Error in saveSettings:", e); }
         finally { $('#settings-modal').hide(); }
     }
@@ -6591,7 +7883,8 @@ $(document).ready(function() {
             tracks: false,
             tracksCount: 0,
             fps: false,
-            roles: false
+            roles: false,
+            segmentation: false
         };
         if (Object.prototype.hasOwnProperty.call(snapshot, 'project_name')) {
             const nameResult = applyProjectName(snapshot.project_name, meta);
@@ -6616,6 +7909,20 @@ $(document).ready(function() {
             const rolesResult = applyRolesPayload(snapshot.roles, meta);
             applied.roles = rolesResult.applied;
         }
+        let preserveSegmentSelection = false;
+        if (Object.prototype.hasOwnProperty.call(snapshot, 'segmentation')) {
+            projectSegmentationInfo = sanitizeProjectSegmentationSnapshot(snapshot.segmentation);
+            const manualActive = isManualSegmentationActive();
+            const hasAutoSegments = projectSegmentationInfo.mode !== 'none';
+            applied.segmentation = manualActive || hasAutoSegments;
+            preserveSegmentSelection = applied.segmentation;
+        } else {
+            projectSegmentationInfo = createDefaultProjectSegmentationInfo();
+            const manualActive = isManualSegmentationActive();
+            applied.segmentation = manualActive;
+            preserveSegmentSelection = manualActive;
+        }
+        refreshStatsSegmentationControls({ preserveSelection: preserveSegmentSelection, recalcIfVisible: true });
         projectDataCache = snapshot;
         return { status: 'applied', applied };
     }
@@ -6663,6 +7970,7 @@ $(document).ready(function() {
                     storeProjectDataCache(snapshot);
                     const applyResult = applyProjectDataSnapshot(snapshot, { source: 'emu_reference_reload', reason: 'emu:project_reload' });
                     statusIndicator.text('Эмуляция: данные проекта обновлены.');
+                    markProjectDataReady();
                     return {
                         status: 'emu_reference',
                         applied: applyResult.applied,
@@ -6683,6 +7991,7 @@ $(document).ready(function() {
             storeProjectDataCache(fallback);
             const applyResult = applyProjectDataSnapshot(fallback, { source: 'emu_fallback', reason: 'emu:project' });
             statusIndicator.text('Эмуляция: данные проекта обновлены.');
+            markProjectDataReady();
             return {
                 status: 'emu_fallback',
                 applied: applyResult.applied,
@@ -6698,6 +8007,10 @@ $(document).ready(function() {
             const attemptStartedAt = performance.now();
             const deadline = attemptStartedAt + PROJECT_DATA_TIMEOUT_MS;
             statusIndicator.text(attempt > 1 ? `Повторная попытка обновления данных проекта... (${attempt})` : 'Обновляем данные проекта...');
+            const segmentationRequestState = transmitSegmentationRequestToBackend(`project_data:${reason}:attempt${attempt}`);
+            if (segmentationRequestState && segmentationRequestState.mode !== 'none') {
+                console.debug('[Prompter][projectData] segmentation request ready', segmentationRequestState);
+            }
             wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
             setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
 
@@ -6820,6 +8133,7 @@ $(document).ready(function() {
             storeProjectDataCache(parsed);
             const applyResult = applyProjectDataSnapshot(parsed, { source: 'backend', reason });
             statusIndicator.text('Данные проекта обновлены.');
+            markProjectDataReady();
             const result = {
                 status: 'ok',
                 applied: applyResult.applied,
@@ -7028,6 +8342,9 @@ $(document).ready(function() {
             const t0 = performance.now();
             console.info('[Prompter] initialize (REAPER mode)');
             statusIndicator.text('Подключение к REAPER...');
+            projectDataReady = false;
+            projectDataRetryAttempt = 0;
+            clearProjectDataRetryTimer();
             wwr_start();
             if (typeof window !== 'undefined' && typeof window.wwr_req === 'function' && !wwr_is_enabled) {
                 wwr_is_enabled = true;
@@ -7039,9 +8356,14 @@ $(document).ready(function() {
                 applyProjectDataSnapshot(cachedSnapshot, { source: 'cache', reason: 'initialize' });
                 statusIndicator.text('Данные проекта загружены из кэша, обновляем...');
             }
-            getProjectData('initialize', { allowCache: false, forceReload: true }).catch(err => {
-                console.error('[Prompter] failed to refresh project data on init', err);
-            });
+            getProjectData('initialize', { allowCache: false, forceReload: true })
+                .then(() => {
+                    markProjectDataReady();
+                })
+                .catch(err => {
+                    console.error('[Prompter] failed to refresh project data on init', err);
+                    scheduleProjectDataRetry('initialize_retry');
+                });
             wwr_req_recur("TRANSPORT", 20);
             renderLoop();
             evaluateTransportWrap();
@@ -7479,6 +8801,7 @@ $(document).ready(function() {
             activeTimecodeProgressIndices = new Set();
             timecodeProgressValues = new Array(total).fill(0);
             activeOverlapBlocks = [];
+            activeOverlapBlockMap.clear();
             activeOverlapLineIndices = [];
             pendingOverlapRefreshIndices = new Set();
             overlapRefreshScheduled = false;
@@ -7496,6 +8819,7 @@ $(document).ready(function() {
                 subtitleProgressValues = [];
                 timecodeProgressValues = [];
                 activeOverlapBlocks = [];
+                activeOverlapBlockMap.clear();
                 activeOverlapLineIndices = [];
                 pendingOverlapRefreshIndices = new Set();
                 overlapRefreshScheduled = false;
@@ -9932,12 +11256,16 @@ $(document).ready(function() {
     trackSelector.on('change', function() { getText($(this).val()); });
     refreshButton.on('click', () => {
         invalidateRolesCache('refresh_button');
-    clearProjectDataCache();
-    currentProjectName = '';
-    renderTitle();
+        clearProjectDataCache();
+        currentProjectName = '';
+        renderTitle();
+        projectDataReady = false;
+        projectDataRetryAttempt = 0;
+        clearProjectDataRetryTimer();
         statusIndicator.text('Обновление данных проекта...');
         getProjectData('refresh_button', { allowCache: false, forceReload: true }).catch(err => {
             console.error('[Prompter] refresh project data failed', err);
+            scheduleProjectDataRetry('refresh_button_retry');
         });
     });
     if (navigationCompactToggle && navigationCompactToggle.length) {
@@ -9989,6 +11317,19 @@ $(document).ready(function() {
         updateUIFromSettings();
         $('#settings-modal').show();
     });
+    if (projectSettingsButtonEl && projectSettingsButtonEl.length) {
+        projectSettingsButtonEl.on('click', function(event) {
+            event.preventDefault();
+            showProjectSettingsModal();
+        });
+    }
+    if (projectSettingsModalEl && projectSettingsModalEl.length) {
+        projectSettingsModalEl.on('click', function(event) {
+            if (event.target === this) {
+                hideProjectSettingsModal();
+            }
+        });
+    }
     $('.modal-close-button, #settings-modal').on('click', function(event) { if (event.target === this) $('#settings-modal').hide(); });
     saveSettingsButton.on('click', saveSettings);
     resetSettingsButton.on('click', resetSettings);
@@ -10008,7 +11349,6 @@ $(document).ready(function() {
             importActorRoleGroupsFromProject();
         });
     }
-    $('#stats-button').on('click', function(){ buildAndShowStats(); });
     // Realtime mapping update while typing: rebuild preview without mutating user input.
     if (actorRoleMappingTextarea && actorRoleMappingTextarea.length) {
         actorRoleMappingTextarea.on('input', function(){
@@ -10020,89 +11360,210 @@ $(document).ready(function() {
     }
 
     // ================= STATISTICS =================
-    function computeStats() {
+    function isLineWithinSegment(line, segmentRange) {
+        if (!segmentRange) return true;
+        if (!line) return false;
+        const segmentStart = Number(segmentRange.startSeconds);
+        if (!Number.isFinite(segmentStart)) return false;
+        const segmentEndRaw = Number(segmentRange.endSeconds);
+        const segmentEnd = Number.isFinite(segmentEndRaw) ? Math.max(segmentEndRaw, segmentStart) : Number.POSITIVE_INFINITY;
+        const lineStart = Number(line.start_time);
+        if (!Number.isFinite(lineStart)) return false;
+        const lineEndRaw = Number(line.end_time);
+        const lineEnd = Number.isFinite(lineEndRaw) ? lineEndRaw : lineStart;
+        const overlapsStart = lineEnd >= (segmentStart - SEGMENT_RANGE_EPSILON);
+        const startsBeforeEnd = lineStart < (segmentEnd - SEGMENT_RANGE_EPSILON);
+        return overlapsStart && startsBeforeEnd;
+    }
+
+    function ensureStatsDomHandles() {
+        if (!statsModalEl || !statsModalEl.length) statsModalEl = $('#stats-modal');
+        if (!statsSegmentControlsEl || !statsSegmentControlsEl.length) statsSegmentControlsEl = $('#stats-segmentation-controls');
+        if (!statsSegmentSelectEl || !statsSegmentSelectEl.length) statsSegmentSelectEl = $('#stats-segment-select');
+        if (!statsSegmentSourceEl || !statsSegmentSourceEl.length) statsSegmentSourceEl = $('#stats-segment-source');
+        if (!statsRolesSectionEl || !statsRolesSectionEl.length) statsRolesSectionEl = $('#stats-roles-section');
+        if (!statsActorsSectionEl || !statsActorsSectionEl.length) statsActorsSectionEl = $('#stats-actors-section');
+        if (!statsColorsSectionEl || !statsColorsSectionEl.length) statsColorsSectionEl = $('#stats-colors-section');
+        if (!statsEmptyEl || !statsEmptyEl.length) statsEmptyEl = $('#stats-empty');
+        if (!statsRolesTableBodyEl || !statsRolesTableBodyEl.length) statsRolesTableBodyEl = $('#stats-roles-table tbody');
+        if (!statsActorsTableBodyEl || !statsActorsTableBodyEl.length) statsActorsTableBodyEl = $('#stats-actors-table tbody');
+        if (!statsColorsTableBodyEl || !statsColorsTableBodyEl.length) statsColorsTableBodyEl = $('#stats-colors-table tbody');
+        if (!statsRolesTotalEl || !statsRolesTotalEl.length) statsRolesTotalEl = $('#stats-roles-total');
+        if (!statsActorsTotalEl || !statsActorsTotalEl.length) statsActorsTotalEl = $('#stats-actors-total');
+        if (!statsColorsTotalEl || !statsColorsTotalEl.length) statsColorsTotalEl = $('#stats-colors-total');
+    }
+
+    function computeStats(options = {}) {
+        const opts = options || {};
+        const segmentRange = opts.segmentRange && typeof opts.segmentRange === 'object' ? opts.segmentRange : null;
         const roleCounts = new Map();
         const actorCounts = new Map();
         const colorCounts = new Map();
         let totalRoleLines = 0;
         let totalActorLines = 0;
-        let totalColorLines = 0; // only used when no actors mapped
-        const haveActorMapping = Object.keys(roleToActor).length > 0; // any role->actor relation
+        let totalColorLines = 0;
+        const haveActorMapping = Object.keys(roleToActor || {}).length > 0;
         if (Array.isArray(subtitleData)) {
             for (const line of subtitleData) {
                 if (!line || !line.text) continue;
-                const m = line.text.match(/^\[(.*?)\]\s*/);
-                if (m && m[1]) {
-                    const roleKey = String(m[1]).toUpperCase();
-                    if (!roleKey) continue;
-                    totalRoleLines++;
-                    roleCounts.set(roleKey, (roleCounts.get(roleKey) || 0) + 1);
-                    const actor = roleToActor[roleKey];
-                    if (actor) {
-                        totalActorLines++;
-                        actorCounts.set(actor, (actorCounts.get(actor) || 0) + 1);
-                    } else if (!haveActorMapping && line.color) {
-                        // Only collect color stats if вообще нет сопоставлений актёров
-                        totalColorLines++;
-                        colorCounts.set(line.color, (colorCounts.get(line.color) || 0) + 1);
-                    }
+                if (segmentRange && !isLineWithinSegment(line, segmentRange)) continue;
+                const match = line.text.match(/^\[(.*?)\]\s*/);
+                if (!match || !match[1]) continue;
+                const roleKey = String(match[1]).toUpperCase();
+                if (!roleKey) continue;
+                totalRoleLines += 1;
+                roleCounts.set(roleKey, (roleCounts.get(roleKey) || 0) + 1);
+                const actor = roleToActor[roleKey];
+                if (actor) {
+                    totalActorLines += 1;
+                    actorCounts.set(actor, (actorCounts.get(actor) || 0) + 1);
+                } else if (!haveActorMapping && line.color) {
+                    totalColorLines += 1;
+                    colorCounts.set(line.color, (colorCounts.get(line.color) || 0) + 1);
                 }
             }
         }
-        return { roleCounts, actorCounts, colorCounts, totalRoleLines, totalActorLines, totalColorLines, haveActorMapping };
+        return {
+            roleCounts,
+            actorCounts,
+            colorCounts,
+            totalRoleLines,
+            totalActorLines,
+            totalColorLines,
+            haveActorMapping,
+            segmentRange: segmentRange ? { ...segmentRange } : null
+        };
     }
 
-    function buildAndShowStats(){
-        const { roleCounts, actorCounts, colorCounts, totalRoleLines, totalActorLines, totalColorLines, haveActorMapping } = computeStats();
-        const statsModal = $('#stats-modal');
-        const rolesSection = $('#stats-roles-section');
-        const actorsSection = $('#stats-actors-section');
-        const colorsSection = $('#stats-colors-section');
-        const emptyMsg = $('#stats-empty');
-        let any=false;
-        // Roles table
-        if (totalRoleLines > 0 && roleCounts.size > 0) {
-            const tbody = $('#stats-roles-table tbody').empty();
-            const arr = Array.from(roleCounts.entries()).sort((a,b)=> b[1]-a[1]);
-            arr.forEach(([role,count])=>{
-                const pct = ((count/totalRoleLines)*100).toFixed(1);
-                tbody.append(`<tr><td>${role}</td><td>${count}</td><td>${pct}</td></tr>`);
-            });
-            $('#stats-roles-total').text(totalRoleLines);
-            rolesSection.show(); any=true;
-        } else { rolesSection.hide(); }
-        // Actors table (primary if any actor mapping present and counts > 0)
-        if (totalActorLines > 0 && actorCounts.size > 0) {
-            const tbody = $('#stats-actors-table tbody').empty();
-            const arr = Array.from(actorCounts.entries()).sort((a,b)=> b[1]-a[1]);
-            arr.forEach(([actor,count])=>{
-                const pct = ((count/totalActorLines)*100).toFixed(1);
-                tbody.append(`<tr><td>${actor}</td><td>${count}</td><td>${pct}</td></tr>`);
-            });
-            $('#stats-actors-total').text(totalActorLines);
-            actorsSection.show(); any=true;
-        } else { actorsSection.hide(); }
-        // Colors table: показываем ТОЛЬКО если НЕТ назначенных актёров вообще, но есть цвета в репликах
-        if (!haveActorMapping) {
-            const colorTotal = totalColorLines;
-            if (colorTotal > 0 && colorCounts.size > 0) {
-                const tbody = $('#stats-colors-table tbody').empty();
-                const arr = Array.from(colorCounts.entries()).sort((a,b)=> b[1]-a[1]);
-                arr.forEach(([col,count])=>{
-                    const pct = ((count/colorTotal)*100).toFixed(1);
-                    tbody.append(`<tr><td><span style="display:inline-block;width:1.2rem;height:1.2rem;vertical-align:middle;border-radius:0.2rem;background:${col};margin-right:0.4rem;border:1px solid #555"></span>${col}</td><td>${count}</td><td>${pct}</td></tr>`);
+    function renderStatsTables(options = {}) {
+        ensureStatsDomHandles();
+        const opts = options || {};
+        const openModal = opts.openModal !== false;
+        const percentDigits = typeof opts.percentDigits === 'number' ? opts.percentDigits : STATS_PERCENT_DIGITS;
+        const activeEntry = statsSegmentOptionMap.get(statsSegmentSelection) || statsSegmentOptionMap.get(STATS_SEGMENT_ALL_VALUE);
+        const segmentRange = activeEntry && activeEntry.range ? activeEntry.range : null;
+        if (statsSegmentSelectEl && statsSegmentSelectEl.length) {
+            statsSegmentSelectEl.val(statsSegmentSelection);
+        }
+        const stats = computeStats({ segmentRange });
+        const formatPercent = (count, total) => {
+            if (!total || total <= 0) return (0).toFixed(percentDigits);
+            return ((count / total) * 100).toFixed(percentDigits);
+        };
+
+        let anyVisible = false;
+
+        if (statsRolesTableBodyEl && statsRolesTableBodyEl.length) {
+            statsRolesTableBodyEl.empty();
+            if (stats.totalRoleLines > 0 && stats.roleCounts.size > 0) {
+                const rows = Array.from(stats.roleCounts.entries()).sort((a, b) => b[1] - a[1]);
+                rows.forEach(([role, count]) => {
+                    const rowEl = $('<tr>')
+                        .append($('<td>').text(role))
+                        .append($('<td>').text(count))
+                        .append($('<td>').text(formatPercent(count, stats.totalRoleLines)));
+                    statsRolesTableBodyEl.append(rowEl);
                 });
-                $('#stats-colors-total').text(colorTotal);
-                colorsSection.show(); any=true;
-            } else { colorsSection.hide(); }
-        } else { colorsSection.hide(); }
+                if (statsRolesTotalEl && statsRolesTotalEl.length) {
+                    statsRolesTotalEl.text(stats.totalRoleLines);
+                }
+                if (statsRolesSectionEl && statsRolesSectionEl.length) {
+                    statsRolesSectionEl.show();
+                }
+                anyVisible = true;
+            } else if (statsRolesSectionEl && statsRolesSectionEl.length) {
+                statsRolesSectionEl.hide();
+            }
+        }
 
-        emptyMsg.toggle(!any);
-        statsModal.show();
+        if (statsActorsTableBodyEl && statsActorsTableBodyEl.length) {
+            statsActorsTableBodyEl.empty();
+            if (stats.totalActorLines > 0 && stats.actorCounts.size > 0) {
+                const rows = Array.from(stats.actorCounts.entries()).sort((a, b) => b[1] - a[1]);
+                rows.forEach(([actor, count]) => {
+                    const rowEl = $('<tr>')
+                        .append($('<td>').text(actor))
+                        .append($('<td>').text(count))
+                        .append($('<td>').text(formatPercent(count, stats.totalActorLines)));
+                    statsActorsTableBodyEl.append(rowEl);
+                });
+                if (statsActorsTotalEl && statsActorsTotalEl.length) {
+                    statsActorsTotalEl.text(stats.totalActorLines);
+                }
+                if (statsActorsSectionEl && statsActorsSectionEl.length) {
+                    statsActorsSectionEl.show();
+                }
+                anyVisible = true;
+            } else if (statsActorsSectionEl && statsActorsSectionEl.length) {
+                statsActorsSectionEl.hide();
+            }
+        }
+
+        if (statsColorsTableBodyEl && statsColorsTableBodyEl.length) {
+            statsColorsTableBodyEl.empty();
+            if (!stats.haveActorMapping) {
+                const colorTotal = stats.totalColorLines;
+                if (colorTotal > 0 && stats.colorCounts.size > 0) {
+                    const rows = Array.from(stats.colorCounts.entries()).sort((a, b) => b[1] - a[1]);
+                    rows.forEach(([color, count]) => {
+                        const swatchEl = $('<span>').css({
+                            display: 'inline-block',
+                            width: '1.2rem',
+                            height: '1.2rem',
+                            'vertical-align': 'middle',
+                            'border-radius': '0.2rem',
+                            'margin-right': '0.4rem',
+                            border: '1px solid #555',
+                            background: color
+                        });
+                        const colorCell = $('<td>').append(swatchEl).append(document.createTextNode(color));
+                        const rowEl = $('<tr>')
+                            .append(colorCell)
+                            .append($('<td>').text(count))
+                            .append($('<td>').text(formatPercent(count, colorTotal)));
+                        statsColorsTableBodyEl.append(rowEl);
+                    });
+                    if (statsColorsTotalEl && statsColorsTotalEl.length) {
+                        statsColorsTotalEl.text(colorTotal);
+                    }
+                    if (statsColorsSectionEl && statsColorsSectionEl.length) {
+                        statsColorsSectionEl.show();
+                    }
+                    anyVisible = true;
+                } else if (statsColorsSectionEl && statsColorsSectionEl.length) {
+                    statsColorsSectionEl.hide();
+                }
+            } else if (statsColorsSectionEl && statsColorsSectionEl.length) {
+                statsColorsSectionEl.hide();
+            }
+        }
+
+        if (statsEmptyEl && statsEmptyEl.length) {
+            statsEmptyEl.toggle(!anyVisible);
+        }
+
+        if (openModal && statsModalEl && statsModalEl.length) {
+            statsModalEl.show();
+        }
     }
+
+    renderStatsTablesRef = renderStatsTables;
+
+    function buildAndShowStats(options = {}) {
+        const opts = options || {};
+        const preserveSelection = opts.preserveSelection !== false;
+        if (opts.autoSelectFromTransport !== false) {
+            const derivedSelection = determineStatsSegmentSelectionForTime(projectSegmentationInfo, latestTimecode);
+            statsSegmentSelection = derivedSelection;
+        }
+        refreshStatsSegmentationControls({ preserveSelection, recalcIfVisible: false });
+        renderStatsTables({ openModal: true });
+    }
+
+    $('#stats-button').on('click', function(){ buildAndShowStats(); });
 
     function evaluateStatsButtonVisibility(){
-        const { roleCounts, actorCounts, haveActorMapping, colorCounts, totalColorLines } = computeStats();
+        const { roleCounts, actorCounts, haveActorMapping, colorCounts, totalColorLines } = computeStats({ segmentRange: null });
         const btn = $('#stats-button');
         const roleHas = roleCounts && roleCounts.size>0;
         const actorHas = actorCounts && actorCounts.size>0;
@@ -10112,6 +11573,10 @@ $(document).ready(function() {
     let statsEvalRaf=null; function scheduleStatsButtonEvaluation(){ if(statsEvalRaf) cancelAnimationFrame(statsEvalRaf); statsEvalRaf=requestAnimationFrame(evaluateStatsButtonVisibility); }
     $(document).on('click', '.modal-close-button', function(){
         const target = $(this).data('close');
+        if (target === 'project-settings-modal') {
+            hideProjectSettingsModal();
+            return;
+        }
         if(target) { $('#'+target).hide(); }
     });
     $('#actors-modal').on('click', function(e){ if(e.target === this) $(this).hide(); });
@@ -10239,6 +11704,16 @@ $(document).ready(function() {
         highlightClickOptionsWrapper.toggle($(this).is(':checked'));
         scheduleSettingsTileReflow();
     });
+    if (segmentationModeSelect.length) {
+        segmentationModeSelect.on('change', function() {
+            updateSegmentationControlsState({ mode: $(this).val() });
+        });
+    }
+    if (segmentationDisplayModeSelect.length) {
+        segmentationDisplayModeSelect.on('change', function() {
+            updateSegmentationControlsState({ displayMode: $(this).val() });
+        });
+    }
     if (filterHiddenBehaviorSelect.length) {
         filterHiddenBehaviorSelect.on('change', function() {
             const mode = $(this).val();

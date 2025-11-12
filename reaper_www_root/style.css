@@ -69,8 +69,8 @@ body.nav-panel-collapsed #text-display-wrapper { padding-bottom: 4.5rem; }
 body.nav-panel-collapsed .navigation-floating-controls { pointer-events: auto; }
 #navigation-panel label, #navigation-panel select { font-size: 1.5em; }
 #track-selector { padding: 0.5em; background-color: #333; color: #eee; border: 1px solid #555; border-radius: 0.25rem; width: 10rem}
-#refresh-button, #settings-button, #save-settings-button, #actors-button, #stats-button, #navigation-compact-toggle, #navigation-fullscreen-toggle { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
-#refresh-button:hover, #settings-button:hover, #save-settings-button:hover, #actors-button:hover, #stats-button:hover, #navigation-compact-toggle:hover, #navigation-fullscreen-toggle:hover { background-color: #5a5a5a; }
+#refresh-button, #settings-button, #save-settings-button, #actors-button, #stats-button, #navigation-compact-toggle, #navigation-fullscreen-toggle, #project-settings-button { padding: 0.4em; line-height: 1; background-color: #4a4a4a; color: #eee; border: none; border-radius: 0.25rem; cursor: pointer; transition: background-color 0.2s; display: flex; align-items: center; justify-content: center; font-size: 1.5em; }
+#refresh-button:hover, #settings-button:hover, #save-settings-button:hover, #actors-button:hover, #stats-button:hover, #navigation-compact-toggle:hover, #navigation-fullscreen-toggle:hover, #project-settings-button:hover { background-color: #5a5a5a; }
 .icon-svg { width: 1.2rem; height: 1.2rem; fill: currentColor; }
 #navigation-panel .track-selector-label {
     display: flex;
@@ -97,6 +97,7 @@ body.nav-panel-collapsed .navigation-floating-controls { pointer-events: auto; }
 #navigation-fullscreen-toggle .icon-exit { display: none; }
 #navigation-fullscreen-toggle.is-active .icon-enter { display: none; }
 #navigation-fullscreen-toggle.is-active .icon-exit { display: inline; }
+.project-settings-body { display: flex; flex-direction: column; gap: 1.25rem; }
 .navigation-floating-controls #navigation-floating-fullscreen .icon-exit { display: none; }
 .navigation-floating-controls #navigation-floating-fullscreen.is-active .icon-enter { display: none; }
 .navigation-floating-controls #navigation-floating-fullscreen.is-active .icon-exit { display: inline; }
@@ -1149,6 +1150,13 @@ textarea#actor-role-mapping-text { width: 100%; box-sizing: border-box; resize: 
 .light-theme .unassigned-role-chip { background: #ccc; color: #222; }
 
 /* Stats modal */
+.stats-segmentation-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+.stats-segmentation-controls label { font-size: 0.9rem; color: #ccc; }
+.stats-segmentation-controls select { min-width: 12rem; padding: 0.35rem 0.6rem; background-color: #2a2a2a; color: #f1f1f1; border: 1px solid #3a3a3a; border-radius: 0.3rem; }
+.stats-segment-source { margin-left: auto; font-size: 0.85rem; color: #999; }
+.light-theme .stats-segmentation-controls label { color: #333; }
+.light-theme .stats-segmentation-controls select { background-color: #f2f2f2; color: #222; border-color: #ccc; }
+.light-theme .stats-segment-source { color: #666; }
 .stats-table { width: 100%; border-collapse: collapse; margin: 0.75rem 0 1.5rem; font-size: 0.85em; }
 .stats-table th, .stats-table td { padding: 0.4rem 0.5rem; text-align: left; border-bottom: 1px solid #444; }
 .stats-table th { background: #333; position: sticky; top: 0; }

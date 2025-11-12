@@ -51,6 +51,9 @@
                         <svg class="icon-svg icon-enter" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-enter" xlink:href="icons.svg#icon-fullscreen-enter"></use></svg>
                         <svg class="icon-svg icon-exit" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-fullscreen-exit" xlink:href="icons.svg#icon-fullscreen-exit"></use></svg>
                     </button>
+                    <button id="project-settings-button" title="Настройки проекта" aria-label="Настройки проекта" style="display:none;" aria-hidden="true">
+                        <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><use href="icons.svg#icon-project-settings" xlink:href="icons.svg#icon-project-settings"></use></svg>
+                    </button>
                     <!-- Actors coloring button placed BEFORE stats/settings -->
                     <button id="actors-button" title="Раскраска актёров (цвета)">
                         <!-- Brush icon (geometry preserved) -->
@@ -248,6 +251,62 @@
                                         </div>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset class="fieldset-collapsible expanded" id="segmentation-settings-fieldset">
+                    <legend>Сегментирование</legend>
+                    <div class="settings-tile-grid segmentation-settings-tiles">
+                        <div class="settings-tile" id="segmentation-manual-tile">
+                            <div class="setting-item">
+                                <label for="segmentation-manual-enabled">Ручной режим</label>
+                                <input type="checkbox" id="segmentation-manual-enabled">
+                            </div>
+                            <p class="settings-helper-text">Автоопределение используется, если ручные сегменты не заданы.</p>
+                        </div>
+                        <div class="settings-tile" id="segmentation-autodetect-tile">
+                            <div class="setting-item-vertical">
+                                <label for="segmentation-autodetect-mode">Автоопределение</label>
+                                <select id="segmentation-autodetect-mode" aria-label="Автоопределение">
+                                    <option value="none">Выключить</option>
+                                    <option value="video">Только по видеофайлам</option>
+                                    <option value="markers">Только по маркерам\регионам</option>
+                                    <option value="both">Двойной режим</option>
+                                </select>
+                            </div>
+                            <div class="setting-item-vertical" id="segmentation-video-keywords-wrapper">
+                                <label for="segmentation-auto-video-keywords">Название дорожки для автопоиска</label>
+                                <input type="text" id="segmentation-auto-video-keywords" value="ВИДЕО, ВИДОС, ВИДОСЫ, VID, VIDEO, RAW, РАВКА">
+                            </div>
+                            <div class="setting-item-vertical" id="segmentation-marker-pattern-wrapper">
+                                <label for="segmentation-marker-pattern">Шаблон</label>
+                                <input type="text" id="segmentation-marker-pattern" value="$N (сери*|эпизод*|част*)" title="$N - позиция числа; звёздочка дополняет окончание слова. Примеры совпадений: '13 серия', '8 часть', '102 эпизод'.">
+                            </div>
+                            <div class="setting-item" id="segmentation-priority-wrapper">
+                                <label for="segmentation-autodetect-priority">Приоритет</label>
+                                <select id="segmentation-autodetect-priority">
+                                    <option value="video">По видеофайлам</option>
+                                    <option value="markers">По маркерам\регионам</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="settings-tile" id="segmentation-display-tile">
+                            <div class="settings-tile-title">Отображение субтитров</div>
+                            <div class="setting-item">
+                                <label for="segmentation-display-mode">Режим</label>
+                                <select id="segmentation-display-mode">
+                                    <option value="current">Текущий сегмент</option>
+                                    <option value="all">Все сегменты</option>
+                                </select>
+                            </div>
+                            <div class="setting-item" id="segmentation-auto-switch-wrapper">
+                                <label for="segmentation-auto-switch-mode">Автосмена сегмента</label>
+                                <select id="segmentation-auto-switch-mode">
+                                    <option value="playback_only">Только при воспроизведении</option>
+                                    <option value="always">Всегда</option>
+                                    <option value="disabled">Выключить</option>
+                                </select>
                             </div>
                         </div>
                     </div>
@@ -546,6 +605,18 @@
             </div>
         </div>
     </div>
+
+    <div id="project-settings-modal" class="modal" aria-hidden="true">
+        <div class="modal-content">
+            <span class="modal-close-button" data-close="project-settings-modal">&times;</span>
+            <h2>Настройки проекта</h2>
+            <div class="settings-body project-settings-body" id="project-settings-body">
+                <fieldset class="project-settings-section" id="project-settings-manual-fieldset">
+                    <legend>Ручное сегментирование</legend>
+                </fieldset>
+            </div>
+        </div>
+    </div>
     
     <div id="actors-modal" class="modal">
         <div class="modal-content">
@@ -614,6 +685,11 @@
             <span class="modal-close-button" data-close="stats-modal">&times;</span>
             <h2>Статистика</h2>
             <div class="settings-body" id="stats-body">
+                <div id="stats-segmentation-controls" class="stats-segmentation-controls" style="display:none;">
+                    <label for="stats-segment-select">Сегмент</label>
+                    <select id="stats-segment-select"></select>
+                    <span id="stats-segment-source" class="stats-segment-source"></span>
+                </div>
                 <div id="stats-roles-section" style="display:none;">
                     <h3>По ролям</h3>
                     <table class="stats-table" id="stats-roles-table">
