@@ -1465,6 +1465,9 @@ function setManualDefaultDurationSettingVisibility(enabled) {
     const shouldShow = !!enabled;
     manualDefaultDurationSettingRow.toggle(shouldShow);
     manualDefaultDurationSettingRow.attr('aria-hidden', shouldShow ? 'false' : 'true');
+    if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
+        manualDefaultDurationInput.prop('disabled', !shouldShow);
+    }
 }
 
 function manualSegmentationHasSegments() {
@@ -1618,6 +1621,8 @@ function applyManualSegmentationProjectDataSection(section, options = {}) {
 
 let projectSettingsButtonEl = null;
 let projectSettingsModalEl = null;
+let projectSettingsSectionsEl = null;
+let projectSettingsManualFieldsetEl = null;
 let manualDefaultDurationInput = null;
 let manualDefaultDurationSettingRow = null;
 
@@ -1649,9 +1654,82 @@ function getProjectSettingsModalElement() {
     return null;
 }
 
+function getProjectSettingsSections() {
+    if (projectSettingsSectionsEl && projectSettingsSectionsEl.length) {
+        return projectSettingsSectionsEl;
+    }
+    if (typeof window !== 'undefined' && window.jQuery) {
+        projectSettingsSectionsEl = window.jQuery('#project-settings-body .project-settings-section');
+        if (projectSettingsSectionsEl && projectSettingsSectionsEl.length) {
+            projectSettingsSectionsEl.each(function registerSectionAvailability() {
+                const section = window.jQuery(this);
+                if (typeof section.data('project-settings-available') === 'undefined') {
+                    const defaultVisible = section.attr('aria-hidden') !== 'true';
+                    section.data('project-settings-available', defaultVisible);
+                }
+            });
+        }
+        return projectSettingsSectionsEl;
+    }
+    return null;
+}
+
+function getProjectSettingsManualFieldset() {
+    if (projectSettingsManualFieldsetEl && projectSettingsManualFieldsetEl.length) {
+        return projectSettingsManualFieldsetEl;
+    }
+    if (typeof window !== 'undefined' && window.jQuery) {
+        projectSettingsManualFieldsetEl = window.jQuery('#project-settings-manual-fieldset');
+        if (projectSettingsManualFieldsetEl && projectSettingsManualFieldsetEl.length) {
+            if (typeof projectSettingsManualFieldsetEl.data('project-settings-available') === 'undefined') {
+                const defaultVisible = projectSettingsManualFieldsetEl.attr('aria-hidden') !== 'true';
+                projectSettingsManualFieldsetEl.data('project-settings-available', defaultVisible);
+            }
+        }
+        return projectSettingsManualFieldsetEl;
+    }
+    return null;
+}
+
+function projectSettingsHasAvailableSections() {
+    const sections = getProjectSettingsSections();
+    if (!sections || !sections.length) {
+        return false;
+    }
+    const $ = (typeof window !== 'undefined' && window.jQuery) ? window.jQuery : null;
+    let available = false;
+    sections.each(function determineAvailability() {
+        const section = $ ? $(this) : null;
+        if (section && section.length && section.data('project-settings-available') !== false) {
+            available = true;
+            return false;
+        }
+        return undefined;
+    });
+    return available;
+}
+
+function setProjectSettingsSectionVisibility(section, visible) {
+    if (!section || !section.length) {
+        return;
+    }
+    const shouldShow = !!visible;
+    section.data('project-settings-available', shouldShow);
+    section.attr('aria-hidden', shouldShow ? 'false' : 'true');
+    section.toggleClass('is-hidden', !shouldShow);
+    section.toggle(shouldShow);
+}
+
+function setProjectSettingsManualSectionVisibility(enabled) {
+    const fieldset = getProjectSettingsManualFieldset();
+    if (!fieldset || !fieldset.length) {
+        return;
+    }
+    setProjectSettingsSectionVisibility(fieldset, enabled);
+}
+
 function shouldShowProjectSettingsButton() {
-    const manualSettingFlag = !!(settings && settings.segmentationManualEnabled);
-    return manualSettingFlag || isManualSegmentationEnabled() || manualSegmentationHasSegments();
+    return projectSettingsHasAvailableSections();
 }
 
 function updateProjectSettingsButtonVisibility(options = {}) {
@@ -1712,12 +1790,15 @@ function setManualSegmentationEnabled(enabled, options = {}) {
     const force = options && options.force === true;
     if (!force && previous === normalized) {
         if (options && options.ensureVisibility) {
+            setProjectSettingsManualSectionVisibility(normalized);
+            setManualDefaultDurationSettingVisibility(normalized);
             updateProjectSettingsButtonVisibility({ reason: options.reason || 'manual_toggle_noop' });
         }
         return previous;
     }
     manualSegmentationState.enabled = normalized;
     manualSegmentationState.updatedAtMs = Date.now();
+    setProjectSettingsManualSectionVisibility(normalized);
     setManualDefaultDurationSettingVisibility(normalized);
     refreshManualSegmentationProjectDataSnapshot();
     if (!options || options.refresh !== false) {
@@ -2498,6 +2579,7 @@ $(document).ready(function() {
         manualDefaultDurationSettingRow = manualDefaultDurationInput.closest('.setting-item');
     }
     setManualDefaultDurationSettingVisibility(isManualSegmentationEnabled());
+    setProjectSettingsManualSectionVisibility(isManualSegmentationEnabled());
 
     const updateProjectManualMaskState = () => {
         const enabled = !projectManualGenerateNamesToggle.length || projectManualGenerateNamesToggle.is(':checked');
@@ -13219,6 +13301,17 @@ $(document).ready(function() {
     if (segmentationDisplayModeSelect.length) {
         segmentationDisplayModeSelect.on('change', function() {
             updateSegmentationControlsState({ displayMode: $(this).val() });
+        });
+    }
+    if (segmentationManualToggle.length) {
+        segmentationManualToggle.on('change', function() {
+            const enabled = $(this).is(':checked');
+            setManualSegmentationEnabled(enabled, {
+                reason: 'settings_ui_manual_toggle',
+                ensureVisibility: true,
+                preserveSelection: true
+            });
+            scheduleSettingsTileReflow();
         });
     }
     if (filterHiddenBehaviorSelect.length) {
