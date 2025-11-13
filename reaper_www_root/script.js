@@ -1221,6 +1221,133 @@ const manualSegmentationState = {
     version: 0
 };
 
+let manualSegmentationProjectDataSnapshot = {
+    enabled: false,
+    updatedAtMs: null,
+    defaultDurationMinutes: 60,
+    version: 0,
+    segments: []
+};
+
+const manualSegmentationListeners = new Set();
+
+function addManualSegmentationListener(listener) {
+    if (typeof listener === 'function') {
+        manualSegmentationListeners.add(listener);
+    }
+}
+
+function removeManualSegmentationListener(listener) {
+    if (typeof listener === 'function') {
+        manualSegmentationListeners.delete(listener);
+    }
+}
+
+function sanitizeManualSegmentSeconds(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return 0;
+    }
+    return Math.round(numeric * 1000) / 1000;
+}
+
+function formatManualSegmentStartSeconds(seconds, fractionDigits = 3) {
+    const ms = Math.max(0, Math.round(sanitizeManualSegmentSeconds(seconds) * 1000));
+    const decimals = Math.max(0, Math.min(3, fractionDigits));
+    return PrompterTime.formatHmsMillis(ms, decimals);
+}
+
+function manualSegmentTimesEqual(a, b) {
+    const left = sanitizeManualSegmentSeconds(a);
+    const right = sanitizeManualSegmentSeconds(b);
+    return Math.abs(left - right) < 1e-3;
+}
+
+function sanitizeManualDefaultDurationMinutes(value, fallback = 60) {
+    const fallbackNumeric = Number(fallback);
+    const safeFallback = Number.isFinite(fallbackNumeric) && fallbackNumeric > 0 ? fallbackNumeric : 60;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return Math.round(safeFallback);
+    }
+    const clamped = Math.min(1440, Math.max(1, numeric));
+    return Math.round(clamped);
+}
+
+function parseManualSegmentTimeInput(raw) {
+    if (typeof raw !== 'string') {
+        return null;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        return null;
+    }
+    const normalized = trimmed.replace(',', '.');
+    if (/^[+]?[0-9]+(?:\.[0-9]+)?$/.test(normalized)) {
+        const numeric = Number(normalized);
+        return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+    }
+    const parts = normalized.split(':');
+    if (parts.length < 2 || parts.length > 3) {
+        return null;
+    }
+    const secondsPartRaw = parts.pop();
+    if (secondsPartRaw === undefined) {
+        return null;
+    }
+    const seconds = Number(secondsPartRaw);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds >= 60) {
+        return null;
+    }
+    let total = seconds;
+    const minutesPartRaw = parts.pop();
+    if (minutesPartRaw !== undefined) {
+        const minutes = Number(minutesPartRaw);
+        if (!Number.isFinite(minutes) || minutes < 0 || minutes >= 60) {
+            return null;
+        }
+        total += minutes * 60;
+    }
+    const hoursPartRaw = parts.pop();
+    if (hoursPartRaw !== undefined) {
+        const hours = Number(hoursPartRaw);
+        if (!Number.isFinite(hours) || hours < 0) {
+            return null;
+        }
+        total += hours * 3600;
+    }
+    return total;
+}
+
+function computeManualSegmentsHash(segments) {
+    if (!Array.isArray(segments) || !segments.length) {
+        return '[]';
+    }
+    const normalized = segments.map(segment => ({
+        label: segment && typeof segment.label === 'string' ? segment.label.trim() : '',
+        start: sanitizeManualSegmentSeconds(segment && segment.startSeconds)
+    }));
+    normalized.sort((a, b) => {
+        const diff = a.start - b.start;
+        if (Math.abs(diff) > 1e-3) {
+            return diff;
+        }
+        return a.label.localeCompare(b.label, 'ru');
+    });
+    return JSON.stringify(normalized);
+}
+
+const MANUAL_GENERATOR_MAX_SEGMENTS = 500;
+
+function getManualSegmentDisplayName(segment, index) {
+    const ordinal = (typeof index === 'number' ? index : (segment && typeof segment.ordinal === 'number' ? segment.ordinal : 0)) + 1;
+    if (!segment || typeof segment.label !== 'string') {
+        return `Сегмент ${ordinal}`;
+    }
+    const trimmed = segment.label.trim();
+    return trimmed.length ? trimmed : `Сегмент ${ordinal}`;
+}
+
 function coerceSecondsValue(value) {
     if (value === null || value === undefined) {
         return null;
@@ -1262,13 +1389,20 @@ function sanitizeManualSegmentationList(rawSegments) {
             }
         }
         const label = typeof entry.label === 'string' ? entry.label : (typeof entry.name === 'string' ? entry.name : '');
+        const normalizedStart = sanitizeManualSegmentSeconds(startSeconds);
+        let normalizedEnd = endSeconds !== null ? Math.max(endSeconds, normalizedStart) : null;
+        const hasExplicitEnd = normalizedEnd !== null && normalizedEnd > normalizedStart + 1e-6;
+        if (!hasExplicitEnd) {
+            normalizedEnd = null;
+        }
         collected.push({
             kind: 'manual',
-            startSeconds: Math.max(0, startSeconds),
-            rawEnd: endSeconds !== null ? Math.max(endSeconds, startSeconds) : null,
+            startSeconds: normalizedStart,
+            rawEnd: normalizedEnd,
             label,
             originalIndex: index,
-            source: entry.source || 'manual'
+            source: entry.source || 'manual',
+            hasExplicitEnd
         });
     });
     collected.sort((a, b) => {
@@ -1280,8 +1414,11 @@ function sanitizeManualSegmentationList(rawSegments) {
     for (let i = 0; i < collected.length; i++) {
         const segment = collected[i];
         const next = collected[i + 1];
-        const resolvedEnd = segment.rawEnd !== null ? segment.rawEnd : (next ? next.startSeconds : segment.startSeconds);
-        segment.endSeconds = Math.max(segment.startSeconds, resolvedEnd);
+        const nextStart = next ? sanitizeManualSegmentSeconds(next.startSeconds) : null;
+        const resolvedEndSource = segment.rawEnd !== null ? segment.rawEnd : nextStart;
+        const resolvedEnd = resolvedEndSource !== null ? resolvedEndSource : segment.startSeconds;
+        segment.endSeconds = sanitizeManualSegmentSeconds(Math.max(segment.startSeconds, resolvedEnd));
+        segment.hasExplicitEnd = segment.rawEnd !== null && segment.hasExplicitEnd === true;
         segment.uid = `manual:${i}`;
         segment.ordinal = i;
         segment.label = segment.label && segment.label.trim().length ? segment.label.trim() : `Сегмент ${i + 1}`;
@@ -1296,6 +1433,7 @@ function setManualSegmentationSegments(rawSegments = [], options = {}) {
     manualSegmentationState.segments = sanitized;
     manualSegmentationState.updatedAtMs = Date.now();
     manualSegmentationState.version += 1;
+    refreshManualSegmentationProjectDataSnapshot();
     if (!options || options.refresh !== false) {
         handleManualSegmentationChanged({ reason: options.reason || 'update' });
     } else {
@@ -1308,6 +1446,27 @@ function getManualSegmentationSegments() {
     return Array.isArray(manualSegmentationState.segments) ? manualSegmentationState.segments : [];
 }
 
+function ensureManualDefaultDurationHandles() {
+    if (!manualDefaultDurationInput || !manualDefaultDurationInput.length) {
+        manualDefaultDurationInput = $('#manual-segment-default-duration-minutes');
+    }
+    if (!manualDefaultDurationSettingRow || !manualDefaultDurationSettingRow.length) {
+        manualDefaultDurationSettingRow = manualDefaultDurationInput && manualDefaultDurationInput.length
+            ? manualDefaultDurationInput.closest('.setting-item')
+            : $();
+    }
+}
+
+function setManualDefaultDurationSettingVisibility(enabled) {
+    ensureManualDefaultDurationHandles();
+    if (!manualDefaultDurationSettingRow || !manualDefaultDurationSettingRow.length) {
+        return;
+    }
+    const shouldShow = !!enabled;
+    manualDefaultDurationSettingRow.toggle(shouldShow);
+    manualDefaultDurationSettingRow.attr('aria-hidden', shouldShow ? 'false' : 'true');
+}
+
 function manualSegmentationHasSegments() {
     return getManualSegmentationSegments().length > 0;
 }
@@ -1316,8 +1475,151 @@ function isManualSegmentationEnabled() {
     return manualSegmentationState.enabled === true;
 }
 
+function getManualDefaultDurationMinutesSetting() {
+    const hasDefaults = typeof defaultSettings !== 'undefined' && defaultSettings !== null;
+    const fallback = hasDefaults && Number.isFinite(defaultSettings.manualSegmentDefaultDurationMinutes)
+        ? defaultSettings.manualSegmentDefaultDurationMinutes
+        : 60;
+    const current = settings && Number.isFinite(settings.manualSegmentDefaultDurationMinutes)
+        ? settings.manualSegmentDefaultDurationMinutes
+        : undefined;
+    return sanitizeManualDefaultDurationMinutes(current, fallback);
+}
+
+function serializeManualSegmentsForProjectData(sourceSegments) {
+    const segments = Array.isArray(sourceSegments) ? sourceSegments : [];
+    if (!segments.length) {
+        return [];
+    }
+    return segments.map(segment => {
+        const start = sanitizeManualSegmentSeconds(segment && segment.startSeconds);
+        const label = segment && typeof segment.label === 'string' ? segment.label : '';
+        const hasExplicitEnd = segment && segment.hasExplicitEnd === true;
+        const endRaw = Number.isFinite(segment && segment.endSeconds)
+            ? sanitizeManualSegmentSeconds(Math.max(segment.endSeconds, start))
+            : null;
+        const ordinal = Number.isFinite(segment && segment.ordinal) ? Number(segment.ordinal) : null;
+        const uid = segment && typeof segment.uid === 'string' ? segment.uid : null;
+        return {
+            label,
+            startSeconds: start,
+            endSeconds: hasExplicitEnd ? endRaw : null,
+            hasExplicitEnd,
+            ordinal,
+            uid
+        };
+    });
+}
+
+function refreshManualSegmentationProjectDataSnapshot() {
+    const runtimeSegments = getManualSegmentationSegments();
+    const serialized = serializeManualSegmentsForProjectData(runtimeSegments);
+    manualSegmentationProjectDataSnapshot = {
+        enabled: isManualSegmentationEnabled() && serialized.length > 0,
+        updatedAtMs: Number.isFinite(manualSegmentationState.updatedAtMs) ? manualSegmentationState.updatedAtMs : null,
+        defaultDurationMinutes: getManualDefaultDurationMinutesSetting(),
+        version: manualSegmentationState.version,
+        segments: serialized
+    };
+    if (!manualSegmentationProjectDataSnapshot.segments.length) {
+        manualSegmentationProjectDataSnapshot.enabled = false;
+    }
+    return manualSegmentationProjectDataSnapshot;
+}
+
+function buildManualSegmentationProjectDataEntry() {
+    const snapshot = refreshManualSegmentationProjectDataSnapshot();
+    if (!snapshot.segments.length) {
+        return null;
+    }
+    return {
+        enabled: snapshot.enabled,
+        updatedAtMs: snapshot.updatedAtMs,
+        defaultDurationMinutes: snapshot.defaultDurationMinutes,
+        version: snapshot.version,
+        segments: snapshot.segments.map(segment => ({
+            label: segment.label,
+            startSeconds: segment.startSeconds,
+            endSeconds: segment.endSeconds,
+            hasExplicitEnd: segment.hasExplicitEnd,
+            ordinal: segment.ordinal,
+            uid: segment.uid
+        }))
+    };
+}
+
+function applyManualSegmentsFromProjectData(serializedSegments, options = {}) {
+    if (!Array.isArray(serializedSegments)) {
+        if (options && options.resetOnMissing === true && manualSegmentationHasSegments()) {
+            setManualSegmentationSegments([], { reason: options.reason || 'project_data_clear' });
+            return { applied: true, cleared: true };
+        }
+        return { applied: false, reason: 'invalid_payload' };
+    }
+    const normalized = sanitizeManualSegmentationList(serializedSegments);
+    const nextHash = computeManualSegmentsHash(normalized);
+    const currentSegments = getManualSegmentationSegments();
+    const currentHash = computeManualSegmentsHash(currentSegments);
+    if (nextHash === currentHash) {
+        refreshManualSegmentationProjectDataSnapshot();
+        return { applied: false, reason: 'unchanged' };
+    }
+    setManualSegmentationSegments(serializedSegments, { reason: options.reason || 'project_data_import' });
+    refreshManualSegmentationProjectDataSnapshot();
+    return { applied: true };
+}
+
+function applyManualSegmentationProjectDataSection(section, options = {}) {
+    if (!section || typeof section !== 'object') {
+        if (options && options.resetOnMissing === true) {
+            setManualSegmentationSegments([], { reason: options.reason || 'project_data_clear' });
+            setManualSegmentationEnabled(false, { reason: options.reason || 'project_data_clear' });
+            refreshManualSegmentationProjectDataSnapshot();
+            return { applied: true, cleared: true };
+        }
+        return { applied: false, reason: 'invalid_section' };
+    }
+    const segments = Array.isArray(section.segments) ? section.segments : [];
+    const applyResult = applyManualSegmentsFromProjectData(segments, { reason: options.reason || 'project_data_section' });
+    let enabled = section.enabled === true;
+    if (segments.length > 0) {
+        enabled = section.enabled === undefined ? true : enabled;
+    }
+    const normalizedDuration = sanitizeManualDefaultDurationMinutes(
+        section.defaultDurationMinutes,
+        getManualDefaultDurationMinutesSetting()
+    );
+    if (settings) {
+        settings.manualSegmentDefaultDurationMinutes = normalizedDuration;
+    }
+    if (typeof document !== 'undefined') {
+        const eventDetail = {
+            detail: {
+                source: options.reason || 'project_data_section',
+                value: normalizedDuration
+            }
+        };
+        if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
+            document.dispatchEvent(new CustomEvent('frzz:manual-default-duration-updated', eventDetail));
+        } else if (document.createEvent) {
+            const legacyEvent = document.createEvent('CustomEvent');
+            legacyEvent.initCustomEvent('frzz:manual-default-duration-updated', false, false, eventDetail.detail);
+            document.dispatchEvent(legacyEvent);
+        }
+    }
+    setManualSegmentationEnabled(enabled, { reason: options.reason || 'project_data_section' });
+    refreshManualSegmentationProjectDataSnapshot();
+    return {
+        applied: applyResult && applyResult.applied === true,
+        segments: segments.length,
+        enabled
+    };
+}
+
 let projectSettingsButtonEl = null;
 let projectSettingsModalEl = null;
+let manualDefaultDurationInput = null;
+let manualDefaultDurationSettingRow = null;
 
 function getProjectSettingsButtonElement() {
     if (projectSettingsButtonEl && projectSettingsButtonEl.length) {
@@ -1393,7 +1695,15 @@ function handleManualSegmentationChanged(options = {}) {
         const preserveSelection = options && options.preserveSelection === true;
         refreshStatsSegmentationControls({ preserveSelection, recalcIfVisible: true });
     }
-    updateProjectSettingsButtonVisibility({ reason: options && options.reason ? options.reason : 'manual_segmentation_change' });
+    const reason = options && options.reason ? options.reason : 'manual_segmentation_change';
+    updateProjectSettingsButtonVisibility({ reason });
+    for (const listener of manualSegmentationListeners) {
+        try {
+            listener({ reason });
+        } catch (err) {
+            console.warn('[Prompter][manualSegmentation] listener failed', err);
+        }
+    }
 }
 
 function setManualSegmentationEnabled(enabled, options = {}) {
@@ -1408,6 +1718,8 @@ function setManualSegmentationEnabled(enabled, options = {}) {
     }
     manualSegmentationState.enabled = normalized;
     manualSegmentationState.updatedAtMs = Date.now();
+    setManualDefaultDurationSettingVisibility(normalized);
+    refreshManualSegmentationProjectDataSnapshot();
     if (!options || options.refresh !== false) {
         handleManualSegmentationChanged({
             reason: options ? options.reason : 'manual_toggle',
@@ -1523,7 +1835,14 @@ function formatStatsSegmentLabel(segment, index, kind) {
         const trackSuffix = segment.trackName && segment.trackName.trim().length ? ` · ${segment.trackName.trim()}` : '';
         return `${ordinal}. Видео: ${baseName}${trackSuffix}`;
     }
-    const sourceLabel = segment.markerSource === 'region' ? 'Регион' : 'Маркер';
+    let sourceLabel;
+    if (segment.markerSource === 'region') {
+        sourceLabel = 'Регион';
+    } else if (segment.markerSource === 'manual') {
+        sourceLabel = 'Сегмент';
+    } else {
+        sourceLabel = 'Маркер';
+    }
     const base = segment.name && segment.name.trim().length ? segment.name.trim() : `${sourceLabel} ${ordinal}`;
     return `${ordinal}. ${sourceLabel}: ${base}`;
 }
@@ -1537,6 +1856,67 @@ function formatManualSegmentLabel(segment, index) {
     return `${ordinal}. ${base}`;
 }
 
+function getManualSegmentsForStats() {
+    // Manual segments should behave like marker-based segments in statistics.
+    if (!isManualSegmentationActive()) {
+        return [];
+    }
+    const manualSegments = getManualSegmentationSegments();
+    if (!Array.isArray(manualSegments) || !manualSegments.length) {
+        return [];
+    }
+    const mapped = [];
+    for (let i = 0; i < manualSegments.length; i++) {
+        const segment = manualSegments[i];
+        if (!segment || typeof segment.startSeconds !== 'number') {
+            continue;
+        }
+        const start = sanitizeManualSegmentSeconds(segment.startSeconds);
+        if (!Number.isFinite(start) || start < 0) {
+            continue;
+        }
+        const next = manualSegments[i + 1];
+        const explicitEnd = segment && segment.hasExplicitEnd === true;
+        const rawEndValue = Number(segment.endSeconds);
+        let resolvedEnd = Number.isFinite(rawEndValue) ? Math.max(rawEndValue, start) : NaN;
+        if (explicitEnd) {
+            if (!Number.isFinite(resolvedEnd) || resolvedEnd <= start) {
+                resolvedEnd = start;
+            }
+        } else {
+            const nextStart = next && typeof next.startSeconds === 'number' ? sanitizeManualSegmentSeconds(next.startSeconds) : Number.POSITIVE_INFINITY;
+            if (Number.isFinite(resolvedEnd) && resolvedEnd > start) {
+                // keep inferred value (likely came from next start already)
+            } else if (Number.isFinite(nextStart) && nextStart > start) {
+                resolvedEnd = nextStart;
+            } else {
+                resolvedEnd = Number.POSITIVE_INFINITY;
+            }
+        }
+        if (!Number.isFinite(resolvedEnd)) {
+            resolvedEnd = Number.POSITIVE_INFINITY;
+        }
+        const fallbackOrdinal = mapped.length;
+        const ordinal = Number.isFinite(segment.ordinal) ? segment.ordinal : fallbackOrdinal;
+        const uid = typeof segment.uid === 'string' ? segment.uid : `manual:${ordinal}`;
+        const label = segment.label && segment.label.trim().length ? segment.label.trim() : `Сегмент ${ordinal + 1}`;
+        mapped.push({
+            uid,
+            startSeconds: start,
+            endSeconds: resolvedEnd,
+            ordinal,
+            kind: 'markers',
+            markerSource: 'manual',
+            name: label,
+            source: 'manual',
+            manualOverride: true,
+            baseSegment: segment,
+            hasExplicitEnd: explicitEnd
+        });
+    }
+    return mapped;
+}
+
 function buildStatsSegmentOptions(info) {
     const options = [{
         value: STATS_SEGMENT_ALL_VALUE,
@@ -1544,29 +1924,30 @@ function buildStatsSegmentOptions(info) {
         range: null,
         kind: 'all'
     }];
-    if (isManualSegmentationActive()) {
-        const manualSegments = getManualSegmentationSegments();
-        manualSegments.forEach((segment, index) => {
+    const manualMarkerSegments = getManualSegmentsForStats();
+    if (manualMarkerSegments.length) {
+        manualMarkerSegments.forEach((segment, index) => {
             if (!segment || typeof segment.startSeconds !== 'number') {
                 return;
             }
-            const value = typeof segment.uid === 'string' ? segment.uid : `manual:${index}`;
+            const ordinal = Number.isFinite(segment.ordinal) ? segment.ordinal : index;
             options.push({
-                value,
-                label: formatManualSegmentLabel(segment, index),
+                value: segment.uid,
+                label: formatStatsSegmentLabel(segment, ordinal, 'markers'),
                 range: {
                     startSeconds: segment.startSeconds,
                     endSeconds: segment.endSeconds
                 },
-                    kind: 'manual',
+                kind: 'markers',
                 segment
             });
         });
         return {
             options,
-            primaryKind: 'manual',
-            segments: manualSegments,
-            source: 'manual'
+            primaryKind: 'markers',
+            segments: manualMarkerSegments,
+            source: 'manual',
+            manualOverride: true
         };
     }
     const primaryKind = determinePrimarySegmentKind(info);
@@ -1595,13 +1976,9 @@ function buildStatsSegmentOptions(info) {
 }
 
 function determineStatsSegmentSelectionForTime(info, seconds) {
-    const manualActive = isManualSegmentationActive();
     const time = Number(seconds);
-    if (manualActive) {
-        const manualSegments = getManualSegmentationSegments();
-        if (!manualSegments.length) {
-            return STATS_SEGMENT_ALL_VALUE;
-        }
+    const manualSegments = getManualSegmentsForStats();
+    if (manualSegments.length) {
         if (!Number.isFinite(time) || time < 0) {
             return manualSegments[0] && typeof manualSegments[0].uid === 'string'
                 ? manualSegments[0].uid
@@ -1793,7 +2170,8 @@ const defaultSettings = {
     segmentationAutodetectPriority: 'video',
     segmentationDisplayMode: 'current',
     segmentationAutoSwitchMode: 'playback_only',
-    segmentationManualEnabled: false,
+    segmentationManualEnabled: true,
+    manualSegmentDefaultDurationMinutes: 60,
     enableColorSwatches: true,
     ignoreProjectItemColors: true,
     processRoles: true,
@@ -2039,6 +2417,44 @@ function storeProjectDataCache(snapshot) {
     }
 }
 
+function updateProjectDataCacheWithRolesSnapshot(jsonText, manualSegments) {
+    const text = typeof jsonText === 'string' ? jsonText.trim() : '';
+    if (!text) {
+        return;
+    }
+    if (!projectDataCache || typeof projectDataCache !== 'object') {
+        projectDataCache = {};
+    }
+    projectDataCache.roles = {
+        encoding: 'plain',
+        json: text,
+        updatedAt: Date.now()
+    };
+    if (!Array.isArray(projectDataCache.projectData)) {
+        projectDataCache.projectData = [];
+    }
+    if (projectDataCache.projectData.length === 0) {
+        projectDataCache.projectData.push({});
+    }
+    const target = projectDataCache.projectData[0];
+    if (target && typeof target === 'object') {
+        if (Array.isArray(manualSegments)) {
+            target.manualSegments = manualSegments.map(segment => ({
+                label: segment && typeof segment.label === 'string' ? segment.label : '',
+                startSeconds: Number.isFinite(segment && segment.startSeconds) ? segment.startSeconds : 0,
+                endSeconds: Number.isFinite(segment && segment.endSeconds) ? segment.endSeconds : null,
+                hasExplicitEnd: segment && segment.hasExplicitEnd === true,
+                ordinal: Number.isFinite(segment && segment.ordinal) ? segment.ordinal : null,
+                uid: segment && typeof segment.uid === 'string' ? segment.uid : null
+            }));
+        } else {
+            delete target.manualSegments;
+        }
+        delete target.manualSegmentation;
+    }
+    storeProjectDataCache(projectDataCache);
+}
+
 $(document).ready(function() {
     const initStartTs = performance.now();
     // --- ПЕРЕМЕННЫЕ ---
@@ -2058,7 +2474,1009 @@ $(document).ready(function() {
     const statusIndicator = $('#status-indicator');
     projectSettingsButtonEl = $('#project-settings-button');
     projectSettingsModalEl = $('#project-settings-modal');
+    const projectManualCurrentSection = $('#project-manual-current-section');
+    const projectManualTableBody = $('#project-manual-table tbody');
+    const projectManualEmptyState = $('#project-manual-current-empty');
+    const projectManualGenerator = $('#project-manual-generator');
+    const projectManualGeneratorToggle = $('#project-manual-generate-toggle');
+    const projectManualSaveButton = $('#project-manual-save-button');
+    const projectManualClearButton = $('#project-manual-clear-button');
+    const projectManualResetButton = $('#project-manual-reset-button');
+    const projectManualAppendButton = $('#project-manual-generate-append-button');
+    const projectManualReplaceButton = $('#project-manual-generate-replace-button');
+    const projectManualDurationValue = $('#project-manual-duration-value');
+    const projectManualDurationUnit = $('#project-manual-duration-unit');
+    const projectManualGenerateNamesToggle = $('#project-manual-generate-names');
+    const projectManualMaskRow = $('#project-settings-manual-fieldset .project-manual-mask-row');
+    const projectManualNameMaskInput = $('#project-manual-name-mask');
+    const projectManualStartTimeInput = $('#project-manual-start-time');
+    const projectManualStartIndexInput = $('#project-manual-start-index');
+    const projectManualCountInput = $('#project-manual-count');
+    const projectManualGenerateButton = $('#project-manual-generate-button');
+    manualDefaultDurationInput = $('#manual-segment-default-duration-minutes');
+    if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
+        manualDefaultDurationSettingRow = manualDefaultDurationInput.closest('.setting-item');
+    }
+    setManualDefaultDurationSettingVisibility(isManualSegmentationEnabled());
+
+    const updateProjectManualMaskState = () => {
+        const enabled = !projectManualGenerateNamesToggle.length || projectManualGenerateNamesToggle.is(':checked');
+        if (projectManualNameMaskInput && projectManualNameMaskInput.length) {
+            projectManualNameMaskInput.prop('disabled', !enabled);
+        }
+        if (projectManualMaskRow && projectManualMaskRow.length) {
+            projectManualMaskRow.toggleClass('is-disabled', !enabled);
+        }
+    };
     updateProjectSettingsButtonVisibility({ reason: 'dom_ready_init' });
+
+    if (projectManualGeneratorToggle && projectManualGeneratorToggle.length && projectManualGenerator && projectManualGenerator.length) {
+        projectManualGeneratorToggle.on('click', function(event) {
+            event.preventDefault();
+            const expanded = $(this).attr('aria-expanded') === 'true';
+            const nextState = !expanded;
+            $(this).attr('aria-expanded', String(nextState));
+            projectManualGenerator.toggleClass('is-hidden', !nextState).attr('aria-hidden', String(!nextState));
+        });
+    }
+
+    if (projectManualDurationUnit && projectManualDurationUnit.length && projectManualDurationValue && projectManualDurationValue.length) {
+        projectManualDurationUnit.data('previous-unit', projectManualDurationUnit.val() || 'minutes');
+        projectManualDurationUnit.on('change', function() {
+            const selectEl = $(this);
+            const prevUnit = selectEl.data('previous-unit') || 'minutes';
+            const nextUnit = selectEl.val();
+            if (!nextUnit || nextUnit === prevUnit) {
+                selectEl.data('previous-unit', nextUnit);
+                return;
+            }
+            const rawValue = projectManualDurationValue.val();
+            const numericValue = Number(rawValue);
+            if (Number.isFinite(numericValue)) {
+                let converted = numericValue;
+                if (prevUnit === 'minutes' && nextUnit === 'hours') {
+                    converted = numericValue / 60;
+                } else if (prevUnit === 'hours' && nextUnit === 'minutes') {
+                    converted = numericValue * 60;
+                }
+                const normalized = Math.round(converted * 1000) / 1000;
+                const formatted = Number.isInteger(normalized)
+                    ? String(normalized)
+                    : normalized.toFixed(3).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+                projectManualDurationValue.val(formatted);
+                projectManualDurationValue.data('manual-generator-edited', true);
+            }
+            selectEl.data('previous-unit', nextUnit);
+            markManualGeneratorFieldValidity(projectManualDurationValue, true);
+            setProjectManualGeneratorMessage(null, '');
+        });
+    }
+
+    if (projectManualGenerateNamesToggle && projectManualGenerateNamesToggle.length) {
+        projectManualGenerateNamesToggle.on('change', updateProjectManualMaskState);
+    }
+    updateProjectManualMaskState();
+
+    if (projectManualCurrentSection && projectManualCurrentSection.length) {
+        projectManualCurrentSection.removeClass('is-hidden');
+    }
+
+    const projectManualAddButton = $('#project-manual-add-button');
+    const projectManualGeneratorButtons = $('#project-manual-generator-buttons');
+    let projectManualGeneratorMessage = null;
+    if (projectManualGeneratorButtons && projectManualGeneratorButtons.length) {
+        projectManualGeneratorMessage = $('<p class="settings-helper-text project-manual-generator-message" aria-live="polite" role="status"></p>');
+        projectManualGeneratorMessage.hide();
+        projectManualGeneratorMessage.insertAfter(projectManualGeneratorButtons);
+    } else if (projectManualGenerator && projectManualGenerator.length) {
+        projectManualGeneratorMessage = $('<p class="settings-helper-text project-manual-generator-message" aria-live="polite" role="status"></p>');
+        projectManualGeneratorMessage.hide();
+        projectManualGenerator.append(projectManualGeneratorMessage);
+    }
+    if (projectManualGeneratorMessage && projectManualGeneratorMessage.length) {
+        setProjectManualGeneratorMessage(null, '');
+    }
+    if (projectManualCountInput && projectManualCountInput.length) {
+        projectManualCountInput.attr('max', MANUAL_GENERATOR_MAX_SEGMENTS);
+    }
+
+    const projectManualUiState = {
+        draftSegments: [],
+        dirty: false,
+        currentHash: '[]',
+        lastSavedHash: '[]',
+        lastRuntimeVersion: manualSegmentationState.version,
+        nextOrderToken: 1,
+        editing: null
+    };
+
+    function getManualDefaultDurationSeconds() {
+        return getManualDefaultDurationMinutesSetting() * 60;
+    }
+
+    function updateGeneratorDefaultFromSettings(options = {}) {
+        if (!projectManualDurationValue || !projectManualDurationValue.length) {
+            return;
+        }
+        const force = options && options.force === true;
+        const wasEdited = projectManualDurationValue.data('manual-generator-edited') === true;
+        if (!force && wasEdited) {
+            return;
+        }
+        const defaultMinutes = getManualDefaultDurationMinutesSetting();
+        projectManualDurationValue.val(defaultMinutes);
+        projectManualDurationValue.data('manual-generator-edited', false);
+        if (projectManualDurationUnit && projectManualDurationUnit.length) {
+            projectManualDurationUnit.val('minutes');
+            projectManualDurationUnit.data('previous-unit', 'minutes');
+        }
+    }
+
+    updateGeneratorDefaultFromSettings({ force: true });
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+        window.setTimeout(() => updateGeneratorDefaultFromSettings({ force: true }), 0);
+    }
+    refreshManualSegmentationProjectDataSnapshot();
+
+    if (projectManualDurationValue && projectManualDurationValue.length) {
+        projectManualDurationValue.on('input change', function() {
+            projectManualDurationValue.data('manual-generator-edited', true);
+        });
+    }
+
+    if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
+        manualDefaultDurationInput.on('change', function() {
+            const sanitized = sanitizeManualDefaultDurationMinutes(
+                $(this).val(),
+                defaultSettings.manualSegmentDefaultDurationMinutes
+            );
+            $(this).val(sanitized);
+            if (projectManualDurationValue && projectManualDurationValue.length) {
+                projectManualDurationValue.val(sanitized);
+                projectManualDurationValue.data('manual-generator-edited', false);
+                if (projectManualDurationUnit && projectManualDurationUnit.length) {
+                    projectManualDurationUnit.val('minutes');
+                    projectManualDurationUnit.data('previous-unit', 'minutes');
+                }
+            }
+            refreshManualSegmentationProjectDataSnapshot();
+        });
+    }
+
+    if (typeof document !== 'undefined') {
+        document.addEventListener('frzz:manual-default-duration-updated', event => {
+            if (event && event.detail && Number.isFinite(event.detail.value)) {
+                const normalized = sanitizeManualDefaultDurationMinutes(event.detail.value, getManualDefaultDurationMinutesSetting());
+                if (settings) {
+                    settings.manualSegmentDefaultDurationMinutes = normalized;
+                }
+            }
+            updateGeneratorDefaultFromSettings({ force: true });
+            refreshManualSegmentationProjectDataSnapshot();
+        });
+    }
+
+    function getManualSegmentDomId(segment) {
+        if (!segment) return '';
+        if (segment.uid && typeof segment.uid === 'string') {
+            return segment.uid;
+        }
+        if (!segment.__draftId) {
+            segment.__draftId = `draft:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+        }
+        return segment.__draftId;
+    }
+
+    function findManualDraftSegment(segmentId) {
+        if (!segmentId) return null;
+        return projectManualUiState.draftSegments.find(segment => getManualSegmentDomId(segment) === segmentId) || null;
+    }
+
+    function sortManualDraftSegments() {
+        projectManualUiState.draftSegments.sort((a, b) => {
+            const delta = sanitizeManualSegmentSeconds(a.startSeconds) - sanitizeManualSegmentSeconds(b.startSeconds);
+            if (Math.abs(delta) > 1e-3) {
+                return delta;
+            }
+            const orderA = typeof a.__orderToken === 'number' ? a.__orderToken : 0;
+            const orderB = typeof b.__orderToken === 'number' ? b.__orderToken : 0;
+            if (orderA !== orderB) {
+                return orderA - orderB;
+            }
+            const labelA = (a.label || '').toLowerCase();
+            const labelB = (b.label || '').toLowerCase();
+            return labelA.localeCompare(labelB, 'ru');
+        });
+        projectManualUiState.draftSegments.forEach((segment, index) => {
+            segment.ordinal = index;
+        });
+    }
+
+    function updateManualDraftDirtyState() {
+        const hash = computeManualSegmentsHash(projectManualUiState.draftSegments);
+        projectManualUiState.currentHash = hash;
+        projectManualUiState.dirty = hash !== projectManualUiState.lastSavedHash;
+    }
+
+    function updateProjectManualGeneratorButtons(hasSegments) {
+        const effective = typeof hasSegments === 'boolean' ? hasSegments : projectManualUiState.draftSegments.length > 0;
+        if (projectManualGeneratorButtons && projectManualGeneratorButtons.length) {
+            projectManualGeneratorButtons.find('.project-manual-action-empty').toggle(!effective);
+        }
+        if (projectManualAppendButton && projectManualAppendButton.length) {
+            projectManualAppendButton.toggle(effective);
+            projectManualAppendButton.prop('disabled', !effective);
+        }
+        if (projectManualReplaceButton && projectManualReplaceButton.length) {
+            projectManualReplaceButton.toggle(effective);
+            projectManualReplaceButton.prop('disabled', !effective);
+        }
+    }
+
+    function setProjectManualGeneratorMessage(kind, text) {
+        if (!projectManualGeneratorMessage || !projectManualGeneratorMessage.length) {
+            return;
+        }
+        const messageText = typeof text === 'string' ? text.trim() : '';
+        projectManualGeneratorMessage.removeClass('is-error is-success is-info');
+        if (!messageText) {
+            projectManualGeneratorMessage.text('').hide();
+            projectManualGeneratorMessage.removeAttr('data-kind');
+            return;
+        }
+        const normalizedKind = kind === 'error' ? 'error' : (kind === 'success' ? 'success' : 'info');
+        projectManualGeneratorMessage.text(messageText).show().attr('data-kind', normalizedKind);
+        projectManualGeneratorMessage.addClass(`is-${normalizedKind}`);
+    }
+
+    function markManualGeneratorFieldValidity(inputEl, isValid, message) {
+        if (!inputEl || !inputEl.length) {
+            return;
+        }
+        if (isValid) {
+            inputEl.removeClass('project-manual-generator-invalid');
+            inputEl.removeAttr('aria-invalid');
+            const previousTitle = inputEl.data('manualGeneratorPrevTitle');
+            if (previousTitle !== undefined) {
+                if (previousTitle && previousTitle !== '__cleared__') {
+                    inputEl.attr('title', previousTitle);
+                } else {
+                    inputEl.removeAttr('title');
+                }
+                inputEl.removeData('manualGeneratorPrevTitle');
+            }
+            return;
+        }
+        if (!inputEl.data('manualGeneratorPrevTitle')) {
+            const currentTitle = inputEl.attr('title');
+            inputEl.data('manualGeneratorPrevTitle', currentTitle ? currentTitle : '__cleared__');
+        }
+        inputEl.addClass('project-manual-generator-invalid');
+        inputEl.attr('aria-invalid', 'true');
+        if (typeof message === 'string' && message.trim()) {
+            inputEl.attr('title', message);
+        }
+    }
+
+    function clearManualGeneratorValidation() {
+        [projectManualStartTimeInput, projectManualDurationValue, projectManualStartIndexInput, projectManualCountInput].forEach(input => {
+            if (input && input.length) {
+                markManualGeneratorFieldValidity(input, true);
+            }
+        });
+    }
+
+    function getManualGeneratorTimelineEndSeconds() {
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            return null;
+        }
+        let maxEnd = 0;
+        for (let i = 0; i < subtitleData.length; i += 1) {
+            const line = subtitleData[i];
+            if (!line) continue;
+            const candidates = [
+                Number(line.end_time),
+                Number(line.end),
+                Number(line.endSeconds),
+                Number(line.end_seconds),
+                Number(line.endTime),
+                Number(line.endTimeSeconds)
+            ];
+            for (let j = 0; j < candidates.length; j += 1) {
+                const value = candidates[j];
+                if (Number.isFinite(value) && value > maxEnd) {
+                    maxEnd = value;
+                }
+            }
+        }
+        return maxEnd > 0 ? maxEnd : null;
+    }
+
+    function deriveManualGeneratorCount({ mode, existingSegments, startSeconds, durationSeconds }) {
+        const normalizedMode = mode === 'append' ? 'append' : 'replace';
+        const result = { count: 0, timelineEndSeconds: null };
+        const existing = Array.isArray(existingSegments) ? existingSegments : [];
+        if (normalizedMode === 'replace' && existing.length) {
+            result.count = existing.length;
+        }
+        if (!result.count) {
+            const primaryKind = determinePrimarySegmentKind(projectSegmentationInfo);
+            let autoSegments = [];
+            if (primaryKind === 'markers') {
+                autoSegments = Array.isArray(projectSegmentationInfo.markerSegments) ? projectSegmentationInfo.markerSegments : [];
+            } else if (primaryKind === 'video') {
+                autoSegments = Array.isArray(projectSegmentationInfo.videoSegments) ? projectSegmentationInfo.videoSegments : [];
+            }
+            if (autoSegments.length) {
+                result.count = autoSegments.length;
+            }
+        }
+        if (!result.count) {
+            const timelineEnd = getManualGeneratorTimelineEndSeconds();
+            if (Number.isFinite(timelineEnd) && Number.isFinite(durationSeconds) && durationSeconds > 0) {
+                const effectiveStart = Number.isFinite(startSeconds) ? startSeconds : 0;
+                const available = Math.max(0, timelineEnd - effectiveStart);
+                if (available > 0) {
+                    result.count = Math.max(1, Math.ceil(available / durationSeconds));
+                    result.timelineEndSeconds = timelineEnd;
+                }
+            }
+        }
+        if (!result.count) {
+            result.count = existing.length ? existing.length : 1;
+        }
+        result.count = Math.max(1, Math.min(MANUAL_GENERATOR_MAX_SEGMENTS, Math.round(result.count)));
+        return result;
+    }
+
+    function formatManualGeneratorLabel(mask, ordinal) {
+        const index = Math.max(1, Math.round(ordinal));
+        const ordinalString = String(index);
+        let template = typeof mask === 'string' ? mask.trim() : '';
+        if (!template) {
+            return `Сегмент ${ordinalString}`;
+        }
+        if (!template.includes('$N')) {
+            return `${template} ${ordinalString}`;
+        }
+        return template.replace(/\$N+/g, token => {
+            const width = Math.max(1, token.length - 1);
+            return width > 1 ? ordinalString.padStart(width, '0') : ordinalString;
+        });
+    }
+
+    function buildManualGeneratorSegments(params) {
+        const segments = [];
+        if (!params || !Number.isFinite(params.count) || params.count <= 0) {
+            return segments;
+        }
+        const total = Math.max(1, Math.floor(params.count));
+        const baseMs = Math.max(0, Math.round(Math.max(0, params.startSeconds || 0) * 1000));
+        const intervalMs = Math.max(1, Math.round(params.durationSeconds * 1000));
+        const alignToTimeline = Number.isFinite(params.timelineEndSeconds);
+        const timelineEndMs = alignToTimeline ? Math.max(baseMs, Math.round(params.timelineEndSeconds * 1000)) : null;
+        const startOrdinal = Number.isFinite(params.startIndex) && params.startIndex > 0
+            ? Math.max(1, Math.round(params.startIndex))
+            : 1;
+        const nameMask = typeof params.nameMask === 'string' ? params.nameMask : '';
+        for (let index = 0; index < total; index += 1) {
+            const startMs = baseMs + intervalMs * index;
+            let endMs = startMs + intervalMs;
+            if (alignToTimeline && index === total - 1 && timelineEndMs !== null) {
+                endMs = Math.max(startMs, timelineEndMs);
+            }
+            const startSeconds = sanitizeManualSegmentSeconds(startMs / 1000);
+            const endSeconds = sanitizeManualSegmentSeconds(endMs / 1000);
+            const ordinal = startOrdinal + index;
+            const label = params.generateNames ? formatManualGeneratorLabel(nameMask, ordinal) : '';
+            segments.push({
+                label,
+                startSeconds,
+                endSeconds,
+                hasExplicitEnd: true,
+                source: 'manual'
+            });
+        }
+        return segments;
+    }
+
+    function applyManualGeneratorSegments(segments, mode) {
+        if (!Array.isArray(segments) || !segments.length) {
+            return false;
+        }
+        const normalizedMode = mode === 'append' ? 'append' : 'replace';
+        if (normalizedMode === 'replace') {
+            projectManualUiState.draftSegments = [];
+            projectManualUiState.nextOrderToken = 1;
+        }
+        const target = projectManualUiState.draftSegments;
+        segments.forEach(segment => {
+            const startSeconds = sanitizeManualSegmentSeconds(segment && segment.startSeconds);
+            const endSecondsRaw = Number(segment && segment.endSeconds);
+            const endSeconds = Number.isFinite(endSecondsRaw)
+                ? sanitizeManualSegmentSeconds(Math.max(endSecondsRaw, startSeconds))
+                : startSeconds;
+            target.push({
+                uid: null,
+                label: segment && typeof segment.label === 'string' ? segment.label : '',
+                startSeconds,
+                endSeconds,
+                hasExplicitEnd: segment && segment.hasExplicitEnd === true,
+                source: 'manual',
+                ordinal: target.length,
+                __orderToken: projectManualUiState.nextOrderToken++
+            });
+        });
+        sortManualDraftSegments();
+        projectManualUiState.editing = null;
+        updateManualDraftDirtyState();
+        renderProjectManualTable();
+        return true;
+    }
+
+    function collectManualGeneratorParameters(mode) {
+        const normalizedMode = mode === 'append' ? 'append' : 'replace';
+        const existingSegments = projectManualUiState.draftSegments.slice();
+        const fail = (field, message) => {
+            if (field && field.length) {
+                markManualGeneratorFieldValidity(field, false, message);
+            }
+            return { ok: false, errorMessage: message, invalidField: field };
+        };
+
+        let durationSeconds = NaN;
+        const durationInputAvailable = projectManualDurationValue && projectManualDurationValue.length;
+        let durationUnit = projectManualDurationUnit && projectManualDurationUnit.length ? (projectManualDurationUnit.val() || 'minutes') : 'minutes';
+        let durationRaw = durationInputAvailable ? projectManualDurationValue.val() : '';
+        if (durationRaw === '' || durationRaw === null) {
+            const fallbackMinutes = getManualDefaultDurationMinutesSetting();
+            durationRaw = fallbackMinutes;
+            if (durationInputAvailable) {
+                projectManualDurationValue.val(fallbackMinutes);
+                projectManualDurationValue.data('manual-generator-edited', false);
+                if (projectManualDurationUnit && projectManualDurationUnit.length) {
+                    projectManualDurationUnit.val('minutes');
+                    projectManualDurationUnit.data('previous-unit', 'minutes');
+                    durationUnit = 'minutes';
+                }
+            }
+        }
+        const durationNumeric = Number(durationRaw);
+        if (!Number.isFinite(durationNumeric) || durationNumeric <= 0) {
+            return fail(projectManualDurationValue, 'Укажите положительную длительность сегмента.');
+        }
+        const multiplier = durationUnit === 'hours' ? 3600 : 60;
+        durationSeconds = sanitizeManualSegmentSeconds(durationNumeric * multiplier);
+        if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+            return fail(projectManualDurationValue, 'Некорректная длительность сегмента.');
+        }
+        markManualGeneratorFieldValidity(projectManualDurationValue, true);
+
+        let startSeconds = null;
+        if (projectManualStartTimeInput && projectManualStartTimeInput.length) {
+            const rawStart = (projectManualStartTimeInput.val() || '').toString().trim();
+            if (rawStart) {
+                const parsed = parseManualSegmentTimeInput(rawStart);
+                if (parsed === null) {
+                    return fail(projectManualStartTimeInput, 'Введите время в формате 00:00:00.000 или секунды.');
+                }
+                startSeconds = sanitizeManualSegmentSeconds(parsed);
+                projectManualStartTimeInput.val(formatManualSegmentStartSeconds(startSeconds, 3));
+            }
+            markManualGeneratorFieldValidity(projectManualStartTimeInput, true);
+        }
+        if (startSeconds === null) {
+            if (normalizedMode === 'append' && existingSegments.length) {
+                const lastSegment = existingSegments[existingSegments.length - 1];
+                const lastStart = lastSegment ? sanitizeManualSegmentSeconds(lastSegment.startSeconds) : 0;
+                const explicitEnd = lastSegment && lastSegment.hasExplicitEnd === true && Number.isFinite(lastSegment.endSeconds)
+                    ? sanitizeManualSegmentSeconds(Math.max(lastSegment.endSeconds, lastStart))
+                    : null;
+                startSeconds = explicitEnd !== null ? explicitEnd : sanitizeManualSegmentSeconds(lastStart + durationSeconds);
+            } else {
+                startSeconds = 0;
+            }
+            if (projectManualStartTimeInput && projectManualStartTimeInput.length) {
+                projectManualStartTimeInput.val(formatManualSegmentStartSeconds(startSeconds, 3));
+            }
+        }
+
+        let startIndex = 1;
+        if (projectManualStartIndexInput && projectManualStartIndexInput.length) {
+            const rawIndex = projectManualStartIndexInput.val();
+            const numericIndex = Number(rawIndex);
+            if (Number.isFinite(numericIndex) && numericIndex > 0) {
+                startIndex = Math.max(1, Math.round(numericIndex));
+            } else {
+                startIndex = normalizedMode === 'append'
+                    ? Math.max(1, existingSegments.length + 1)
+                    : 1;
+            }
+            projectManualStartIndexInput.val(startIndex);
+            markManualGeneratorFieldValidity(projectManualStartIndexInput, true);
+        } else if (normalizedMode === 'append' && existingSegments.length) {
+            startIndex = existingSegments.length + 1;
+        }
+
+        let count = NaN;
+        let timelineEndSeconds = null;
+        if (projectManualCountInput && projectManualCountInput.length) {
+            const rawCount = projectManualCountInput.val();
+            const numericCount = Number(rawCount);
+            if (Number.isFinite(numericCount) && numericCount > 0) {
+                count = Math.floor(numericCount);
+            }
+        }
+        if (!Number.isFinite(count) || count <= 0) {
+            const derived = deriveManualGeneratorCount({
+                mode: normalizedMode,
+                existingSegments,
+                startSeconds,
+                durationSeconds
+            });
+            count = derived.count;
+            timelineEndSeconds = derived.timelineEndSeconds;
+            if (projectManualCountInput && projectManualCountInput.length && Number.isFinite(count) && count > 0) {
+                projectManualCountInput.val(count);
+            }
+        }
+        if (!Number.isFinite(count) || count <= 0) {
+            return fail(projectManualCountInput, 'Укажите количество сегментов.');
+        }
+        if (count > MANUAL_GENERATOR_MAX_SEGMENTS) {
+            return fail(projectManualCountInput, `Максимум ${MANUAL_GENERATOR_MAX_SEGMENTS} сегментов за один раз.`);
+        }
+        if (projectManualCountInput && projectManualCountInput.length) {
+            markManualGeneratorFieldValidity(projectManualCountInput, true);
+        }
+
+        const generateNames = !projectManualGenerateNamesToggle.length || projectManualGenerateNamesToggle.is(':checked');
+        let nameMask = '';
+        if (generateNames) {
+            nameMask = projectManualNameMaskInput && projectManualNameMaskInput.length
+                ? (projectManualNameMaskInput.val() || '').toString().trim()
+                : '';
+            if (!nameMask) {
+                nameMask = 'Сегмент $N';
+                if (projectManualNameMaskInput && projectManualNameMaskInput.length) {
+                    projectManualNameMaskInput.val(nameMask);
+                }
+            }
+        }
+
+        return {
+            ok: true,
+            data: {
+                mode: normalizedMode,
+                startSeconds,
+                durationSeconds,
+                count,
+                startIndex,
+                generateNames,
+                nameMask,
+                timelineEndSeconds
+            }
+        };
+    }
+
+    function runManualGenerator(mode) {
+        const normalizedMode = mode === 'append' ? 'append' : 'replace';
+        clearManualGeneratorValidation();
+        setProjectManualGeneratorMessage(null, '');
+        const paramsResult = collectManualGeneratorParameters(normalizedMode);
+        if (!paramsResult || paramsResult.ok !== true) {
+            const message = paramsResult && paramsResult.errorMessage ? paramsResult.errorMessage : 'Не удалось подготовить параметры генератора.';
+            setProjectManualGeneratorMessage('error', message);
+            if (paramsResult && paramsResult.invalidField && paramsResult.invalidField.length) {
+                paramsResult.invalidField.trigger('focus');
+            }
+            return false;
+        }
+        const params = paramsResult.data;
+        const segments = buildManualGeneratorSegments({
+            startSeconds: params.startSeconds,
+            durationSeconds: params.durationSeconds,
+            count: params.count,
+            startIndex: params.startIndex,
+            generateNames: params.generateNames,
+            nameMask: params.nameMask,
+            timelineEndSeconds: params.timelineEndSeconds
+        });
+        if (!segments.length) {
+            setProjectManualGeneratorMessage('error', 'Генератор не создал ни одного сегмента.');
+            return false;
+        }
+        const hadSegments = projectManualUiState.draftSegments.length > 0;
+        const applied = applyManualGeneratorSegments(segments, normalizedMode);
+        if (!applied) {
+            setProjectManualGeneratorMessage('error', 'Не удалось применить сгенерированные сегменты.');
+            return false;
+        }
+        let successText;
+        if (normalizedMode === 'append') {
+            successText = `Добавлено ${segments.length} сегмент(ов). Не забудьте сохранить изменения.`;
+        } else if (hadSegments) {
+            successText = `Список заменён ${segments.length} сегментами. Не забудьте сохранить изменения.`;
+        } else {
+            successText = `Создано ${segments.length} сегмент(ов). Не забудьте сохранить изменения.`;
+        }
+        setProjectManualGeneratorMessage('success', successText);
+        return true;
+    }
+
+    function updateProjectManualUiControls() {
+        const hasSegments = projectManualUiState.draftSegments.length > 0;
+        if (projectManualEmptyState && projectManualEmptyState.length) {
+            projectManualEmptyState.toggle(!hasSegments);
+        }
+        if (projectManualCurrentSection && projectManualCurrentSection.length) {
+            projectManualCurrentSection.toggleClass('project-manual-has-entries', hasSegments);
+        }
+        if (projectManualSaveButton && projectManualSaveButton.length) {
+            projectManualSaveButton.prop('disabled', !projectManualUiState.dirty);
+        }
+        if (projectManualClearButton && projectManualClearButton.length) {
+            projectManualClearButton.prop('disabled', !hasSegments);
+        }
+        if (projectManualResetButton && projectManualResetButton.length) {
+            const shouldShowReset = projectManualUiState.dirty;
+            projectManualResetButton.prop('disabled', !shouldShowReset);
+            projectManualResetButton.toggle(shouldShowReset);
+        }
+        updateProjectManualGeneratorButtons(hasSegments);
+    }
+
+    function focusManualEditor() {
+        const editing = projectManualUiState.editing;
+        if (!editing || !editing.segmentId || !editing.field || !editing.focusPending) {
+            return;
+        }
+        const selector = `.project-manual-editor[data-segment-id="${editing.segmentId}"][data-field="${editing.field}"]`;
+        const inputEl = projectManualTableBody && projectManualTableBody.length ? projectManualTableBody.find(selector).first() : null;
+        if (!inputEl || !inputEl.length) {
+            return;
+        }
+        editing.focusPending = false;
+        const focusFn = () => {
+            inputEl.trigger('focus');
+            const domNode = inputEl.get(0);
+            if (domNode && typeof domNode.setSelectionRange === 'function') {
+                const value = inputEl.val();
+                const length = typeof value === 'string' ? value.length : 0;
+                domNode.setSelectionRange(0, length);
+            }
+        };
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(() => window.requestAnimationFrame(focusFn));
+        } else {
+            setTimeout(focusFn, 0);
+        }
+    }
+
+    function renderProjectManualTable() {
+        if (!projectManualTableBody || !projectManualTableBody.length) {
+            updateProjectManualUiControls();
+            return;
+        }
+        projectManualTableBody.empty();
+        const editing = projectManualUiState.editing;
+        projectManualUiState.draftSegments.forEach((segment, index) => {
+            const segmentId = getManualSegmentDomId(segment);
+            const row = $('<tr>').attr('data-segment-id', segmentId);
+            if (editing && editing.segmentId === segmentId) {
+                row.addClass('project-manual-table-row-editing');
+            }
+            row.append(
+                $('<td>').addClass('project-manual-col-ordinal').text(index + 1)
+            );
+
+            const nameCell = $('<td>');
+            if (editing && editing.segmentId === segmentId && editing.field === 'label') {
+                const input = $('<input type="text" class="project-manual-editor project-manual-editor-label" autocomplete="off">')
+                    .attr('data-segment-id', segmentId)
+                    .attr('data-field', 'label')
+                    .val(segment.label || '');
+                nameCell.append(input);
+            } else {
+                const button = $('<button type="button" class="project-manual-editable">')
+                    .attr('data-segment-id', segmentId)
+                    .attr('data-field', 'label')
+                    .attr('title', 'Редактировать название')
+                    .text(getManualSegmentDisplayName(segment, index));
+                nameCell.append(button);
+            }
+            row.append(nameCell);
+
+            const timeCell = $('<td>').addClass('project-manual-col-time');
+            const formattedTime = formatManualSegmentStartSeconds(segment.startSeconds, 3);
+            if (editing && editing.segmentId === segmentId && editing.field === 'startSeconds') {
+                const input = $('<input type="text" class="project-manual-editor project-manual-editor-time" inputmode="decimal" autocomplete="off">')
+                    .attr('data-segment-id', segmentId)
+                    .attr('data-field', 'startSeconds')
+                    .attr('placeholder', '00:00:00.000')
+                    .val(formattedTime);
+                timeCell.append(input);
+            } else {
+                const button = $('<button type="button" class="project-manual-editable">')
+                    .attr('data-segment-id', segmentId)
+                    .attr('data-field', 'startSeconds')
+                    .attr('title', 'Редактировать время начала')
+                    .text(formattedTime);
+                timeCell.append(button);
+            }
+            row.append(timeCell);
+
+            const deleteCell = $('<td>').addClass('project-manual-actions-col');
+            const deleteButton = $('<button type="button" class="project-manual-delete-button" aria-label="Удалить сегмент" title="Удалить сегмент">')
+                .attr('data-segment-id', segmentId)
+                .append('<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-role-reset" xlink:href="icons.svg#icon-role-reset"></use></svg>');
+            deleteCell.append(deleteButton);
+            row.append(deleteCell);
+
+            projectManualTableBody.append(row);
+        });
+        updateProjectManualUiControls();
+        focusManualEditor();
+    }
+
+    function syncProjectManualDraftFromRuntime(event = {}) {
+        const runtimeVersion = manualSegmentationState.version;
+        const reason = event && event.reason ? String(event.reason) : '';
+        const allowOverride = reason === 'manual_segments_save';
+        if (!event.force && !allowOverride && projectManualUiState.dirty && runtimeVersion !== projectManualUiState.lastRuntimeVersion) {
+            return;
+        }
+        const runtimeSegments = getManualSegmentationSegments();
+        projectManualUiState.draftSegments = runtimeSegments.map((segment, index) => {
+            const sanitizedStart = sanitizeManualSegmentSeconds(segment && segment.startSeconds);
+            const explicitEnd = segment && segment.hasExplicitEnd === true;
+            let sanitizedEnd = null;
+            if (explicitEnd && Number.isFinite(segment && segment.endSeconds)) {
+                sanitizedEnd = sanitizeManualSegmentSeconds(Math.max(segment.endSeconds, sanitizedStart));
+            }
+            const clone = {
+                uid: segment && typeof segment.uid === 'string' ? segment.uid : null,
+                label: segment && typeof segment.label === 'string' ? segment.label : '',
+                startSeconds: sanitizedStart,
+                endSeconds: sanitizedEnd,
+                hasExplicitEnd: explicitEnd,
+                source: segment && segment.source ? segment.source : 'manual',
+                ordinal: index,
+                __orderToken: index + 1
+            };
+            if (!clone.uid) {
+                clone.__draftId = `draft:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+            }
+            return clone;
+        });
+        projectManualUiState.nextOrderToken = projectManualUiState.draftSegments.length + 1;
+        sortManualDraftSegments();
+        projectManualUiState.lastRuntimeVersion = runtimeVersion;
+        projectManualUiState.lastSavedHash = computeManualSegmentsHash(runtimeSegments);
+        projectManualUiState.editing = null;
+        updateManualDraftDirtyState();
+        renderProjectManualTable();
+        setProjectManualGeneratorMessage(null, '');
+        clearManualGeneratorValidation();
+    }
+
+    function beginManualSegmentEdit(segmentId, field) {
+        if (!segmentId || !field) return;
+        const segment = findManualDraftSegment(segmentId);
+        if (!segment) return;
+        const current = projectManualUiState.editing;
+        if (current && current.segmentId === segmentId && current.field === field) {
+            return;
+        }
+        projectManualUiState.editing = { segmentId, field, focusPending: true };
+        renderProjectManualTable();
+    }
+
+    function finalizeManualSegmentEdit(inputEl, options = {}) {
+        if (!inputEl || !inputEl.length) return;
+        const segmentId = inputEl.data('segmentId');
+        const field = inputEl.data('field');
+        const editing = projectManualUiState.editing;
+        if (!editing || editing.segmentId !== segmentId || editing.field !== field) {
+            return;
+        }
+        const segment = findManualDraftSegment(segmentId);
+        if (!segment) {
+            projectManualUiState.editing = null;
+            renderProjectManualTable();
+            return;
+        }
+        const rawValue = inputEl.val();
+        if (field === 'label') {
+            const trimmed = typeof rawValue === 'string' ? rawValue.trim() : '';
+            if (trimmed !== segment.label) {
+                segment.label = trimmed;
+                sortManualDraftSegments();
+                updateManualDraftDirtyState();
+            }
+            projectManualUiState.editing = null;
+            renderProjectManualTable();
+            return;
+        }
+        if (field === 'startSeconds') {
+            const parsed = typeof rawValue === 'string' ? parseManualSegmentTimeInput(rawValue) : null;
+            if (parsed === null) {
+                inputEl.addClass('project-manual-editor-invalid');
+                if (options && options.focusOnError !== false) {
+                    setTimeout(() => inputEl.trigger('focus'), 0);
+                }
+                return;
+            }
+            inputEl.removeClass('project-manual-editor-invalid');
+            const sanitized = sanitizeManualSegmentSeconds(parsed);
+            if (!manualSegmentTimesEqual(segment.startSeconds, sanitized)) {
+                segment.startSeconds = sanitized;
+                if (segment.hasExplicitEnd === true && Number.isFinite(segment.endSeconds) && segment.endSeconds < sanitized) {
+                    segment.endSeconds = sanitized;
+                }
+                sortManualDraftSegments();
+                updateManualDraftDirtyState();
+            }
+            projectManualUiState.editing = null;
+            renderProjectManualTable();
+        }
+    }
+
+    function cancelManualSegmentEdit() {
+        if (!projectManualUiState.editing) {
+            return;
+        }
+        projectManualUiState.editing = null;
+        renderProjectManualTable();
+    }
+
+    function addManualSegment() {
+        const segments = projectManualUiState.draftSegments;
+        const lastSegment = segments.length ? segments[segments.length - 1] : null;
+        const intervalSeconds = getManualDefaultDurationSeconds();
+        const defaultStart = lastSegment ? sanitizeManualSegmentSeconds(lastSegment.startSeconds + intervalSeconds) : 0;
+        const newSegment = {
+            uid: null,
+            label: '',
+            startSeconds: defaultStart,
+            endSeconds: null,
+            hasExplicitEnd: false,
+            source: 'manual',
+            ordinal: segments.length,
+            __orderToken: projectManualUiState.nextOrderToken++
+        };
+        newSegment.__draftId = `draft:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+        segments.push(newSegment);
+        sortManualDraftSegments();
+        updateManualDraftDirtyState();
+        projectManualUiState.editing = { segmentId: getManualSegmentDomId(newSegment), field: 'label', focusPending: true };
+        renderProjectManualTable();
+    }
+
+    function removeManualSegment(segmentId) {
+        if (!segmentId) return;
+        const segments = projectManualUiState.draftSegments;
+        const index = segments.findIndex(segment => getManualSegmentDomId(segment) === segmentId);
+        if (index === -1) return;
+        segments.splice(index, 1);
+        projectManualUiState.editing = null;
+        sortManualDraftSegments();
+        updateManualDraftDirtyState();
+        renderProjectManualTable();
+    }
+
+    function clearManualDraftSegments() {
+        if (!projectManualUiState.draftSegments.length) {
+            return;
+        }
+        projectManualUiState.draftSegments.length = 0;
+        projectManualUiState.nextOrderToken = 1;
+        projectManualUiState.editing = null;
+        updateManualDraftDirtyState();
+        renderProjectManualTable();
+        setProjectManualGeneratorMessage(null, '');
+    }
+
+    function commitProjectManualSegments() {
+        if (!projectManualUiState.dirty) {
+            return;
+        }
+        const payload = projectManualUiState.draftSegments.map(segment => ({
+            label: segment.label || '',
+            startSeconds: sanitizeManualSegmentSeconds(segment.startSeconds),
+            endSeconds: segment && segment.hasExplicitEnd === true && Number.isFinite(segment.endSeconds)
+                ? sanitizeManualSegmentSeconds(Math.max(segment.endSeconds, segment.startSeconds))
+                : null
+        }));
+        setManualSegmentationSegments(payload, { reason: 'manual_segments_save' });
+        saveRoles('manual_segments_save');
+    }
+
+    if (projectManualTableBody && projectManualTableBody.length) {
+        projectManualTableBody.on('click', '.project-manual-editable', function(event) {
+            event.preventDefault();
+            const segmentId = $(this).data('segmentId');
+            const field = $(this).data('field');
+            beginManualSegmentEdit(segmentId, field);
+        });
+        projectManualTableBody.on('keydown', '.project-manual-editor', function(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                finalizeManualSegmentEdit($(this));
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelManualSegmentEdit();
+            }
+        });
+        projectManualTableBody.on('blur', '.project-manual-editor', function() {
+            finalizeManualSegmentEdit($(this), { focusOnError: true });
+        });
+        projectManualTableBody.on('click', '.project-manual-delete-button', function(event) {
+            event.preventDefault();
+            const segmentId = $(this).data('segmentId');
+            removeManualSegment(segmentId);
+        });
+    }
+
+    if (projectManualAddButton && projectManualAddButton.length) {
+        projectManualAddButton.on('click', function(event) {
+            event.preventDefault();
+            addManualSegment();
+        });
+    }
+    if (projectManualSaveButton && projectManualSaveButton.length) {
+        projectManualSaveButton.on('click', function(event) {
+            event.preventDefault();
+            commitProjectManualSegments();
+        });
+    }
+    if (projectManualClearButton && projectManualClearButton.length) {
+        projectManualClearButton.on('click', function(event) {
+            event.preventDefault();
+            clearManualDraftSegments();
+        });
+    }
+    if (projectManualResetButton && projectManualResetButton.length) {
+        projectManualResetButton.on('click', function(event) {
+            event.preventDefault();
+            syncProjectManualDraftFromRuntime({ reason: 'manual_segments_reset', force: true });
+        });
+    }
+
+    if (projectManualGenerateButton && projectManualGenerateButton.length) {
+        projectManualGenerateButton.on('click', function(event) {
+            event.preventDefault();
+            runManualGenerator('replace');
+        });
+    }
+    if (projectManualAppendButton && projectManualAppendButton.length) {
+        projectManualAppendButton.on('click', function(event) {
+            event.preventDefault();
+            runManualGenerator('append');
+        });
+    }
+    if (projectManualReplaceButton && projectManualReplaceButton.length) {
+        projectManualReplaceButton.on('click', function(event) {
+            event.preventDefault();
+            runManualGenerator('replace');
+        });
+    }
+
+    [projectManualStartTimeInput, projectManualDurationValue, projectManualStartIndexInput, projectManualCountInput].forEach(input => {
+        if (input && input.length) {
+            input.on('input change', () => {
+                markManualGeneratorFieldValidity(input, true);
+                setProjectManualGeneratorMessage(null, '');
+            });
+        }
+    });
+
+    addManualSegmentationListener(syncProjectManualDraftFromRuntime);
+    syncProjectManualDraftFromRuntime({ reason: 'initial', force: true });
+    $(window).on('unload.manualSegmentation', () => {
+        removeManualSegmentationListener(syncProjectManualDraftFromRuntime);
+    });
+
     let projectDataReady = false;
     let projectDataRetryTimer = null;
     let projectDataRetryAttempt = 0;
@@ -2555,6 +3973,9 @@ $(document).ready(function() {
     const segmentationAutodetectTile = $('#segmentation-autodetect-tile');
     const segmentationDisplayTile = $('#segmentation-display-tile');
     const segmentationManualToggle = $('#segmentation-manual-enabled');
+    manualDefaultDurationInput = manualDefaultDurationInput && manualDefaultDurationInput.length
+        ? manualDefaultDurationInput
+        : $('#manual-segment-default-duration-minutes');
     const segmentationModeSelect = $('#segmentation-autodetect-mode');
     const segmentationVideoKeywordsWrapper = $('#segmentation-video-keywords-wrapper');
     const segmentationVideoKeywordsInput = $('#segmentation-auto-video-keywords');
@@ -3751,6 +5172,14 @@ $(document).ready(function() {
             changed = true;
         } else {
             base.segmentationManualEnabled = segmentationManualEnabled;
+        }
+        const sanitizedManualDefaultDuration = sanitizeManualDefaultDurationMinutes(
+            base.manualSegmentDefaultDurationMinutes,
+            defaultSettings.manualSegmentDefaultDurationMinutes
+        );
+        if (sanitizedManualDefaultDuration !== base.manualSegmentDefaultDurationMinutes) {
+            base.manualSegmentDefaultDurationMinutes = sanitizedManualDefaultDuration;
+            changed = true;
         }
         const sanitizedSegmentationKeywords = sanitizeSegmentationKeywordList(
             base.segmentationAutoVideoKeywords,
@@ -6821,6 +8250,25 @@ $(document).ready(function() {
             settings.segmentationManualEnabled = manualSegmentationEnabled;
             setManualSegmentationEnabled(manualSegmentationEnabled, { reason: 'settings_apply' });
 
+            const manualDefaultDuration = sanitizeManualDefaultDurationMinutes(
+                tempSettings.manualSegmentDefaultDurationMinutes,
+                defaultSettings.manualSegmentDefaultDurationMinutes
+            );
+            tempSettings.manualSegmentDefaultDurationMinutes = manualDefaultDuration;
+            settings.manualSegmentDefaultDurationMinutes = manualDefaultDuration;
+            if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
+                manualDefaultDurationInput.val(manualDefaultDuration);
+            }
+            if (typeof document !== 'undefined') {
+                try {
+                    document.dispatchEvent(new CustomEvent('frzz:manual-default-duration-updated', {
+                        detail: { value: manualDefaultDuration }
+                    }));
+                } catch (err) {
+                    console.warn('[Prompter][manualDuration] event dispatch failed', err);
+                }
+            }
+
             const sanitizedProgressBarMode = sanitizeProgressBarMode(
                 tempSettings.progressBarMode,
                 settings.progressBarMode || defaultSettings.progressBarMode
@@ -7166,6 +8614,14 @@ $(document).ready(function() {
         }
         if (segmentationManualToggle && segmentationManualToggle.length) {
             segmentationManualToggle.prop('checked', s.segmentationManualEnabled === true);
+        }
+        if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
+            manualDefaultDurationInput.val(
+                sanitizeManualDefaultDurationMinutes(
+                    s.manualSegmentDefaultDurationMinutes,
+                    defaultSettings.manualSegmentDefaultDurationMinutes
+                )
+            );
         }
         setManualSegmentationEnabled(s.segmentationManualEnabled === true, { reason: 'settings_ui_sync', refresh: false, force: true });
         updateProjectSettingsButtonVisibility({ reason: 'settings_ui_sync' });
@@ -7704,14 +9160,42 @@ $(document).ready(function() {
             if (Object.keys(filtersSnapshot).length > 0) {
                 projectSnapshot.filters = filtersSnapshot;
             }
+            const manualSegmentationSnapshot = buildManualSegmentationProjectDataEntry();
+            const manualSegmentsForSave = manualSegmentationSnapshot
+                ? manualSegmentationSnapshot.segments.map(segment => ({
+                    label: segment.label,
+                    startSeconds: segment.startSeconds,
+                    endSeconds: segment.endSeconds,
+                    hasExplicitEnd: segment.hasExplicitEnd,
+                    ordinal: segment.ordinal,
+                    uid: segment.uid
+                }))
+                : [];
+            projectSnapshot.manualSegments = manualSegmentsForSave;
 
             const rolesPayload = {
                 projectData: [projectSnapshot]
             };
+            console.debug('[Prompter][roles][saveRoles] payload snapshot', {
+                manualSegmentation: manualSegmentationSnapshot,
+                manualSegmentsCount: manualSegmentsForSave.length
+            });
             const jsonPretty = JSON.stringify(rolesPayload, null, 2);
+            try {
+                updateProjectDataCacheWithRolesSnapshot(jsonPretty, manualSegmentsForSave);
+            } catch (cacheErr) {
+                console.warn('[Prompter][roles][saveRoles] cache sync failed', cacheErr);
+            }
             const b64url = '__B64__' + rolesToBase64Url(jsonPretty);
             const parts = chunkString(b64url, ROLES_CHUNK_SIZE);
-            console.debug('[Prompter][roles][saveRoles] encoded', { encoded_len: b64url.length, decoded_len: jsonPretty.length, chunks: parts.length, reason: reason || 'unspecified' });
+            console.debug('[Prompter][roles][saveRoles] encoded', {
+                encoded_len: b64url.length,
+                decoded_len: jsonPretty.length,
+                chunks: parts.length,
+                manualSegments: manualSegmentsForSave.length,
+                manualSegmentationEnabled: manualSegmentationSnapshot ? manualSegmentationSnapshot.enabled : false,
+                reason: reason || 'unspecified'
+            });
             rolesSaveInFlight = true;
             rolesSaveStartedAt = performance.now();
             rolesStatusRetryCount = 0;
@@ -8239,6 +9723,26 @@ $(document).ready(function() {
             }
 
             const projectDataMap = mergeDataArray(parsed.projectData);
+            let manualSegmentationSection = projectDataMap.manualSegmentation;
+            if (!manualSegmentationSection && parsed.manualSegmentation && typeof parsed.manualSegmentation === 'object') {
+                manualSegmentationSection = parsed.manualSegmentation;
+            }
+            let manualSegmentsLegacy = Array.isArray(projectDataMap.manualSegments) ? projectDataMap.manualSegments : null;
+            if (!manualSegmentsLegacy && Array.isArray(parsed.manualSegments)) {
+                manualSegmentsLegacy = parsed.manualSegments;
+            }
+            let manualSegmentationApplied = false;
+            if (manualSegmentationSection && typeof manualSegmentationSection === 'object') {
+                const applyInfo = applyManualSegmentationProjectDataSection(manualSegmentationSection, { reason: 'roles_project_data' });
+                manualSegmentationApplied = applyInfo && applyInfo.applied === true;
+            } else if (Array.isArray(manualSegmentsLegacy)) {
+                const legacyInfo = applyManualSegmentsFromProjectData(manualSegmentsLegacy, { reason: 'roles_project_data_legacy' });
+                manualSegmentationApplied = legacyInfo && legacyInfo.applied === true;
+                if (manualSegmentationApplied) {
+                    refreshManualSegmentationProjectDataSnapshot();
+                    setManualSegmentationEnabled(true, { reason: 'roles_project_data_legacy' });
+                }
+            }
             const settingsDataMap = mergeDataArray(parsed.settingsData);
             const templatesData = Array.isArray(parsed.templatesData) ? parsed.templatesData : [];
 
@@ -8299,6 +9803,7 @@ $(document).ready(function() {
             const hasMappingText = mappingText.trim().length > 0;
             rolesLoaded = mappedRolesCount > 0 || actorColorsCount > 0 || hasMappingText;
 
+            const manualSegmentsCount = getManualSegmentationSegments().length;
             console.info('[Prompter][roles][integrateLoadedRoles] parsed', {
                 hasMappingText,
                 mappedRoles: mappedRolesCount,
@@ -8309,6 +9814,8 @@ $(document).ready(function() {
                     soloActors: settings.filterSoloActors.length,
                     muteActors: settings.filterMuteActors.length
                 },
+                manualSegmentationApplied,
+                manualSegments: manualSegmentsCount,
                 structured: {
                     projectEntries: Array.isArray(parsed.projectData) ? parsed.projectData.length : (Object.keys(projectDataMap).length > 0 ? 1 : 0),
                     settingsEntries: Array.isArray(parsed.settingsData) ? parsed.settingsData.length : (Object.keys(settingsDataMap).length > 0 ? 1 : 0),

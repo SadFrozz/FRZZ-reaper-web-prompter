@@ -258,13 +258,17 @@
                 <fieldset class="fieldset-collapsible expanded" id="segmentation-settings-fieldset">
                     <legend>Сегментирование</legend>
                     <div class="settings-tile-grid segmentation-settings-tiles">
-                        <div class="settings-tile" id="segmentation-manual-tile">
-                            <div class="setting-item">
-                                <label for="segmentation-manual-enabled">Ручной режим</label>
-                                <input type="checkbox" id="segmentation-manual-enabled">
+                            <div class="settings-tile" id="segmentation-manual-tile">
+                                <div class="setting-item">
+                                    <label for="segmentation-manual-enabled">Ручной режим</label>
+                                    <input type="checkbox" id="segmentation-manual-enabled">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="manual-segment-default-duration-minutes">Длительность сегмента по умолчанию (минуты)</label>
+                                    <input type="number" id="manual-segment-default-duration-minutes" min="1" value="60">
+                                </div>
+                                <p class="settings-helper-text">При наличии ручных сегментов они заменяют автоопределение.</p>
                             </div>
-                            <p class="settings-helper-text">Автоопределение используется, если ручные сегменты не заданы.</p>
-                        </div>
                         <div class="settings-tile" id="segmentation-autodetect-tile">
                             <div class="setting-item-vertical">
                                 <label for="segmentation-autodetect-mode">Автоопределение</label>
@@ -613,6 +617,81 @@
             <div class="settings-body project-settings-body" id="project-settings-body">
                 <fieldset class="project-settings-section" id="project-settings-manual-fieldset">
                     <legend>Ручное сегментирование</legend>
+                    <section class="project-manual-section project-manual-current" id="project-manual-current-section" aria-live="polite">
+                        <header class="project-manual-section-header">
+                            <h3 class="project-manual-section-title">Текущие сегменты</h3>
+                            <button type="button" class="button-secondary" id="project-manual-add-button">Добавить сегмент</button>
+                        </header>
+                        <div class="project-manual-table-wrapper">
+                            <table class="project-manual-table" id="project-manual-table" aria-describedby="project-manual-current-empty">
+                                <thead>
+                                    <tr>
+                                        <th scope="col" class="project-manual-col-ordinal">#</th>
+                                        <th scope="col">Название сегмента</th>
+                                        <th scope="col" class="project-manual-col-time">Начало (чч:мм:сс.мс)</th>
+                                        <th scope="col" class="project-manual-actions-col"><span class="visually-hidden">Действия</span></th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                            <div class="project-manual-empty" id="project-manual-current-empty">Сегменты, добавленные вручную, отсутствуют. Добавьте их или воспользуйтесь генератором ниже.</div>
+                        </div>
+                    </section>
+                    <section class="project-manual-section" id="project-manual-generate-section">
+                        <button type="button" class="project-manual-toggle" id="project-manual-generate-toggle" aria-expanded="false" aria-controls="project-manual-generator">
+                            <span class="project-manual-toggle-label">Сгенерировать сегменты</span>
+                            <svg class="icon-svg project-manual-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <use href="icons.svg#icon-chevron-down" xlink:href="icons.svg#icon-chevron-down"></use>
+                            </svg>
+                        </button>
+                        <div class="project-manual-generator is-hidden" id="project-manual-generator" aria-hidden="true">
+                            <div class="project-manual-generator-grid">
+                                <div class="setting-item">
+                                    <label for="project-manual-start-time">Начало первого сегмента</label>
+                                    <input type="text" id="project-manual-start-time" placeholder="00:00:00.000">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="project-manual-start-index">Стартовый номер</label>
+                                    <input type="number" id="project-manual-start-index" min="1" value="1">
+                                </div>
+                                <div class="setting-item">
+                                    <label for="project-manual-count">Количество</label>
+                                    <input type="number" id="project-manual-count" min="1" placeholder="Авто">
+                                </div>
+                                <div class="setting-item project-manual-duration-row">
+                                    <label for="project-manual-duration-value">Длина сегмента</label>
+                                    <div class="project-manual-duration-controls">
+                                        <input type="number" id="project-manual-duration-value" min="1" value="60">
+                                        <select id="project-manual-duration-unit">
+                                            <option value="minutes" selected>Минуты</option>
+                                            <option value="hours">Часы</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="setting-item project-manual-toggle-row">
+                                    <label for="project-manual-generate-names">Генерировать названия</label>
+                                    <input type="checkbox" id="project-manual-generate-names" checked>
+                                </div>
+                                <div class="setting-item project-manual-mask-row">
+                                    <div class="project-manual-mask-fields">
+                                        <label for="project-manual-name-mask">Формат названия</label>
+                                        <input type="text" id="project-manual-name-mask" value="$N серия">
+                                    </div>
+                                    <p class="settings-helper-text">Используйте $N для подстановки номера сегмента.</p>
+                                </div>
+                            </div>
+                            <div class="project-manual-generator-actions" id="project-manual-generator-buttons">
+                                <button type="button" class="button-primary project-manual-action-empty" id="project-manual-generate-button">Сгенерировать</button>
+                                <button type="button" class="button-secondary project-manual-action-nonempty" id="project-manual-generate-append-button" style="display:none;">Сгенерировать дополнительные сегменты</button>
+                                <button type="button" class="button-secondary project-manual-action-nonempty" id="project-manual-generate-replace-button" style="display:none;">Сгенерировать с заменой</button>
+                            </div>
+                        </div>
+                    </section>
+                    <div class="project-manual-footer-actions">
+                        <button type="button" class="button-primary" id="project-manual-save-button" disabled>Сохранить сегменты</button>
+                        <button type="button" class="button-secondary" id="project-manual-clear-button" disabled>Очистить сегменты</button>
+                        <button type="button" class="button-danger" id="project-manual-reset-button" style="display:none;" disabled>Сбросить сегменты</button>
+                    </div>
                 </fieldset>
             </div>
         </div>
