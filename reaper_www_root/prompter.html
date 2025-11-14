@@ -19,11 +19,20 @@
             
             <div class="panel-controls">
                 <div class="controls-left">
-                    <label for="track-selector" class="track-selector-label" title="Дорожка">
-                        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-track" xlink:href="icons.svg#icon-track"></use></svg>
+                    <button type="button" id="track-selector-toggle" class="track-selector-toggle" aria-controls="track-selector" aria-haspopup="listbox" aria-expanded="false" title="Выбрать дорожку">
+                        <svg class="icon-svg track-selector-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-track" xlink:href="icons.svg#icon-track"></use></svg>
                         <span class="visually-hidden">Дорожка</span>
-                    </label>
-                    <select id="track-selector"></select>
+                    </button>
+                    <div class="collapsible-select-wrapper track-selector-wrapper is-collapsed" id="track-selector-wrapper" aria-hidden="true">
+                        <select id="track-selector" aria-label="Дорожка"></select>
+                    </div>
+                    <button type="button" id="segment-selector-toggle" class="segment-selector-toggle is-hidden" aria-controls="segment-selector" aria-haspopup="listbox" aria-expanded="false" aria-hidden="true" title="Выбрать сегмент" aria-label="Выбрать сегмент">
+                        <svg class="icon-svg segment-selector-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-segment" xlink:href="icons.svg#icon-segment"></use></svg>
+                        <span class="visually-hidden">Сегмент</span>
+                    </button>
+                    <div class="collapsible-select-wrapper segment-selector-wrapper is-collapsed" id="segment-selector-wrapper" aria-hidden="true">
+                        <select id="segment-selector" aria-label="Сегмент"></select>
+                    </div>
                     <button id="refresh-button" title="Обновить список дорожек">
                         <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor"><use href="icons.svg#icon-refresh" xlink:href="icons.svg#icon-refresh"></use></svg>
                     </button>

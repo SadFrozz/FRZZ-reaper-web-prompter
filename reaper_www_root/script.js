@@ -2140,6 +2140,8 @@ let statsColorsTableBodyEl = null;
 let statsRolesTotalEl = null;
 let statsActorsTotalEl = null;
 let statsColorsTotalEl = null;
+let updateNavigationSegmentOptions = null;
+let syncNavigationSegmentSelection = null;
 
 let renderStatsTablesRef = null;
 
@@ -2169,7 +2171,14 @@ function refreshStatsSegmentationControls(options = {}) {
     resolved.options.forEach(option => {
         statsSegmentSelectEl.append($('<option>').val(option.value).text(option.label));
     });
-    statsSegmentSelectEl.val(statsSegmentSelection);
+    syncSegmentSelectionControls();
+    if (typeof updateNavigationSegmentOptions === 'function') {
+        try {
+            updateNavigationSegmentOptions({ options: resolved.options, selection: statsSegmentSelection, primaryKind: resolved.primaryKind, source: resolved.source });
+        } catch (err) {
+            console.warn('[Prompter][segments] navigation selector update failed', err);
+        }
+    }
     if (resolved.options.length > 1 && resolved.primaryKind) {
         statsSegmentControlsEl.show();
         if (statsSegmentSourceEl && statsSegmentSourceEl.length) {
@@ -2205,6 +2214,44 @@ function getActiveStatsSegmentRange() {
         return null;
     }
     return entry.range;
+}
+
+function syncSegmentSelectionControls() {
+    if (statsSegmentSelectEl && statsSegmentSelectEl.length) {
+        statsSegmentSelectEl.val(statsSegmentSelection);
+    }
+    if (typeof syncNavigationSegmentSelection === 'function') {
+        try {
+            syncNavigationSegmentSelection(statsSegmentSelection);
+        } catch (err) {
+            console.warn('[Prompter][segments] sync navigation selector failed', err);
+        }
+    }
+}
+
+function applyStatsSegmentSelection(nextValue, options = {}) {
+    const normalized = typeof nextValue === 'string' ? nextValue : STATS_SEGMENT_ALL_VALUE;
+    const resolved = statsSegmentOptionMap.has(normalized) ? normalized : STATS_SEGMENT_ALL_VALUE;
+    const previous = statsSegmentSelection;
+    statsSegmentSelection = resolved;
+    syncSegmentSelectionControls();
+    const shouldUpdateStats = options && options.updateStats === false ? false : true;
+    const shouldScheduleStatsButton = options && options.scheduleStatsButton === false ? false : true;
+    if (shouldUpdateStats) {
+        try {
+            renderStatsTables({ openModal: false });
+        } catch (err) {
+            console.warn('[Prompter][segments] stats render failed', err);
+        }
+    }
+    if (shouldScheduleStatsButton) {
+        try {
+            scheduleStatsButtonEvaluation();
+        } catch (err) {
+            console.warn('[Prompter][segments] schedule stats button failed', err);
+        }
+    }
+    return previous !== resolved;
 }
 
 if (typeof window !== 'undefined') {
@@ -2546,6 +2593,11 @@ $(document).ready(function() {
     const mainTitle = $('h1');
     const settingsAppVersion = $('#settings-app-version');
     const trackSelector = $('#track-selector');
+    const trackSelectorWrapper = $('#track-selector-wrapper');
+    const trackSelectorToggleButton = $('#track-selector-toggle');
+    const segmentSelector = $('#segment-selector');
+    const segmentSelectorWrapper = $('#segment-selector-wrapper');
+    const segmentSelectorToggleButton = $('#segment-selector-toggle');
     const textDisplay = $('#text-display');
     const textDisplayWrapper = $('#text-display-wrapper');
     const textDisplayEl = textDisplay[0] || null;
@@ -2670,6 +2722,148 @@ $(document).ready(function() {
         lastRuntimeVersion: manualSegmentationState.version,
         nextOrderToken: 1,
         editing: null
+    };
+
+    const selectorControllers = {
+        track: {
+            key: 'track',
+            wrapper: trackSelectorWrapper,
+            toggleButton: trackSelectorToggleButton,
+            selectEl: trackSelector,
+            expanded: false
+        },
+        segment: {
+            key: 'segment',
+            wrapper: segmentSelectorWrapper,
+            toggleButton: segmentSelectorToggleButton,
+            selectEl: segmentSelector,
+            expanded: false
+        }
+    };
+
+    const setSelectorVisibility = (key, expanded, options = {}) => {
+        const entry = selectorControllers[key];
+        if (!entry) {
+            return;
+        }
+        const nextState = !!expanded;
+        const focus = options && options.focus === true;
+        const immediate = options && options.immediate === true;
+        if (nextState) {
+            Object.keys(selectorControllers).forEach(otherKey => {
+                if (otherKey === key) {
+                    return;
+                }
+                const other = selectorControllers[otherKey];
+                if (other && other.expanded) {
+                    setSelectorVisibility(otherKey, false, { immediate: true });
+                }
+            });
+        }
+        if (entry.wrapper && entry.wrapper.length) {
+            if (immediate) {
+                entry.wrapper.addClass('collapsible-no-transition');
+            }
+            entry.wrapper.toggleClass('is-expanded', nextState);
+            entry.wrapper.toggleClass('is-collapsed', !nextState);
+            entry.wrapper.attr('aria-hidden', nextState ? 'false' : 'true');
+            if (immediate) {
+                const removeTransition = () => {
+                    entry.wrapper.removeClass('collapsible-no-transition');
+                };
+                if (typeof requestAnimationFrame === 'function') {
+                    requestAnimationFrame(removeTransition);
+                } else {
+                    setTimeout(removeTransition, 0);
+                }
+            }
+        }
+        if (entry.toggleButton && entry.toggleButton.length) {
+            entry.toggleButton.attr('aria-expanded', nextState ? 'true' : 'false');
+        }
+        if (focus && nextState && entry.selectEl && entry.selectEl.length) {
+            entry.selectEl.trigger('focus');
+        }
+        entry.expanded = nextState;
+    };
+
+    const toggleSelectorVisibility = (key) => {
+        const entry = selectorControllers[key];
+        if (!entry) {
+            return;
+        }
+        const nextState = !entry.expanded;
+        setSelectorVisibility(key, nextState, { focus: nextState });
+    };
+
+    const registerSelectorToggle = (key) => {
+        const entry = selectorControllers[key];
+        if (!entry || !entry.toggleButton || !entry.toggleButton.length) {
+            return;
+        }
+        entry.toggleButton.on('click', function(event) {
+            event.preventDefault();
+            toggleSelectorVisibility(key);
+        });
+        entry.toggleButton.on('keydown', function(event) {
+            if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+                event.preventDefault();
+                toggleSelectorVisibility(key);
+            }
+        });
+    };
+
+    registerSelectorToggle('track');
+    registerSelectorToggle('segment');
+    Object.keys(selectorControllers).forEach(key => {
+        setSelectorVisibility(key, false, { immediate: true });
+    });
+
+    if (segmentSelector && segmentSelector.length) {
+        segmentSelector.on('change', function() {
+            const rawValue = $(this).val();
+            const selectedValue = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+            const normalizedValue = typeof selectedValue === 'string' ? selectedValue : STATS_SEGMENT_ALL_VALUE;
+            applyStatsSegmentSelection(normalizedValue);
+            if (segmentSelectorToggleButton && segmentSelectorToggleButton.length) {
+                setSelectorVisibility('segment', false);
+            }
+        });
+    }
+
+    syncNavigationSegmentSelection = (value) => {
+        if (!segmentSelector || !segmentSelector.length) {
+            return;
+        }
+        segmentSelector.val(value);
+    };
+
+    updateNavigationSegmentOptions = ({ options = [], selection = statsSegmentSelection } = {}) => {
+        if (!segmentSelector || !segmentSelector.length) {
+            return;
+        }
+        const list = Array.isArray(options) ? options : [];
+        segmentSelector.empty();
+        list.forEach(option => {
+            if (!option || typeof option.value !== 'string') {
+                return;
+            }
+            const optionLabel = typeof option.label === 'string' ? option.label : '';
+            segmentSelector.append($('<option>').val(option.value).text(optionLabel));
+        });
+        segmentSelector.val(selection);
+        const hasMultiple = list.length > 1;
+        segmentSelector.prop('disabled', !hasMultiple);
+        if (segmentSelectorToggleButton && segmentSelectorToggleButton.length) {
+            segmentSelectorToggleButton
+                .toggleClass('is-hidden', !hasMultiple)
+                .attr('aria-hidden', hasMultiple ? 'false' : 'true')
+                .prop('disabled', !hasMultiple)
+                .attr('tabindex', hasMultiple ? '0' : '-1');
+            if (!hasMultiple) {
+                setSelectorVisibility('segment', false, { immediate: true });
+            }
+        }
     };
 
     function getManualDefaultDurationSeconds() {
@@ -3291,7 +3485,7 @@ $(document).ready(function() {
             const deleteCell = $('<td>').addClass('project-manual-actions-col');
             const deleteButton = $('<button type="button" class="project-manual-delete-button" aria-label="Удалить сегмент" title="Удалить сегмент">')
                 .attr('data-segment-id', segmentId)
-                .append('<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-role-reset" xlink:href="icons.svg#icon-role-reset"></use></svg>');
+                .append('<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-delete" xlink:href="icons.svg#icon-delete"></use></svg>');
             deleteCell.append(deleteButton);
             row.append(deleteCell);
 
@@ -3695,10 +3889,7 @@ $(document).ready(function() {
             const rawValue = $(this).val();
             const selectedValue = Array.isArray(rawValue) ? rawValue[0] : rawValue;
             const normalizedValue = typeof selectedValue === 'string' ? selectedValue : STATS_SEGMENT_ALL_VALUE;
-            statsSegmentSelection = statsSegmentOptionMap.has(normalizedValue) ? normalizedValue : STATS_SEGMENT_ALL_VALUE;
-            $(this).val(statsSegmentSelection);
-            renderStatsTables({ openModal: false });
-            scheduleStatsButtonEvaluation();
+            applyStatsSegmentSelection(normalizedValue);
         });
     }
 
@@ -11731,7 +11922,9 @@ $(document).ready(function() {
                     <div class="actor-color-picker">
                         <input type="text" class="actor-color-input" value="${colorVal}" />
                     </div>
-                    <button type="button" class="delete-actor-color" title="Удалить актёра">✕</button>
+                    <button type="button" class="delete-actor-color project-manual-delete-button" title="Удалить актёра">
+                        <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="icons.svg#icon-delete" xlink:href="icons.svg#icon-delete"></use></svg>
+                    </button>
                 </div>`);
             row.find('.actor-color-item-label').append(createActorNameElement(actor));
             actorColorList.append(row);
@@ -12842,7 +13035,14 @@ $(document).ready(function() {
     }
     
     // --- ОБРАБОТЧИКИ СОБЫТИЙ ---
-    trackSelector.on('change', function() { getText($(this).val()); });
+    if (trackSelector && trackSelector.length) {
+        trackSelector.on('change', function() {
+            getText($(this).val());
+            if (trackSelectorToggleButton && trackSelectorToggleButton.length) {
+                setSelectorVisibility('track', false);
+            }
+        });
+    }
     refreshButton.on('click', () => {
         invalidateRolesCache('refresh_button');
         clearProjectDataCache();
@@ -13031,9 +13231,7 @@ $(document).ready(function() {
         const percentDigits = typeof opts.percentDigits === 'number' ? opts.percentDigits : STATS_PERCENT_DIGITS;
         const activeEntry = statsSegmentOptionMap.get(statsSegmentSelection) || statsSegmentOptionMap.get(STATS_SEGMENT_ALL_VALUE);
         const segmentRange = activeEntry && activeEntry.range ? activeEntry.range : null;
-        if (statsSegmentSelectEl && statsSegmentSelectEl.length) {
-            statsSegmentSelectEl.val(statsSegmentSelection);
-        }
+        syncSegmentSelectionControls();
         const stats = computeStats({ segmentRange });
         const formatPercent = (count, total) => {
             if (!total || total <= 0) return (0).toFixed(percentDigits);
@@ -13143,7 +13341,7 @@ $(document).ready(function() {
         const preserveSelection = opts.preserveSelection !== false;
         if (opts.autoSelectFromTransport !== false) {
             const derivedSelection = determineStatsSegmentSelectionForTime(projectSegmentationInfo, latestTimecode);
-            statsSegmentSelection = derivedSelection;
+            applyStatsSegmentSelection(derivedSelection, { updateStats: false, scheduleStatsButton: false });
         }
         refreshStatsSegmentationControls({ preserveSelection, recalcIfVisible: false });
         renderStatsTables({ openModal: true });
