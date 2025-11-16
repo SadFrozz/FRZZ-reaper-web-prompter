@@ -1200,6 +1200,7 @@ function createDefaultProjectSegmentationInfo() {
 
 let projectSegmentationInfo = createDefaultProjectSegmentationInfo();
 let statsSegmentSelection = STATS_SEGMENT_ALL_VALUE;
+let navigationSegmentSelection = STATS_SEGMENT_ALL_VALUE;
 const statsSegmentOptionMap = new Map();
 
 function resetStatsSegmentOptionMap() {
@@ -1464,6 +1465,7 @@ function setManualDefaultDurationSettingVisibility(enabled) {
     }
     const shouldShow = !!enabled;
     manualDefaultDurationSettingRow.toggle(shouldShow);
+    manualDefaultDurationSettingRow.toggleClass('is-hidden', !shouldShow);
     manualDefaultDurationSettingRow.attr('aria-hidden', shouldShow ? 'false' : 'true');
     if (manualDefaultDurationInput && manualDefaultDurationInput.length) {
         manualDefaultDurationInput.prop('disabled', !shouldShow);
@@ -1625,6 +1627,8 @@ let projectSettingsSectionsEl = null;
 let projectSettingsManualFieldsetEl = null;
 let manualDefaultDurationInput = null;
 let manualDefaultDurationSettingRow = null;
+let textDisplayWrapper = null;
+let textDisplayWrapperEl = null;
 
 function getProjectSettingsButtonElement() {
     if (projectSettingsButtonEl && projectSettingsButtonEl.length) {
@@ -1691,6 +1695,24 @@ function getProjectSettingsManualFieldset() {
     return null;
 }
 
+function isProjectSettingsSectionAvailable(section) {
+    if (!section || !section.length) {
+        return false;
+    }
+    const availabilityFlag = section.data('project-settings-available');
+    if (availabilityFlag === false) {
+        return false;
+    }
+    if (availabilityFlag === true) {
+        return true;
+    }
+    const ariaHidden = section.attr('aria-hidden');
+    if (ariaHidden === 'true') {
+        return false;
+    }
+    return typeof section.is === 'function' ? section.is(':visible') : true;
+}
+
 function projectSettingsHasAvailableSections() {
     const sections = getProjectSettingsSections();
     if (!sections || !sections.length) {
@@ -1700,7 +1722,7 @@ function projectSettingsHasAvailableSections() {
     let available = false;
     sections.each(function determineAvailability() {
         const section = $ ? $(this) : null;
-        if (section && section.length && section.data('project-settings-available') !== false) {
+        if (section && section.length && isProjectSettingsSectionAvailable(section)) {
             available = true;
             return false;
         }
@@ -1762,6 +1784,13 @@ function hideProjectSettingsModal() {
         return;
     }
     modal.attr('aria-hidden', 'true').hide();
+    if (typeof window !== 'undefined' && typeof window.__frzzHandleManualSegmentsModalClosed === 'function') {
+        try {
+            window.__frzzHandleManualSegmentsModalClosed();
+        } catch (err) {
+            console.warn('[Prompter][manualSegmentation] modal close handler failed', err);
+        }
+    }
 }
 
 function isManualSegmentationActive() {
@@ -1782,6 +1811,18 @@ function handleManualSegmentationChanged(options = {}) {
             console.warn('[Prompter][manualSegmentation] listener failed', err);
         }
     }
+    if (typeof window !== 'undefined' && typeof window.__frzzHandleManualSegmentsRuntimeRefresh === 'function') {
+        try {
+            window.__frzzHandleManualSegmentsRuntimeRefresh({ reason });
+        } catch (err) {
+            console.warn('[Prompter][manualSegmentation] refresh after change failed', err);
+        }
+    }
+}
+
+function isProjectSettingsModalVisible() {
+    const modal = getProjectSettingsModalElement();
+    return !!(modal && modal.length && modal.is(':visible'));
 }
 
 function setManualSegmentationEnabled(enabled, options = {}) {
@@ -1916,14 +1957,11 @@ function formatStatsSegmentLabel(segment, index, kind) {
         const trackSuffix = segment.trackName && segment.trackName.trim().length ? ` · ${segment.trackName.trim()}` : '';
         return `${ordinal}. Видео: ${baseName}${trackSuffix}`;
     }
-    let sourceLabel;
-    if (segment.markerSource === 'region') {
-        sourceLabel = 'Регион';
-    } else if (segment.markerSource === 'manual') {
-        sourceLabel = 'Сегмент';
-    } else {
-        sourceLabel = 'Маркер';
+    if (segment.markerSource === 'manual') {
+        const manualLabel = segment.name && segment.name.trim().length ? segment.name.trim() : `Сегмент ${ordinal}`;
+        return `${ordinal}. ${manualLabel}`;
     }
+    const sourceLabel = segment.markerSource === 'region' ? 'Регион' : 'Маркер';
     const base = segment.name && segment.name.trim().length ? segment.name.trim() : `${sourceLabel} ${ordinal}`;
     return `${ordinal}. ${sourceLabel}: ${base}`;
 }
@@ -2141,7 +2179,6 @@ let statsRolesTotalEl = null;
 let statsActorsTotalEl = null;
 let statsColorsTotalEl = null;
 let updateNavigationSegmentOptions = null;
-let syncNavigationSegmentSelection = null;
 
 let renderStatsTablesRef = null;
 
@@ -2174,7 +2211,7 @@ function refreshStatsSegmentationControls(options = {}) {
     syncSegmentSelectionControls();
     if (typeof updateNavigationSegmentOptions === 'function') {
         try {
-            updateNavigationSegmentOptions({ options: resolved.options, selection: statsSegmentSelection, primaryKind: resolved.primaryKind, source: resolved.source });
+            updateNavigationSegmentOptions({ options: resolved.options, selection: navigationSegmentSelection, primaryKind: resolved.primaryKind, source: resolved.source });
         } catch (err) {
             console.warn('[Prompter][segments] navigation selector update failed', err);
         }
@@ -2220,13 +2257,6 @@ function syncSegmentSelectionControls() {
     if (statsSegmentSelectEl && statsSegmentSelectEl.length) {
         statsSegmentSelectEl.val(statsSegmentSelection);
     }
-    if (typeof syncNavigationSegmentSelection === 'function') {
-        try {
-            syncNavigationSegmentSelection(statsSegmentSelection);
-        } catch (err) {
-            console.warn('[Prompter][segments] sync navigation selector failed', err);
-        }
-    }
 }
 
 function applyStatsSegmentSelection(nextValue, options = {}) {
@@ -2239,14 +2269,25 @@ function applyStatsSegmentSelection(nextValue, options = {}) {
     const shouldScheduleStatsButton = options && options.scheduleStatsButton === false ? false : true;
     if (shouldUpdateStats) {
         try {
-            renderStatsTables({ openModal: false });
+            const statsRenderer = typeof renderStatsTables === 'function'
+                ? renderStatsTables
+                : (typeof renderStatsTablesRef === 'function' ? renderStatsTablesRef : null);
+            if (typeof statsRenderer === 'function') {
+                statsRenderer({ openModal: false });
+            } else {
+                console.warn('[Prompter][segments] stats renderer unavailable');
+            }
         } catch (err) {
             console.warn('[Prompter][segments] stats render failed', err);
         }
     }
     if (shouldScheduleStatsButton) {
         try {
-            scheduleStatsButtonEvaluation();
+            if (typeof scheduleStatsButtonEvaluation === 'function') {
+                scheduleStatsButtonEvaluation();
+            } else {
+                console.warn('[Prompter][segments] schedule stats button unavailable');
+            }
         } catch (err) {
             console.warn('[Prompter][segments] schedule stats button failed', err);
         }
@@ -2397,6 +2438,7 @@ const PROJECT_DATA_CHUNK_PREFIX = 'getProjectDataJson_chunk_';
 const PROJECT_DATA_POLL_INTERVAL_MS = 100;
 const PROJECT_DATA_TIMEOUT_MS = 5000;
 const PROJECT_DATA_STATUS_TOLERANCE_MS = 20;
+const PROJECT_DATA_COMMAND_RETRY_MS = 600;
 
 let projectDataCache = null;
 let projectDataInFlight = null;
@@ -2505,6 +2547,7 @@ function clearProjectDataCache() {
     lastProjectDataTimestamp = 0;
     projectSegmentationInfo = createDefaultProjectSegmentationInfo();
     statsSegmentSelection = STATS_SEGMENT_ALL_VALUE;
+    navigationSegmentSelection = STATS_SEGMENT_ALL_VALUE;
     resetStatsSegmentOptionMap();
     refreshStatsSegmentationControls({ preserveSelection: false, recalcIfVisible: true });
     try {
@@ -2599,9 +2642,9 @@ $(document).ready(function() {
     const segmentSelectorWrapper = $('#segment-selector-wrapper');
     const segmentSelectorToggleButton = $('#segment-selector-toggle');
     const textDisplay = $('#text-display');
-    const textDisplayWrapper = $('#text-display-wrapper');
+    textDisplayWrapper = $('#text-display-wrapper');
     const textDisplayEl = textDisplay[0] || null;
-    const textDisplayWrapperEl = textDisplayWrapper[0] || null;
+    textDisplayWrapperEl = textDisplayWrapper && textDisplayWrapper.length ? textDisplayWrapper[0] : null;
     const JUMP_REQUEST_DEBOUNCE_MS = 150;
     let transportProgressValue = 0;
     const statusIndicator = $('#status-indicator');
@@ -2824,35 +2867,101 @@ $(document).ready(function() {
             const rawValue = $(this).val();
             const selectedValue = Array.isArray(rawValue) ? rawValue[0] : rawValue;
             const normalizedValue = typeof selectedValue === 'string' ? selectedValue : STATS_SEGMENT_ALL_VALUE;
-            applyStatsSegmentSelection(normalizedValue);
-            if (segmentSelectorToggleButton && segmentSelectorToggleButton.length) {
-                setSelectorVisibility('segment', false);
-            }
+            applyNavigationSegmentSelection(normalizedValue, { closeSelector: true });
         });
     }
 
-    syncNavigationSegmentSelection = (value) => {
-        if (!segmentSelector || !segmentSelector.length) {
-            return;
+    let navigationSegmentOptions = [];
+
+    const buildNavigationSegmentLabel = (option, index) => {
+        if (!option || typeof option !== 'object') {
+            return '';
         }
-        segmentSelector.val(value);
+        if (option.value === STATS_SEGMENT_ALL_VALUE) {
+            return typeof option.label === 'string' ? option.label : 'Весь проект';
+        }
+        const segment = option.segment && typeof option.segment === 'object' ? option.segment : {};
+        const pickLabel = value => (typeof value === 'string' ? value.trim() : '');
+        const preferred = pickLabel(segment.label)
+            || pickLabel(segment.name)
+            || pickLabel(segment.fileName)
+            || pickLabel(segment.trackName);
+        if (preferred) {
+            return preferred;
+        }
+        const fallbackFromOption = pickLabel(option.label);
+        if (fallbackFromOption) {
+            const withoutNumber = fallbackFromOption.replace(/^\s*\d+\.\s*/, '').trim();
+            const colonIndex = withoutNumber.indexOf(':');
+            if (colonIndex !== -1) {
+                const candidate = withoutNumber.slice(colonIndex + 1).trim();
+                if (candidate) {
+                    return candidate;
+                }
+            }
+            if (withoutNumber.length) {
+                return withoutNumber;
+            }
+        }
+        if (Number.isFinite(segment.ordinal)) {
+            return `Сегмент ${segment.ordinal + 1}`;
+        }
+        if (Number.isFinite(index)) {
+            return `Сегмент ${index + 1}`;
+        }
+        return 'Сегмент';
     };
 
-    updateNavigationSegmentOptions = ({ options = [], selection = statsSegmentSelection } = {}) => {
+    const getAvailableNavigationSegmentValues = () => navigationSegmentOptions
+        .map(entry => (entry && typeof entry.value === 'string') ? entry.value : null)
+        .filter(value => typeof value === 'string');
+
+    const resolveNavigationSegmentSelection = (candidate) => {
+        const availableValues = getAvailableNavigationSegmentValues();
+        if (availableValues.includes(candidate)) {
+            return candidate;
+        }
+        if (availableValues.includes(STATS_SEGMENT_ALL_VALUE)) {
+            return STATS_SEGMENT_ALL_VALUE;
+        }
+        return availableValues.length ? availableValues[0] : STATS_SEGMENT_ALL_VALUE;
+    };
+
+    const syncNavigationSegmentSelectionControl = () => {
         if (!segmentSelector || !segmentSelector.length) {
             return;
         }
-        const list = Array.isArray(options) ? options : [];
-        segmentSelector.empty();
-        list.forEach(option => {
-            if (!option || typeof option.value !== 'string') {
-                return;
+        segmentSelector.val(navigationSegmentSelection);
+    };
+
+    updateNavigationSegmentOptions = ({ options = [], selection } = {}) => {
+        if (!segmentSelector || !segmentSelector.length) {
+            navigationSegmentOptions = Array.isArray(options)
+                ? options.filter(option => option && typeof option.value === 'string')
+                : [];
+            if (!navigationSegmentOptions.length) {
+                navigationSegmentOptions = [{ value: STATS_SEGMENT_ALL_VALUE, label: 'Весь проект' }];
             }
-            const optionLabel = typeof option.label === 'string' ? option.label : '';
+            navigationSegmentSelection = resolveNavigationSegmentSelection(
+                typeof selection === 'string' ? selection : navigationSegmentSelection
+            );
+            return;
+        }
+        navigationSegmentOptions = Array.isArray(options)
+            ? options.filter(option => option && typeof option.value === 'string')
+            : [];
+        if (!navigationSegmentOptions.length) {
+            navigationSegmentOptions = [{ value: STATS_SEGMENT_ALL_VALUE, label: 'Весь проект' }];
+        }
+        const candidateValue = typeof selection === 'string' ? selection : navigationSegmentSelection;
+        navigationSegmentSelection = resolveNavigationSegmentSelection(candidateValue);
+        segmentSelector.empty();
+        navigationSegmentOptions.forEach((option, index) => {
+            const optionLabel = buildNavigationSegmentLabel(option, index);
             segmentSelector.append($('<option>').val(option.value).text(optionLabel));
         });
-        segmentSelector.val(selection);
-        const hasMultiple = list.length > 1;
+        syncNavigationSegmentSelectionControl();
+        const hasMultiple = navigationSegmentOptions.length > 1;
         segmentSelector.prop('disabled', !hasMultiple);
         if (segmentSelectorToggleButton && segmentSelectorToggleButton.length) {
             segmentSelectorToggleButton
@@ -2865,6 +2974,26 @@ $(document).ready(function() {
             }
         }
     };
+
+    function applyNavigationSegmentSelection(nextValue, options = {}) {
+        const candidate = typeof nextValue === 'string' ? nextValue : STATS_SEGMENT_ALL_VALUE;
+        const resolved = resolveNavigationSegmentSelection(candidate);
+        const previous = navigationSegmentSelection;
+        navigationSegmentSelection = resolved;
+        syncNavigationSegmentSelectionControl();
+        if (options.closeSelector && segmentSelectorToggleButton && segmentSelectorToggleButton.length) {
+            setSelectorVisibility('segment', false);
+        }
+        const selectionChanged = previous !== resolved;
+        if (options.updateVisibility !== false) {
+            const forceVisibility = options.forceVisibility === true || previous !== resolved;
+            applySegmentedTextVisibility({ force: forceVisibility });
+        }
+        if (selectionChanged && options.skipSegmentRecenter !== true) {
+            scrollToActiveSegmentStart({ instant: options.instant === true });
+        }
+        return selectionChanged;
+    }
 
     function getManualDefaultDurationSeconds() {
         return getManualDefaultDurationMinutesSetting() * 60;
@@ -3756,6 +3885,8 @@ $(document).ready(function() {
     let projectDataReady = false;
     let projectDataRetryTimer = null;
     let projectDataRetryAttempt = 0;
+    let pendingAutoTrackLoad = false;
+    let pendingAutoTrackLoadReason = '';
     const PROJECT_DATA_RETRY_BASE_DELAY_MS = 900;
     const PROJECT_DATA_RETRY_MAX_ATTEMPTS = 3;
 
@@ -3766,10 +3897,34 @@ $(document).ready(function() {
         }
     }
 
+    function setPendingAutoTrackLoad(reason) {
+        pendingAutoTrackLoad = true;
+        pendingAutoTrackLoadReason = reason || '';
+    }
+
+    function triggerPendingAutoTrackLoad(trigger) {
+        if (!pendingAutoTrackLoad) return;
+        const scheduledReason = pendingAutoTrackLoadReason;
+        pendingAutoTrackLoad = false;
+        pendingAutoTrackLoadReason = '';
+        setTimeout(() => {
+            try {
+                console.debug('[Prompter][tracks] running deferred auto selection', {
+                    trigger: trigger || 'project_data',
+                    reason: scheduledReason || 'deferred'
+                });
+                autoFindSubtitleTrack();
+            } catch (err) {
+                console.error('[Prompter][tracks] deferred auto selection failed', err);
+            }
+        }, 20);
+    }
+
     function markProjectDataReady() {
         projectDataReady = true;
         projectDataRetryAttempt = 0;
         clearProjectDataRetryTimer();
+        triggerPendingAutoTrackLoad('project_data_ready');
     }
 
     function scheduleProjectDataRetry(reason = 'auto_retry') {
@@ -3778,6 +3933,7 @@ $(document).ready(function() {
             if (statusIndicator && statusIndicator.length) {
                 statusIndicator.text('Не удалось автоматически обновить данные проекта. Нажмите "Обновить".');
             }
+            triggerPendingAutoTrackLoad('retry_exhausted');
             return;
         }
         if (projectDataRetryTimer !== null) {
@@ -4259,6 +4415,7 @@ $(document).ready(function() {
     const segmentationDisplayModeSelect = $('#segmentation-display-mode');
     const segmentationAutoSwitchWrapper = $('#segmentation-auto-switch-wrapper');
     const segmentationAutoSwitchSelect = $('#segmentation-auto-switch-mode');
+    const segmentationAutoSwitchWarning = $('#segmentation-auto-switch-warning');
 
     const updateSegmentationControlsState = (options = {}) => {
         let resolvedMode;
@@ -4310,6 +4467,9 @@ $(document).ready(function() {
             : (segmentationDisplayModeSelect.length
                 ? sanitizeSegmentationDisplayMode(segmentationDisplayModeSelect.val(), defaultSettings.segmentationDisplayMode)
                 : defaultSettings.segmentationDisplayMode);
+        const autoSwitchMode = segmentationAutoSwitchSelect.length
+            ? sanitizeSegmentationAutoSwitchMode(segmentationAutoSwitchSelect.val(), defaultSettings.segmentationAutoSwitchMode)
+            : defaultSettings.segmentationAutoSwitchMode;
 
         if (segmentationAutodetectTile.length) {
             segmentationAutodetectTile.toggleClass('is-disabled', false);
@@ -4349,6 +4509,17 @@ $(document).ready(function() {
         if (segmentationAutoSwitchSelect.length) {
             segmentationAutoSwitchSelect.prop('disabled', !showAutoSwitch);
         }
+        if (segmentationAutoSwitchWarning && segmentationAutoSwitchWarning.length) {
+            const autoScrollActive = settings.autoScroll !== false;
+            const showWarning = showAutoSwitch && autoSwitchMode === 'disabled' && autoScrollActive;
+            segmentationAutoSwitchWarning.toggle(showWarning);
+            segmentationAutoSwitchWarning.attr('aria-hidden', showWarning ? 'false' : 'true');
+            if (showWarning) {
+                segmentationAutoSwitchWarning.removeAttr('hidden');
+            } else {
+                segmentationAutoSwitchWarning.attr('hidden', 'hidden');
+            }
+        }
 
         if (segmentationDisplayModeSelect.length) {
             if (Object.prototype.hasOwnProperty.call(options, 'displayMode')) {
@@ -4379,6 +4550,16 @@ $(document).ready(function() {
     let activeLineIndices = [];
     let activeTimecodeProgressIndices = new Set();
     let timecodeProgressValues = [];
+    let subtitleSegmentAssignments = [];
+    let subtitleSegmentContext = {
+        segments: [],
+        primaryKind: null,
+        source: 'none',
+        segmentMap: new Map()
+    };
+    let subtitleSegmentWrapperEntries = [];
+    let activeSegmentFilterId = STATS_SEGMENT_ALL_VALUE;
+    let pendingManualSegmentTextRebuild = false;
     roleToActor = {};
     let paintGeneration = 0;
     const ANIMATION_VIEWPORT_BUFFER = 6;
@@ -4414,6 +4595,609 @@ $(document).ready(function() {
     const postRenderTaskQueue = [];
     let postRenderFlushScheduled = false;
     const POST_RENDER_FALLBACK_DELAY_MS = 16;
+
+    function getSubtitleLineStartSeconds(line) {
+        if (!line || typeof line !== 'object') {
+            return 0;
+        }
+        const candidates = [
+            Number(line.start_time),
+            Number(line.startSeconds),
+            Number(line.start),
+            Number(line.start_time_seconds),
+            Number(line.start_time_ms) ? Number(line.start_time_ms) / 1000 : NaN
+        ];
+        for (let i = 0; i < candidates.length; i += 1) {
+            const value = candidates[i];
+            if (Number.isFinite(value)) {
+                return value;
+            }
+        }
+        return 0;
+    }
+
+    function buildSubtitleSegmentContext() {
+        const context = {
+            segments: [],
+            primaryKind: null,
+            source: 'none',
+            segmentMap: new Map()
+        };
+        const manualSegments = getManualSegmentsForStats();
+        if (manualSegments.length) {
+            context.primaryKind = 'markers';
+            context.source = 'manual';
+            context.segments = manualSegments.map((segment, index) => {
+                const start = Number(segment && segment.startSeconds);
+                const end = Number(segment && segment.endSeconds);
+                const uid = segment && typeof segment.uid === 'string' ? segment.uid : `manual:${index}`;
+                return {
+                    uid,
+                    startSeconds: Number.isFinite(start) ? start : 0,
+                    endSeconds: Number.isFinite(end) ? end : Number.POSITIVE_INFINITY,
+                    ordinal: Number.isFinite(segment && segment.ordinal) ? Number(segment.ordinal) : index
+                };
+            });
+        } else {
+            const primaryKind = determinePrimarySegmentKind(projectSegmentationInfo);
+            context.primaryKind = primaryKind;
+            if (primaryKind) {
+                const baseSegments = primaryKind === 'markers'
+                    ? projectSegmentationInfo.markerSegments
+                    : projectSegmentationInfo.videoSegments;
+                if (Array.isArray(baseSegments) && baseSegments.length) {
+                    context.source = primaryKind;
+                    context.segments = baseSegments.map((segment, index) => {
+                        const start = Number(segment && segment.startSeconds);
+                        const end = Number(segment && segment.endSeconds);
+                        const uid = segment && typeof segment.uid === 'string' ? segment.uid : `${primaryKind}:${index}`;
+                        return {
+                            uid,
+                            startSeconds: Number.isFinite(start) ? start : 0,
+                            endSeconds: Number.isFinite(end) ? end : Number.POSITIVE_INFINITY,
+                            ordinal: Number.isFinite(segment && segment.ordinal) ? Number(segment.ordinal) : index
+                        };
+                    });
+                }
+            }
+        }
+        context.segments.sort((a, b) => {
+            if (a.startSeconds === b.startSeconds) {
+                return (a.ordinal ?? 0) - (b.ordinal ?? 0);
+            }
+            return a.startSeconds - b.startSeconds;
+        });
+        context.segmentMap = new Map(context.segments.map(segment => [segment.uid, segment]));
+        return context;
+    }
+
+    function assignSegmentsToSubtitles(subtitles, segments) {
+        const total = Array.isArray(subtitles) ? subtitles.length : 0;
+        const assignments = new Array(total).fill(STATS_SEGMENT_ALL_VALUE);
+        if (!total || !Array.isArray(segments) || !segments.length) {
+            return assignments;
+        }
+        let segmentIndex = 0;
+        const lastIndex = segments.length - 1;
+        for (let i = 0; i < total; i += 1) {
+            const startSeconds = getSubtitleLineStartSeconds(subtitles[i]);
+            while (segmentIndex < lastIndex && startSeconds >= (segments[segmentIndex + 1].startSeconds - SEGMENT_RANGE_EPSILON)) {
+                segmentIndex += 1;
+            }
+            const segment = segments[segmentIndex];
+            assignments[i] = segment && typeof segment.uid === 'string' ? segment.uid : STATS_SEGMENT_ALL_VALUE;
+        }
+        return assignments;
+    }
+
+    function resetSubtitleSegmentDomStructure() {
+        subtitleSegmentWrapperEntries = [];
+    }
+
+    function createSubtitleSegmentWrapperEntry(segment, index, options = {}) {
+        const isFallback = options.isFallback === true;
+        const id = segment && typeof segment.uid === 'string'
+            ? segment.uid
+            : (isFallback ? STATS_SEGMENT_ALL_VALUE : `segment:${index}`);
+        const ordinal = Number.isFinite(segment && segment.ordinal) ? segment.ordinal : index;
+        const displayIndex = ordinal + 1;
+        const label = segment && typeof segment.name === 'string' && segment.name.trim().length
+            ? segment.name.trim()
+            : (segment && typeof segment.label === 'string' && segment.label.trim().length
+                ? segment.label.trim()
+                : (isFallback ? 'Весь проект' : `Сегмент ${displayIndex}`));
+        const wrapper = document.createElement('div');
+        wrapper.className = 'subtitle-segment';
+        wrapper.dataset.segmentId = id;
+        wrapper.dataset.segmentIndex = String(displayIndex);
+        wrapper.dataset.segmentNumber = String(displayIndex);
+        wrapper.dataset.segmentOrdinal = String(ordinal);
+        if (label) {
+            wrapper.dataset.segmentLabel = label;
+            wrapper.setAttribute('aria-label', label);
+        }
+        return {
+            id,
+            element: wrapper,
+            label,
+            displayIndex,
+            ordinal,
+            isFallback,
+            segment: segment || null
+        };
+    }
+
+    function rebuildSubtitleSegmentDomStructure(assignments = subtitleSegmentAssignments, options = {}) {
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
+            resetSubtitleSegmentDomStructure();
+            return;
+        }
+        const displayNode = textDisplayEl || document.getElementById('text-display');
+        if (!displayNode) {
+            resetSubtitleSegmentDomStructure();
+            return;
+        }
+        const segments = subtitleSegmentContext && Array.isArray(subtitleSegmentContext.segments) && subtitleSegmentContext.segments.length
+            ? subtitleSegmentContext.segments
+            : null;
+        const fragment = document.createDocumentFragment();
+        const wrappers = [];
+        const wrapperLookup = new Map();
+        if (segments) {
+            segments.forEach((segment, index) => {
+                const entry = createSubtitleSegmentWrapperEntry(segment, index);
+                wrapperLookup.set(entry.id, entry);
+                wrappers.push(entry);
+                fragment.appendChild(entry.element);
+            });
+        }
+        let fallbackEntry = wrapperLookup.get(STATS_SEGMENT_ALL_VALUE) || null;
+        if (!fallbackEntry) {
+            const fallbackLabel = segments ? 'Без сегмента' : 'Весь проект';
+            fallbackEntry = createSubtitleSegmentWrapperEntry({
+                uid: STATS_SEGMENT_ALL_VALUE,
+                ordinal: segments ? segments.length : 0,
+                name: fallbackLabel,
+                label: fallbackLabel
+            }, segments ? segments.length : 0, { isFallback: true });
+            wrapperLookup.set(fallbackEntry.id, fallbackEntry);
+            wrappers.push(fallbackEntry);
+            fragment.appendChild(fallbackEntry.element);
+        }
+        const previousScrollTop = textDisplayWrapperEl && typeof textDisplayWrapperEl.scrollTop === 'number'
+            ? textDisplayWrapperEl.scrollTop
+            : null;
+        const total = subtitleElements.length;
+        for (let index = 0; index < total; index += 1) {
+            const container = subtitleElements[index];
+            if (!container) {
+                continue;
+            }
+            const segmentId = Array.isArray(assignments) && assignments[index]
+                ? assignments[index]
+                : STATS_SEGMENT_ALL_VALUE;
+            const targetEntry = wrapperLookup.get(segmentId) || fallbackEntry;
+            targetEntry.element.appendChild(container);
+        }
+        displayNode.textContent = '';
+        displayNode.appendChild(fragment);
+        wrappers.forEach(entry => {
+            const hasChildren = entry.element.children.length > 0;
+            entry.element.classList.toggle('subtitle-segment-empty', !hasChildren);
+        });
+        if (textDisplayWrapperEl && Number.isFinite(previousScrollTop)) {
+            textDisplayWrapperEl.scrollTop = previousScrollTop;
+        }
+        subtitleSegmentWrapperEntries = wrappers;
+    }
+
+    function applySubtitleSegmentAssignmentsToDom(assignments = subtitleSegmentAssignments, options = {}) {
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
+            return;
+        }
+        if (!Array.isArray(assignments) || !assignments.length) {
+            subtitleElements.forEach((element, index) => {
+                if (!element) {
+                    return;
+                }
+                element.dataset.segmentId = STATS_SEGMENT_ALL_VALUE;
+                if (subtitleData[index]) {
+                    subtitleData[index].__segmentUid = STATS_SEGMENT_ALL_VALUE;
+                }
+            });
+            return;
+        }
+        const limit = Math.min(assignments.length, subtitleElements.length);
+        for (let i = 0; i < limit; i += 1) {
+            const element = subtitleElements[i];
+            if (!element) {
+                continue;
+            }
+            const nextId = assignments[i] || STATS_SEGMENT_ALL_VALUE;
+            if (options.force || element.dataset.segmentId !== nextId) {
+                element.dataset.segmentId = nextId;
+            }
+            if (subtitleData[i]) {
+                subtitleData[i].__segmentUid = nextId;
+            }
+        }
+    }
+
+    function applySegmentedTextVisibility(options = {}) {
+        if (!Array.isArray(subtitleElements) || !subtitleElements.length) {
+            activeSegmentFilterId = STATS_SEGMENT_ALL_VALUE;
+            return;
+        }
+        const targetMode = sanitizeSegmentationDisplayMode(
+            settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        const hasSegments = subtitleSegmentContext && Array.isArray(subtitleSegmentContext.segments)
+            && subtitleSegmentContext.segments.length > 0;
+        const selectionIsValid = hasSegments
+            && subtitleSegmentContext.segmentMap
+            && subtitleSegmentContext.segmentMap.has(navigationSegmentSelection);
+        const effectiveSegment = targetMode === 'current' && selectionIsValid
+            ? navigationSegmentSelection
+            : STATS_SEGMENT_ALL_VALUE;
+        if (!options.force && effectiveSegment === activeSegmentFilterId) {
+            return;
+        }
+        activeSegmentFilterId = effectiveSegment;
+        const shouldFilter = effectiveSegment !== STATS_SEGMENT_ALL_VALUE;
+        const hasWrappers = Array.isArray(subtitleSegmentWrapperEntries) && subtitleSegmentWrapperEntries.length > 0;
+        if (hasWrappers) {
+            const wrapperHiddenClass = 'subtitle-segment-hidden';
+            subtitleSegmentWrapperEntries.forEach(entry => {
+                if (!entry || !entry.element) {
+                    return;
+                }
+                if (!shouldFilter || entry.id === effectiveSegment) {
+                    entry.element.style.display = '';
+                    entry.element.classList.remove(wrapperHiddenClass);
+                } else {
+                    entry.element.style.display = 'none';
+                    entry.element.classList.add(wrapperHiddenClass);
+                }
+            });
+        } else {
+            const hiddenClass = 'segment-hidden';
+            subtitleElements.forEach(element => {
+                if (!element) {
+                    return;
+                }
+                if (!shouldFilter) {
+                    element.classList.remove(hiddenClass);
+                    return;
+                }
+                const elementSegment = element.dataset ? element.dataset.segmentId : STATS_SEGMENT_ALL_VALUE;
+                if (elementSegment === effectiveSegment) {
+                    element.classList.remove(hiddenClass);
+                } else {
+                    element.classList.add(hiddenClass);
+                }
+            });
+        }
+        if (textDisplayWrapper && textDisplayWrapper.length) {
+            textDisplayWrapper.toggleClass('text-segment-filter-active', shouldFilter);
+        }
+        scheduleContentVisibilityUpdate({ force: true });
+    }
+
+    function autoSelectSegmentForCurrentTime(options = {}) {
+        const displayMode = sanitizeSegmentationDisplayMode(
+            settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        if (displayMode !== 'current') {
+            return false;
+        }
+
+        const force = options && options.force === true;
+        if (!force) {
+            const autoSwitchMode = sanitizeSegmentationAutoSwitchMode(
+                settings.segmentationAutoSwitchMode || defaultSettings.segmentationAutoSwitchMode,
+                defaultSettings.segmentationAutoSwitchMode
+            );
+            if (autoSwitchMode === 'disabled') {
+                return false;
+            }
+            if (autoSwitchMode === 'playback_only') {
+                const transportState = Number.isFinite(options && options.transportState)
+                    ? options.transportState
+                    : transportPlayState;
+                const numericTransportState = Number.isFinite(transportState) ? transportState : NaN;
+                const hasPlaybackFlag = Number.isFinite(numericTransportState)
+                    && (numericTransportState & 1) === 1;
+                if (!hasPlaybackFlag) {
+                    return false;
+                }
+            }
+        }
+
+        const targetSeconds = Number.isFinite(options && options.targetSeconds)
+            ? options.targetSeconds
+            : latestTimecode;
+        if (!Number.isFinite(targetSeconds)) {
+            return false;
+        }
+
+        const derivedSelection = determineStatsSegmentSelectionForTime(projectSegmentationInfo, targetSeconds);
+        if (!force && derivedSelection === navigationSegmentSelection) {
+            return false;
+        }
+        return applyNavigationSegmentSelection(derivedSelection, {
+            forceVisibility: force
+        });
+    }
+
+    function getLineSegmentUid(line) {
+        if (!line || typeof line !== 'object') {
+            return STATS_SEGMENT_ALL_VALUE;
+        }
+        if (typeof line.__segmentUid === 'string') {
+            return line.__segmentUid;
+        }
+        if (typeof line.segmentUid === 'string') {
+            return line.segmentUid;
+        }
+        return STATS_SEGMENT_ALL_VALUE;
+    }
+
+    function doesLineBelongToActiveNavigationSegment(index) {
+        if (navigationSegmentSelection === STATS_SEGMENT_ALL_VALUE) {
+            return true;
+        }
+        if (!Number.isInteger(index) || index < 0 || index >= subtitleData.length) {
+            return false;
+        }
+        const lineSegmentId = getLineSegmentUid(subtitleData[index]);
+        return lineSegmentId === navigationSegmentSelection;
+    }
+
+    function findFirstLineIndexForSegment(segmentId) {
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            return -1;
+        }
+        const targetSegmentId = typeof segmentId === 'string' ? segmentId : navigationSegmentSelection;
+        if (!targetSegmentId || targetSegmentId === STATS_SEGMENT_ALL_VALUE) {
+            return -1;
+        }
+        for (let index = 0; index < subtitleData.length; index += 1) {
+            const line = subtitleData[index];
+            if (!line) {
+                continue;
+            }
+            if (getLineSegmentUid(line) === targetSegmentId) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    function scrollToActiveSegmentStart(options = {}) {
+        const displayMode = sanitizeSegmentationDisplayMode(
+            settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        if (displayMode !== 'current') {
+            return false;
+        }
+        const activeSegmentId = navigationSegmentSelection;
+        if (!activeSegmentId || activeSegmentId === STATS_SEGMENT_ALL_VALUE) {
+            return false;
+        }
+        const targetIndex = findFirstLineIndexForSegment(activeSegmentId);
+        if (!Number.isInteger(targetIndex) || targetIndex < 0) {
+            return false;
+        }
+        const preferAutoScroll = options.useAutoScroll !== false && settings.autoScroll !== false;
+        if (preferAutoScroll) {
+            const plan = computeAutoScrollPlan(targetIndex, { force: true, instant: options.instant === true });
+            if (plan) {
+                autoScrollToIndex(targetIndex, plan);
+                return true;
+            }
+        }
+        const element = subtitleElements[targetIndex];
+        if (element) {
+            focusLineElement(targetIndex, {
+                element,
+                scrollBlock: options.scrollBlock || 'start',
+                highlight: false
+            });
+            return true;
+        }
+        return false;
+    }
+
+    // Skip segment re-alignment when a finished line from an earlier segment is still being processed.
+    function shouldIgnoreLineForCurrentSegmentDisplay(lineIndex, options = {}) {
+        if (!Number.isInteger(lineIndex) || lineIndex < 0 || lineIndex >= subtitleData.length) {
+            return false;
+        }
+        const displayMode = typeof options.displayMode === 'string'
+            ? options.displayMode
+            : sanitizeSegmentationDisplayMode(
+                settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+                defaultSettings.segmentationDisplayMode
+            );
+        if (displayMode !== 'current') {
+            return false;
+        }
+        const activeSegmentId = navigationSegmentSelection;
+        if (!activeSegmentId || activeSegmentId === STATS_SEGMENT_ALL_VALUE) {
+            return false;
+        }
+        if (!subtitleSegmentContext || !subtitleSegmentContext.segmentMap || !subtitleSegmentContext.segmentMap.size) {
+            return false;
+        }
+        if (!subtitleSegmentContext.segmentMap.has(activeSegmentId)) {
+            return false;
+        }
+        const nowSeconds = Number.isFinite(options.currentTime) ? options.currentTime : latestTimecode;
+        const activeSegmentMeta = subtitleSegmentContext.segmentMap.get(activeSegmentId);
+        if (!activeSegmentMeta) {
+            return false;
+        }
+        const activeStart = Number(activeSegmentMeta.startSeconds);
+        if (Number.isFinite(activeStart) && Number.isFinite(nowSeconds) && nowSeconds < (activeStart - SEGMENT_RANGE_EPSILON)) {
+            return false;
+        }
+        const line = subtitleData[lineIndex];
+        if (!line) {
+            return false;
+        }
+        const lineSegmentId = getLineSegmentUid(line);
+        if (!lineSegmentId || lineSegmentId === STATS_SEGMENT_ALL_VALUE || lineSegmentId === activeSegmentId) {
+            return false;
+        }
+        const lineSegmentMeta = subtitleSegmentContext.segmentMap.get(lineSegmentId);
+        if (!lineSegmentMeta) {
+            return false;
+        }
+        const lineStart = Number(lineSegmentMeta.startSeconds);
+        if (Number.isFinite(activeStart) && Number.isFinite(lineStart)) {
+            if (lineStart >= activeStart - SEGMENT_RANGE_EPSILON) {
+                return false;
+            }
+            return true;
+        }
+        const activeOrdinal = Number.isFinite(activeSegmentMeta.ordinal) ? activeSegmentMeta.ordinal : null;
+        const lineOrdinal = Number.isFinite(lineSegmentMeta.ordinal) ? lineSegmentMeta.ordinal : null;
+        if (activeOrdinal === null || lineOrdinal === null) {
+            return false;
+        }
+        return lineOrdinal < activeOrdinal;
+    }
+
+    function maybeSwitchSegmentForLineIndex(lineIndex, options = {}) {
+        if (!Number.isInteger(lineIndex) || lineIndex < 0 || lineIndex >= subtitleData.length) {
+            return false;
+        }
+        const targetLine = subtitleData[lineIndex];
+        const targetSegmentId = getLineSegmentUid(targetLine);
+        if (!targetSegmentId || targetSegmentId === STATS_SEGMENT_ALL_VALUE || targetSegmentId === navigationSegmentSelection) {
+            return false;
+        }
+        const displayMode = sanitizeSegmentationDisplayMode(
+            settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        if (displayMode !== 'current') {
+            return false;
+        }
+        const availableSegments = getAvailableNavigationSegmentValues();
+        if (!availableSegments.includes(targetSegmentId)) {
+            return false;
+        }
+        const force = options && options.force === true;
+        if (!force) {
+            const autoSwitchMode = sanitizeSegmentationAutoSwitchMode(
+                settings.segmentationAutoSwitchMode || defaultSettings.segmentationAutoSwitchMode,
+                defaultSettings.segmentationAutoSwitchMode
+            );
+            if (autoSwitchMode === 'disabled') {
+                return false;
+            }
+            if (autoSwitchMode === 'playback_only') {
+                const stateCandidate = Number.isFinite(options.transportState)
+                    ? options.transportState
+                    : transportPlayState;
+                if (!isPlayingState(stateCandidate)) {
+                    return false;
+                }
+            }
+        }
+        const skipRecenter = options && options.skipSegmentRecenter === true;
+        return applyNavigationSegmentSelection(targetSegmentId, {
+            forceVisibility: true,
+            skipSegmentRecenter: skipRecenter
+        });
+    }
+
+    function recomputeSubtitleSegments(options = {}) {
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            subtitleSegmentContext = {
+                segments: [],
+                primaryKind: null,
+                source: 'none',
+                segmentMap: new Map()
+            };
+            subtitleSegmentAssignments = [];
+            if (options.applyToDom) {
+                applySubtitleSegmentAssignmentsToDom([], { force: true });
+                resetSubtitleSegmentDomStructure();
+                applySegmentedTextVisibility({ force: true });
+            }
+            if (options.autoSelectCurrentSegment) {
+                autoSelectSegmentForCurrentTime({
+                    targetSeconds: Number.isFinite(options.targetSeconds) ? options.targetSeconds : latestTimecode,
+                    updateStats: false,
+                    scheduleStatsButton: false,
+                    force: true
+                });
+            }
+            return subtitleSegmentAssignments;
+        }
+        subtitleSegmentContext = buildSubtitleSegmentContext();
+        subtitleSegmentAssignments = assignSegmentsToSubtitles(subtitleData, subtitleSegmentContext.segments);
+        if (options.applyToDom) {
+            applySubtitleSegmentAssignmentsToDom(subtitleSegmentAssignments, { force: options.forceDomUpdate === true });
+            rebuildSubtitleSegmentDomStructure(subtitleSegmentAssignments, { resetContents: options.forceDomUpdate === true });
+            applySegmentedTextVisibility({ force: true });
+        }
+        if (options.autoSelectCurrentSegment) {
+            autoSelectSegmentForCurrentTime({
+                targetSeconds: Number.isFinite(options.targetSeconds) ? options.targetSeconds : latestTimecode,
+                updateStats: false,
+                scheduleStatsButton: false,
+                force: true
+            });
+        }
+        return subtitleSegmentAssignments;
+    }
+
+    function handleManualSegmentsRuntimeRefresh() {
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            pendingManualSegmentTextRebuild = false;
+            return;
+        }
+        if (isProjectSettingsModalVisible()) {
+            pendingManualSegmentTextRebuild = true;
+            return;
+        }
+        pendingManualSegmentTextRebuild = false;
+        recomputeSubtitleSegments({
+            applyToDom: true,
+            forceDomUpdate: true,
+            autoSelectCurrentSegment: true,
+            targetSeconds: latestTimecode
+        });
+    }
+
+    function flushPendingManualSegmentRebuild() {
+        if (!pendingManualSegmentTextRebuild) {
+            return;
+        }
+        pendingManualSegmentTextRebuild = false;
+        if (!Array.isArray(subtitleData) || !subtitleData.length) {
+            return;
+        }
+        recomputeSubtitleSegments({
+            applyToDom: true,
+            forceDomUpdate: true,
+            autoSelectCurrentSegment: true,
+            targetSeconds: latestTimecode
+        });
+    }
+
+    if (typeof window !== 'undefined') {
+        window.__frzzHandleManualSegmentsRuntimeRefresh = handleManualSegmentsRuntimeRefresh;
+        window.__frzzHandleManualSegmentsModalClosed = flushPendingManualSegmentRebuild;
+        window.__frzzRecomputeSubtitleSegments = recomputeSubtitleSegments;
+        window.__frzzApplySegmentedTextVisibility = applySegmentedTextVisibility;
+    }
 
     function performActorMappingPreviewRefresh() {
         regenerateActorColorListUI();
@@ -7029,6 +7813,19 @@ $(document).ready(function() {
                 });
                 return;
             }
+            const targetSegmentId = getLineSegmentUid(line);
+            const availableNavigationSegments = getAvailableNavigationSegmentValues();
+            if (
+                targetSegmentId
+                && targetSegmentId !== STATS_SEGMENT_ALL_VALUE
+                && targetSegmentId !== navigationSegmentSelection
+                && availableNavigationSegments.includes(targetSegmentId)
+            ) {
+                applyNavigationSegmentSelection(targetSegmentId, {
+                    forceVisibility: true,
+                    skipSegmentRecenter: true
+                });
+            }
             const emitted = requestJumpToLine(index, line.start_time);
             focusLineElement(index, { element: container, scroll: false });
             if (!emitted) {
@@ -7656,6 +8453,14 @@ $(document).ready(function() {
     function autoScrollToIndex(targetIndex, precomputedPlan) {
         if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= subtitleElements.length) {
             return;
+        }
+        if (!doesLineBelongToActiveNavigationSegment(targetIndex)) {
+            const switched = maybeSwitchSegmentForLineIndex(targetIndex, {
+                transportState: transportPlayState
+            });
+            if (!switched || !doesLineBelongToActiveNavigationSegment(targetIndex)) {
+                return;
+            }
         }
         const plan = (typeof precomputedPlan === 'undefined') ? computeAutoScrollPlan(targetIndex) : precomputedPlan;
         if (!plan) {
@@ -8510,6 +9315,7 @@ $(document).ready(function() {
             );
             tempSettings.segmentationDisplayMode = sanitizedSegmentationDisplayMode;
             settings.segmentationDisplayMode = sanitizedSegmentationDisplayMode;
+            applySegmentedTextVisibility({ force: true });
 
             const sanitizedSegmentationAutoSwitch = sanitizeSegmentationAutoSwitchMode(
                 tempSettings.segmentationAutoSwitchMode,
@@ -9238,6 +10044,7 @@ $(document).ready(function() {
                 projectDataReady = false;
                 projectDataRetryAttempt = 0;
                 clearProjectDataRetryTimer();
+                setPendingAutoTrackLoad('segmentation_refresh');
                 if (statusIndicator && statusIndicator.length) {
                     statusIndicator.text('Обновление сегментации...');
                 }
@@ -9680,6 +10487,9 @@ $(document).ready(function() {
             preserveSegmentSelection = manualActive;
         }
         refreshStatsSegmentationControls({ preserveSelection: preserveSegmentSelection, recalcIfVisible: true });
+        if (Array.isArray(subtitleData) && subtitleData.length) {
+            recomputeSubtitleSegments({ applyToDom: true, autoSelectCurrentSegment: true, targetSeconds: latestTimecode });
+        }
         projectDataCache = snapshot;
         return { status: 'applied', applied };
     }
@@ -9768,12 +10578,45 @@ $(document).ready(function() {
             if (segmentationRequestState && segmentationRequestState.mode !== 'none') {
                 console.debug('[Prompter][projectData] segmentation request ready', segmentationRequestState);
             }
-            wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
-            setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
+            const dispatchLabelBase = `project_data:${reason}:attempt${attempt}`;
+            let lastCommandDispatchAt = 0;
+            let commandDispatchCount = 0;
+            const dispatchProjectDataRequest = tag => {
+                if (typeof wwr_req !== 'function') {
+                    throw new Error('wwr_req unavailable for project data request');
+                }
+                try {
+                    wwr_req('SET/EXTSTATEPERSIST/PROMPTER_WEBUI/command/GET_PROJECT_DATA');
+                    setTimeout(() => { wwr_req(REASCRIPT_ACTION_ID); }, 50);
+                    lastCommandDispatchAt = performance.now();
+                    commandDispatchCount += 1;
+                    if (DEBUG_LOG_BOOT_ENABLED) {
+                        console.debug('[Prompter][projectData] command dispatched', {
+                            reason,
+                            attempt,
+                            tag,
+                            dispatch: commandDispatchCount
+                        });
+                    }
+                } catch (dispatchErr) {
+                    console.error('[Prompter][projectData] command dispatch failed', dispatchErr);
+                    throw dispatchErr;
+                }
+            };
+            dispatchProjectDataRequest(`${dispatchLabelBase}:initial`);
 
             let latestStatusInfo = parseProjectDataStatus('PENDING');
             let observedPending = false;
             let pendingTimestamp = null;
+            const maybeResendCommand = () => {
+                if (observedPending) {
+                    return;
+                }
+                if ((performance.now() - lastCommandDispatchAt) < PROJECT_DATA_COMMAND_RETRY_MS) {
+                    return;
+                }
+                dispatchProjectDataRequest(`${dispatchLabelBase}:retry${commandDispatchCount + 1}`);
+            };
             while (true) {
                 if (performance.now() > deadline) {
                     throw new Error('timeout waiting project data status');
@@ -9799,6 +10642,7 @@ $(document).ready(function() {
                             pendingTimestamp = statusTs;
                         }
                     }
+                    maybeResendCommand();
                     await delay(PROJECT_DATA_POLL_INTERVAL_MS);
                     continue;
                 }
@@ -9811,11 +10655,13 @@ $(document).ready(function() {
                             lastProjectDataTimestamp
                         });
                         observedPending = observedPending || pendingTimestamp !== null;
+                        maybeResendCommand();
                         await delay(PROJECT_DATA_POLL_INTERVAL_MS);
                         continue;
                     }
                     if (!observedPending && (performance.now() - attemptStartedAt) < PROJECT_DATA_POLL_INTERVAL_MS * 2) {
                         console.debug('[Prompter][projectData] ignoring premature OK status, waiting for pending');
+                        maybeResendCommand();
                         await delay(PROJECT_DATA_POLL_INTERVAL_MS);
                         continue;
                     }
@@ -9823,6 +10669,7 @@ $(document).ready(function() {
                 }
 
                 console.debug('[Prompter][projectData] unexpected status state, waiting', latestStatusInfo);
+                maybeResendCommand();
                 await delay(PROJECT_DATA_POLL_INTERVAL_MS);
             }
 
@@ -10125,6 +10972,7 @@ $(document).ready(function() {
             projectDataReady = false;
             projectDataRetryAttempt = 0;
             clearProjectDataRetryTimer();
+            setPendingAutoTrackLoad('bootstrap');
             wwr_start();
             if (typeof window !== 'undefined' && typeof window.wwr_req === 'function' && !wwr_is_enabled) {
                 wwr_is_enabled = true;
@@ -10292,11 +11140,15 @@ $(document).ready(function() {
 
         if (list.length > 0) {
             statusIndicator.text('Список дорожек загружен.');
+            const deferAutoFind = !skipAutoFind && !projectDataReady;
             if (skipAutoFind) {
                 if (!selectionRestored && !trackSelector.val()) {
                     trackSelector.find('option:first').prop('selected', true);
                 }
                 console.debug('[Prompter][tracks] auto selection skipped', { reason, restored: selectionRestored, options: trackSelector.find('option').length });
+            } else if (deferAutoFind) {
+                setPendingAutoTrackLoad(reason || 'project_data_loading');
+                console.debug('[Prompter][tracks] auto selection deferred until project data ready', { reason, restored: selectionRestored });
             } else {
                 autoFindSubtitleTrack();
             }
@@ -10304,9 +11156,9 @@ $(document).ready(function() {
             statusIndicator.text('Дорожки не найдены.');
         }
 
-        if (!skipAutoFind && (!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+        if (!skipAutoFind && projectDataReady && (!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
             setTimeout(() => {
-                if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0) {
+                if ((!subtitleData || subtitleData.length === 0) && trackSelector.find('option').length > 0 && projectDataReady) {
                     console.debug('[Prompter][tracks] retry initial text load');
                     if (!settings.autoFindTrack) {
                         trackSelector.find('option:first').prop('selected', true);
@@ -10316,6 +11168,8 @@ $(document).ready(function() {
                     }
                 }
             }, 800);
+        } else if (!skipAutoFind && !projectDataReady) {
+            setPendingAutoTrackLoad(reason || 'project_data_loading_retry');
         } else if (skipAutoFind) {
             console.debug('[Prompter][tracks] retry initial text load skipped', { reason, restored: selectionRestored });
         }
@@ -10928,6 +11782,12 @@ $(document).ready(function() {
             setupVisibilityObserver();
             invalidateAllLinePaint();
             computeAndApplyOverlaps({ reason: 'data_load' });
+            recomputeSubtitleSegments({
+                applyToDom: true,
+                forceDomUpdate: true,
+                autoSelectCurrentSegment: true,
+                targetSeconds: latestTimecode
+            });
             const t1 = performance.now();
             const renderMs = t1 - t0;
             const renderSeconds = renderMs / 1000;
@@ -12762,7 +13622,17 @@ $(document).ready(function() {
         try {
             if (Number.isFinite(currentTime)) {
                 lastPlaybackTimeSeconds = currentTime;
+                autoSelectSegmentForCurrentTime({
+                    targetSeconds: currentTime,
+                    updateStats: false,
+                    scheduleStatsButton: false,
+                    transportState: transportPlayState
+                });
             }
+            const segmentationDisplayMode = sanitizeSegmentationDisplayMode(
+                settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+                defaultSettings.segmentationDisplayMode
+            );
             const highlightCurrentEnabled = settings.highlightCurrentEnabled !== false;
             const highlightPreviousEnabled = settings.highlightPreviousEnabled !== false;
             const highlightPauseEnabled = settings.highlightPauseEnabled !== false;
@@ -12788,8 +13658,21 @@ $(document).ready(function() {
             let autoScrollPlanWasUndefined = false;
 
             const skipLineAutoScrollDueToLookahead = isLineAutoScroll && lastLineLookaheadIndex === newCurrentLineIndex;
+            const skipSegmentSwitchForCurrentLine = shouldIgnoreLineForCurrentSegmentDisplay(newCurrentLineIndex, {
+                currentTime,
+                displayMode: segmentationDisplayMode
+            });
+            let lineMatchesNavigationSegment = doesLineBelongToActiveNavigationSegment(newCurrentLineIndex);
+            if (!lineMatchesNavigationSegment && newCurrentLineIndex !== -1 && !skipSegmentSwitchForCurrentLine) {
+                const switchedForCurrentLine = maybeSwitchSegmentForLineIndex(newCurrentLineIndex, {
+                    transportState: transportPlayState
+                });
+                if (switchedForCurrentLine) {
+                    lineMatchesNavigationSegment = doesLineBelongToActiveNavigationSegment(newCurrentLineIndex);
+                }
+            }
 
-            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled && !skipLineAutoScrollDueToLookahead) {
+            if (indexChanged && newCurrentLineIndex !== -1 && autoScrollEnabled && lineMatchesNavigationSegment && !skipLineAutoScrollDueToLookahead) {
                 const computedPlan = computeAutoScrollPlan(newCurrentLineIndex, {
                     currentTime,
                     instant: initialAutoScrollPending === true
@@ -12890,7 +13773,7 @@ $(document).ready(function() {
                         }
                     }
                 } catch (err) { /* defensive: avoid breaking rAF loop */ }
-                if (autoScrollEnabled && currentLineIndex !== -1 && !skipLineAutoScrollDueToLookahead) {
+                if (autoScrollEnabled && currentLineIndex !== -1 && lineMatchesNavigationSegment && !skipLineAutoScrollDueToLookahead) {
                     if (autoScrollPlanComputed) {
                         if (autoScrollPlan) {
                             autoScrollToIndex(currentLineIndex, autoScrollPlan);
@@ -12909,7 +13792,20 @@ $(document).ready(function() {
                 if (!useTimecodeProgress && transportProgressValue !== 0) {
                     resetTransportProgress();
                 }
-                if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime)) {
+                const skipSegmentSwitchForActiveLine = shouldIgnoreLineForCurrentSegmentDisplay(currentLineIndex, {
+                    currentTime,
+                    displayMode: segmentationDisplayMode
+                });
+                let activeLineMatchesNavigationSegment = doesLineBelongToActiveNavigationSegment(currentLineIndex);
+                if (!activeLineMatchesNavigationSegment && currentLineIndex !== -1 && !skipSegmentSwitchForActiveLine) {
+                    const switchedForInertia = maybeSwitchSegmentForLineIndex(currentLineIndex, {
+                        transportState: transportPlayState
+                    });
+                    if (switchedForInertia) {
+                        activeLineMatchesNavigationSegment = doesLineBelongToActiveNavigationSegment(currentLineIndex);
+                    }
+                }
+                if (autoScrollEnabled && currentLineIndex !== -1 && Number.isFinite(currentTime) && activeLineMatchesNavigationSegment && !skipSegmentSwitchForActiveLine) {
                     applySubtReaderInertia(currentLineIndex, currentTime);
                 } else {
                     resetSubtReaderInertiaState();
@@ -12944,26 +13840,41 @@ $(document).ready(function() {
                         return candidate;
                     })();
                     if (upcomingIndex !== -1) {
-                        const upcomingLine = subtitleData[upcomingIndex];
-                        const startTime = Number(upcomingLine && upcomingLine.start_time);
-                        if (Number.isFinite(startTime)) {
-                            const timeUntilStart = startTime - currentTime;
-                            if (timeUntilStart <= 0 || timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
-                                if (lastLineLookaheadIndex === upcomingIndex && timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
-                                    lastLineLookaheadIndex = -1;
+                        let upcomingMatchesSegment = doesLineBelongToActiveNavigationSegment(upcomingIndex);
+                        if (!upcomingMatchesSegment) {
+                            const switchedForUpcoming = maybeSwitchSegmentForLineIndex(upcomingIndex, {
+                                transportState: transportPlayState
+                            });
+                            if (switchedForUpcoming) {
+                                upcomingMatchesSegment = doesLineBelongToActiveNavigationSegment(upcomingIndex);
+                            }
+                        }
+                        if (!upcomingMatchesSegment) {
+                            if (lastLineLookaheadIndex !== -1) {
+                                lastLineLookaheadIndex = -1;
+                            }
+                        } else {
+                            const upcomingLine = subtitleData[upcomingIndex];
+                            const startTime = Number(upcomingLine && upcomingLine.start_time);
+                            if (Number.isFinite(startTime)) {
+                                const timeUntilStart = startTime - currentTime;
+                                if (timeUntilStart <= 0 || timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
+                                    if (lastLineLookaheadIndex === upcomingIndex && timeUntilStart > LINE_AUTO_SCROLL_LOOKAHEAD_SECONDS) {
+                                        lastLineLookaheadIndex = -1;
+                                    }
+                                    if (timeUntilStart <= 0 && lastLineLookaheadIndex === upcomingIndex) {
+                                        lastLineLookaheadIndex = -1;
+                                    }
+                                } else if (lastLineLookaheadIndex !== upcomingIndex) {
+                                    const lookaheadPlan = computeAutoScrollPlan(upcomingIndex, {
+                                        currentTime,
+                                        lookahead: true
+                                    });
+                                    if (lookaheadPlan) {
+                                        autoScrollToIndex(upcomingIndex, lookaheadPlan);
+                                    }
+                                    lastLineLookaheadIndex = upcomingIndex;
                                 }
-                                if (timeUntilStart <= 0 && lastLineLookaheadIndex === upcomingIndex) {
-                                    lastLineLookaheadIndex = -1;
-                                }
-                            } else if (lastLineLookaheadIndex !== upcomingIndex) {
-                                const lookaheadPlan = computeAutoScrollPlan(upcomingIndex, {
-                                    currentTime,
-                                    lookahead: true
-                                });
-                                if (lookaheadPlan) {
-                                    autoScrollToIndex(upcomingIndex, lookaheadPlan);
-                                }
-                                lastLineLookaheadIndex = upcomingIndex;
                             }
                         }
                     } else if (lastLineLookaheadIndex !== -1) {
@@ -13051,6 +13962,7 @@ $(document).ready(function() {
         projectDataReady = false;
         projectDataRetryAttempt = 0;
         clearProjectDataRetryTimer();
+        setPendingAutoTrackLoad('manual_refresh');
         statusIndicator.text('Обновление данных проекта...');
         getProjectData('refresh_button', { allowCache: false, forceReload: true }).catch(err => {
             console.error('[Prompter] refresh project data failed', err);
@@ -13467,6 +14379,7 @@ $(document).ready(function() {
         if (!enabled) {
             resetAutoScrollState();
         }
+        updateSegmentationControlsState();
     });
     if (autoScrollModeSelect && autoScrollModeSelect.length) {
         autoScrollModeSelect.on('change', function() {
@@ -13499,6 +14412,13 @@ $(document).ready(function() {
     if (segmentationDisplayModeSelect.length) {
         segmentationDisplayModeSelect.on('change', function() {
             updateSegmentationControlsState({ displayMode: $(this).val() });
+            applySegmentedTextVisibility({ force: true });
+            autoSelectSegmentForCurrentTime({ updateStats: false, scheduleStatsButton: false, force: true });
+        });
+    }
+    if (segmentationAutoSwitchSelect.length) {
+        segmentationAutoSwitchSelect.on('change', function() {
+            updateSegmentationControlsState();
         });
     }
     if (segmentationManualToggle.length) {
@@ -13627,13 +14547,44 @@ $(document).ready(function() {
     transportTimecode.on('click', function() {
         console.debug('[Prompter] timecode click center');
         // Always allow manual centering regardless of autoScroll flag
-        let targetIndex = currentLineIndex;
-        if (targetIndex === -1 && subtitleData.length > 0) {
-            // Find first line whose start_time is >= latestTimecode, fallback to last
-            targetIndex = subtitleData.findIndex(l => l.start_time >= latestTimecode);
-            if (targetIndex === -1) targetIndex = subtitleData.length - 1;
+        const resolveTimelineIndex = () => {
+            if (!Array.isArray(subtitleData) || !subtitleData.length) {
+                return -1;
+            }
+            if (!Number.isFinite(latestTimecode)) {
+                return 0;
+            }
+            const idx = subtitleData.findIndex(line => Number(line && line.start_time) >= latestTimecode);
+            return idx !== -1 ? idx : (subtitleData.length - 1);
+        };
+        let targetIndex = Number.isInteger(currentLineIndex) ? currentLineIndex : -1;
+        if (targetIndex === -1) {
+            targetIndex = resolveTimelineIndex();
+        }
+        const displayMode = sanitizeSegmentationDisplayMode(
+            settings.segmentationDisplayMode || defaultSettings.segmentationDisplayMode,
+            defaultSettings.segmentationDisplayMode
+        );
+        const activeSegmentId = navigationSegmentSelection;
+        if (displayMode === 'current' && activeSegmentId && activeSegmentId !== STATS_SEGMENT_ALL_VALUE) {
+            const segmentStartIndex = findFirstLineIndexForSegment(activeSegmentId);
+            if (segmentStartIndex !== -1) {
+                const segmentStartLine = subtitleData[segmentStartIndex];
+                const segmentStartTime = Number(segmentStartLine && segmentStartLine.start_time);
+                const beforeSegment = Number.isFinite(segmentStartTime)
+                    ? (!Number.isFinite(latestTimecode) || latestTimecode <= segmentStartTime + SEGMENT_RANGE_EPSILON)
+                    : false;
+                const targetInSegment = Number.isInteger(targetIndex)
+                    && targetIndex >= 0
+                    && targetIndex < subtitleData.length
+                    && getLineSegmentUid(subtitleData[targetIndex]) === activeSegmentId;
+                if (!targetInSegment || beforeSegment) {
+                    targetIndex = segmentStartIndex;
+                }
+            }
         }
         if (targetIndex !== -1) {
+            maybeSwitchSegmentForLineIndex(targetIndex, { force: true, skipSegmentRecenter: true });
             const targetElement = subtitleElements[targetIndex];
             focusLineElement(targetIndex, { element: targetElement });
         }

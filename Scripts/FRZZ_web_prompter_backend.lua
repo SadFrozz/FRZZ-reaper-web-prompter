@@ -55,6 +55,8 @@ local ALLOWED_VIDEO_EXTENSIONS_ARRAY = {
   "mov", "qt", "m4v", "mp4", "webm", "wmv"
 }
 
+local SEGMENT_MERGE_GAP_SECONDS = 1.0
+
 local function json_escape_string(str)
   local replacements = {
     ['"'] = '\\"',
@@ -503,6 +505,66 @@ local function keyword_match(patterns, text)
   return false
 end
 
+local function normalize_segment_name(name)
+  local trimmed = trim(name)
+  if trimmed == '' then return '' end
+  return string.lower(trimmed)
+end
+
+local function merge_adjacent_named_segments(entries, opts)
+  if not entries or #entries <= 1 then
+    return entries
+  end
+  opts = opts or {}
+  local threshold = tonumber(opts.threshold) or SEGMENT_MERGE_GAP_SECONDS
+  local get_name = opts.get_name
+  local get_start = opts.get_start
+  local get_end = opts.get_end
+  local apply_merge = opts.apply_merge
+  if type(get_name) ~= 'function' or type(get_end) ~= 'function' then
+    return entries
+  end
+  local merged = {}
+  local current = entries[1]
+  merged[1] = current
+  local current_name = normalize_segment_name(get_name(current))
+  local current_end = get_end(current)
+
+  local idx = 2
+  while idx <= #entries do
+    local entry = entries[idx]
+    local entry_name = normalize_segment_name(get_name(entry))
+    local entry_start = get_start and get_start(entry) or entry.start or 0
+    local entry_end = get_end(entry)
+    local gap = nil
+    if current_end and entry_start then
+      gap = entry_start - current_end
+      if gap < 0 then gap = 0 end
+    end
+    local can_merge = current_name ~= ''
+      and entry_name ~= ''
+      and current_name == entry_name
+      and gap ~= nil
+      and gap < threshold
+
+    if can_merge then
+      if entry_end and entry_end > (current_end or 0) then
+        current_end = entry_end
+        if type(apply_merge) == 'function' then
+          apply_merge(current, current_end, entry)
+        end
+      end
+    else
+      current = entry
+      current_name = entry_name
+      current_end = entry_end
+      merged[#merged + 1] = entry
+    end
+    idx = idx + 1
+  end
+  return merged
+end
+
 local function expand_marker_template(template)
   local results = {}
   if not template or template == '' then return results end
@@ -773,7 +835,9 @@ collect_video_segments = function(request)
                 start = start_pos,
                 source = 'video',
                 file_name = file_name,
-                track_name = track_name
+                track_name = track_name,
+                duration = length,
+                end_pos = end_pos
               }
               meta.matched = meta.matched + 1
             end
@@ -788,7 +852,30 @@ collect_video_segments = function(request)
     end
     return a.start < b.start
   end)
+  segments = merge_adjacent_named_segments(segments, {
+    threshold = SEGMENT_MERGE_GAP_SECONDS,
+    get_name = function(entry) return entry.file_name end,
+    get_start = function(entry) return entry.start end,
+    get_end = function(entry)
+      if entry and entry.end_pos then
+        return entry.end_pos
+      end
+      if entry and entry.duration then
+        return (entry.start or 0) + entry.duration
+      end
+      return nil
+    end,
+    apply_merge = function(entry, new_end)
+      if not entry then return end
+      entry.end_pos = new_end
+      if entry.start then
+        local updated = new_end - entry.start
+        entry.duration = updated >= 0 and updated or 0
+      end
+    end
+  })
   meta.total = #segments
+  meta.matched = #segments
   return segments, meta
 end
 
@@ -827,6 +914,10 @@ collect_marker_segments = function(request)
           name = name or '',
           start = start_pos
         }
+        if is_region == 1 then
+          local region_end = rgnend or start_pos
+          entry.region_end = region_end
+        end
         segments[#segments + 1] = entry
       end
     end
@@ -837,7 +928,29 @@ collect_marker_segments = function(request)
     end
     return a.start < b.start
   end)
+  segments = merge_adjacent_named_segments(segments, {
+    threshold = SEGMENT_MERGE_GAP_SECONDS,
+    get_name = function(entry)
+      if entry and entry.source == 'region' then
+        return entry.name
+      end
+      return ''
+    end,
+    get_start = function(entry) return entry.start end,
+    get_end = function(entry)
+      if entry and entry.source == 'region' then
+        return entry.region_end
+      end
+      return nil
+    end,
+    apply_merge = function(entry, new_end)
+      if entry and entry.source == 'region' then
+        entry.region_end = new_end
+      end
+    end
+  })
   meta.total = #segments
+  meta.matched = #segments
   return segments, meta
 end
 

@@ -305,6 +305,9 @@ body.progress-disabled #transport-progress-container { display: none !important;
 main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #1e1e1e; border-radius: 0.5rem; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.3); order: 0; }
 #text-display-wrapper { flex-grow: 1; overflow-y: auto; will-change: scroll-position; }
 #text-display { padding: 1em 0.5em; font-size: 2em; line-height: 1.4; }
+.subtitle-segment { display: block; }
+.subtitle-segment.subtitle-segment-empty { opacity: 0.6; }
+.subtitle-segment.subtitle-segment-hidden { display: none !important; }
 .subtitle-container {
     display: flex;
     content-visibility: auto;
@@ -333,6 +336,7 @@ main { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; ba
 }
 .subtitle-container.filter-active { transition: background-color 0.3s, color 0.3s, opacity 0.3s ease; }
 .subtitle-container.filter-hidden { display: none !important; }
+.subtitle-container.segment-hidden { display: none !important; }
 .subtitle-time { min-width: 7.5rem; font-size: 1em; color: #ccc; text-align: left; font-family: monospace; padding: 0.3em 0.4em 0.65em; order: 0; display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
 .subtitle-time .overlap-indicator {
     display: none !important;
