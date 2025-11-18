@@ -12029,16 +12029,6 @@ $(document).ready(function() {
                     delimiter = '\t';
                 }
             }
-            // Also treat two-or-more spaces as a possible column separator
-            if (!actor && !usedContinuation) {
-                const colsMatch = line.match(/^(.+?)\s{2,}(.+)$/);
-                if (colsMatch) {
-                    actor = colsMatch[1].trim();
-                    rolesPart = colsMatch[2].trim();
-                    delimiter = '  ';
-                }
-            }
-
             const tokens = (!actor) ? line.split(/\s+/).filter(Boolean) : rolesPart.split(/\s+/).filter(Boolean);
             if (!tokens.length) {
                 parsedLines.push({ actor: '', roles: [], delimiter });
@@ -12080,17 +12070,28 @@ $(document).ready(function() {
                                 rolesPart = processed.rolesPart;
                                 delimiter = ',';
                             }
-                        } else {
-                            const processed = deriveAutoActorRoles(tokens);
-                            actor = processed.actor;
-                            rolesPart = processed.rolesPart;
-                            delimiter = 'auto';
-                            if (actor && (!rolesPart || !rolesPart.trim()) && tokens.length === 2) {
-                                actor = tokens[0];
-                                rolesPart = tokens.slice(1).join(' ').trim();
-                            }
                         }
                     }
+                }
+            }
+
+            if (!actor && !usedContinuation) {
+                const colsMatch = line.match(/^(.+?)\s{2,}(.+)$/);
+                if (colsMatch) {
+                    actor = colsMatch[1].trim();
+                    rolesPart = colsMatch[2].trim();
+                    delimiter = '  ';
+                }
+            }
+
+            if (!actor) {
+                const processed = deriveAutoActorRoles(tokens);
+                actor = processed.actor;
+                rolesPart = processed.rolesPart;
+                delimiter = 'auto';
+                if (actor && (!rolesPart || !rolesPart.trim()) && tokens.length === 2) {
+                    actor = tokens[0];
+                    rolesPart = tokens.slice(1).join(' ').trim();
                 }
             }
 
