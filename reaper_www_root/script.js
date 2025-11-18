@@ -700,7 +700,7 @@ if (DEBUG_LOG_BOOT_ENABLED) {
 }
 
 const APP_NAME = 'Интерактивный текстовый монитор';
-const APP_VERSION = '1.5.1-pre';
+const APP_VERSION = '1.5.1';
 const APP_VERSION_CODENAME = 'PROJECT JOHN CONNOR';
 const APP_CODENAME = 'МОНТАЖКА 2.0';
 const ORIGINAL_DOCUMENT_TITLE = `${APP_NAME} v${APP_VERSION}`;
@@ -4581,6 +4581,17 @@ $(document).ready(function() {
         const style = document.documentElement && document.documentElement.style;
         return !!(style && 'contentVisibility' in style);
     })();
+    const isFirefoxFamily = (() => {
+        if (typeof navigator === 'undefined') {
+            return false;
+        }
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (!ua) {
+            return false;
+        }
+        return /firefox|librewolf|waterfox|seamonkey|iceweasel|icecat/.test(ua);
+    })();
+    const shouldManageContentVisibility = supportsContentVisibility && !isFirefoxFamily;
     const supportsContainIntrinsicSize = supportsContentVisibility && (() => {
         if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') {
             return false;
@@ -8519,6 +8530,10 @@ $(document).ready(function() {
     }
 
     function scheduleContentVisibilityUpdate(options = {}) {
+        if (!shouldManageContentVisibility) {
+            contentVisibilityUpdatePending = false;
+            return;
+        }
         if (options && options.force === true) {
             contentVisibilityUpdateScheduled = false;
             applyContentVisibilityWindow({ force: true });
@@ -8535,6 +8550,11 @@ $(document).ready(function() {
     }
 
     function applyContentVisibilityWindow(options = {}) {
+        if (!shouldManageContentVisibility) {
+            contentVisibilityUpdatePending = false;
+            clearContentVisibilityOverrides();
+            return;
+        }
         const force = options && options.force === true;
         if (!force && activeAutoScrollPlan) {
             contentVisibilityUpdatePending = true;
@@ -8600,6 +8620,19 @@ $(document).ready(function() {
     }
 
     function clearContentVisibilityOverrides() {
+        if (!shouldManageContentVisibility) {
+            if (forcedContentVisibilityIndices && forcedContentVisibilityIndices.size) {
+                forcedContentVisibilityIndices.forEach(idx => {
+                    const el = subtitleElements && idx >= 0 && idx < subtitleElements.length ? subtitleElements[idx] : null;
+                    if (el && el.style) {
+                        el.style.removeProperty('content-visibility');
+                    }
+                });
+            }
+            forcedContentVisibilityIndices = new Set();
+            contentVisibilityUpdatePending = false;
+            return;
+        }
         if (!forcedContentVisibilityIndices || forcedContentVisibilityIndices.size === 0) {
             contentVisibilityUpdatePending = false;
             return;
