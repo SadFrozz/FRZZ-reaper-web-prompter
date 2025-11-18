@@ -11992,6 +11992,21 @@ $(document).ready(function() {
         return { actor: actorRaw, rolesPart: rolesPartRaw };
     }
 
+    function looksLikeStandaloneActorLine(line) {
+        if (!line) return false;
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        if (/[,:;\t]/.test(trimmed)) return false;
+        const tokens = trimmed.split(/\s+/).filter(Boolean);
+        if (tokens.length !== 1) return false;
+        const token = tokens[0];
+        const normalized = normalizeTokenForLengthCheck(token);
+        if (!normalized || normalized.length < 2) return false;
+        const hasLowercase = /[a-zа-яё]/.test(token);
+        if (hasLowercase && token.toUpperCase() !== token) return false;
+        return true;
+    }
+
     function parseActorRoleMapping(rawText) {
         // Support pasted table rows (tabs or multi-space separated columns) and
         // normalize all actor/role strings to UPPER CASE (caps) as requested.
@@ -12032,6 +12047,11 @@ $(document).ready(function() {
             const tokens = (!actor) ? line.split(/\s+/).filter(Boolean) : rolesPart.split(/\s+/).filter(Boolean);
             if (!tokens.length) {
                 parsedLines.push({ actor: '', roles: [], delimiter });
+                continue;
+            }
+
+            if (!actor && !usedContinuation && looksLikeStandaloneActorLine(line)) {
+                pendingActorContinuation = { actor: line.trim(), delimiter: 'auto' };
                 continue;
             }
 
